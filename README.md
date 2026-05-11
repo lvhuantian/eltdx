@@ -1,7 +1,7 @@
 <div align="center">
   <h1>eltdx</h1>
-  <p><strong>通达信在线行情协议的 Python SDK</strong></p>
-  <p>读取 A 股快照、分时、逐笔、K 线、集合竞价、历史 09:25 竞价和复权相关数据。</p>
+  <p><strong>通达信在线行情协议 Python SDK</strong></p>
+  <p>快照、分时、逐笔、K 线、集合竞价、历史 09:25、股本和复权。</p>
   <p>
     <a href="https://pypi.org/project/eltdx/"><img alt="PyPI" src="https://img.shields.io/pypi/v/eltdx?label=pypi&logo=pypi"></a>
     <a href="https://pypi.org/project/eltdx/"><img alt="Python 3.10+" src="https://img.shields.io/badge/Python-3.10%2B-blue"></a>
@@ -10,25 +10,13 @@
   </p>
 </div>
 
-## 简介
-
-`eltdx` 把常用的通达信在线行情协议封装成一个 `TdxClient`。你不需要安装通达信客户端，也不需要自己处理 socket、协议包和字段换算。
-
-它主要解决三件事：
-
-- 常用行情接口直接调用：快照、分时、逐笔、K 线、集合竞价、历史 `09:25`。
-- 返回结构尽量稳定：结果是 dataclass，时间是 `date` / `datetime`，价格同时保留浮点值和 `*_milli` 整数值。
-- 连接更省心：内置默认服务器列表，支持连接池、批量快照分发和可选测速选优。
-
-它不是财报 / F10 / 公告下载器，也不读取本地 `vipdoc`、`.day`、`.lc1` 文件。当前重点是沪深北市场的在线行情数据。
-
 ## 安装
 
 ```bash
 python -m pip install eltdx
 ```
 
-源码开发：
+源码安装：
 
 ```bash
 git clone https://github.com/electkismet/eltdx.git
@@ -36,11 +24,11 @@ cd eltdx
 python -m pip install -e ".[dev]"
 ```
 
-要求 Python `3.10+`。
+Python `3.10+`。
 
-## 快速开始
+## 示例
 
-### 快照行情
+### 快照
 
 ```python
 from eltdx import TdxClient
@@ -52,19 +40,15 @@ for quote in quotes:
     print(quote.code, quote.last_price, quote.last_close_price, quote.server_time)
 ```
 
-### K 线
+### K 线转 JSON
 
 ```python
 from eltdx import TdxClient, to_jsonable
 
 with TdxClient() as client:
-    kline = client.get_kline("sz000001", "day", count=5)
+    payload = to_jsonable(client.get_kline("sz000001", "day", count=5))
 
-print(kline.count)
-print(kline.items[-1].close_price)
-
-# 需要给 Web API、CLI 或 MCP 工具返回时，可以转成可 JSON 序列化结构。
-payload = to_jsonable(kline)
+print(payload["count"])
 print(payload["items"][-1])
 ```
 
@@ -97,9 +81,18 @@ print(row.price, row.volume, row.amount)
 
 更完整的参数和字段说明见 [API_REFERENCE.md](docs/API_REFERENCE.md) 和 [FIELD_REFERENCE.md](docs/FIELD_REFERENCE.md)。
 
+## 边界
+
+| 覆盖 | 不覆盖 |
+| --- | --- |
+| 沪深北在线行情 | 财报 / F10 / 公告下载解析 |
+| 快照、分时、逐笔、K 线 | 本地 `vipdoc`、`.day`、`.lc1` 文件解析 |
+| 集合竞价、历史 09:25 | 港美股行情 |
+| 股本变化、复权因子 | 交易下单 |
+
 ## 服务器
 
-不传服务器时，`eltdx` 会使用包内的 `tdx_server.json`。这个文件只保留必要字段，列表按最近一次本地测速结果从快到慢排列。
+不传服务器时，默认使用包内 `tdx_server.json`。列表已按最近一次本地测速结果从快到慢排列。
 
 ```python
 from eltdx import TdxClient
@@ -109,14 +102,14 @@ with TdxClient() as client:
     print(quote.last_price)
 ```
 
-如果你希望按当前网络重新测速，可以打开 `probe_hosts=True`。测速只在创建 client 时发生，不会每次请求都测。
+需要按当前网络重新测速时，打开 `probe_hosts=True`。测速只在创建 client 时发生。
 
 ```python
 with TdxClient(probe_hosts=True) as client:
     print(client.get_quote("sz000001")[0].last_price)
 ```
 
-也可以手动传服务器：
+手动指定服务器：
 
 ```python
 hosts = ["116.205.183.150:7709", "116.205.171.132:7709"]
@@ -124,8 +117,6 @@ hosts = ["116.205.183.150:7709", "116.205.171.132:7709"]
 with TdxClient(hosts=hosts, pool_size=2, timeout=8.0) as client:
     print(client.get_quote(["sz000001", "sh600000"]))
 ```
-
-常用初始化参数：
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -138,27 +129,23 @@ with TdxClient(hosts=hosts, pool_size=2, timeout=8.0) as client:
 
 ## MCP
 
-`eltdx` 带了一个可选的 MCP server。普通 SDK 使用不需要安装 MCP 依赖；只有需要给 MCP 客户端或 Agent 调用时再安装 extra。
+普通 SDK 不依赖 MCP。需要给 MCP 客户端或 Agent 调用时再安装 extra：
 
 ```bash
 python -m pip install "eltdx[mcp]"
 eltdx-mcp
 ```
 
-当前暴露两个工具：
-
 | 工具 | 作用 |
 | --- | --- |
 | `tdx_get_kline` | 读取一页 K 线，返回可 JSON 序列化结构 |
 | `tdx_get_quote` | 读取一只或多只证券的实时行情快照 |
 
-后续如果要加分时、逐笔或竞价工具，也会继续放在同一个 `eltdx-mcp` 服务里。
-
-## 容易误解的地方
+## 注意
 
 ### `get_count()` 不是股票总数
 
-`get_count("sh")` 读的是通达信代码表条目数，不是股票数量。只关心 A 股时，用：
+`get_count("sh")` 读的是通达信代码表条目数，不是股票数量。A 股数量和列表用：
 
 ```python
 client.get_a_share_count("sh")
@@ -167,7 +154,7 @@ client.get_a_share_codes_all()
 
 ### `get_codes()` 不只返回股票
 
-底层代码表会混有股票、指数、ETF、基金、债券回购、板块分类项等。常用过滤方法有：
+底层代码表会混有股票、指数、ETF、基金、债券回购、板块分类项等。常用过滤：
 
 ```python
 client.get_a_share_codes_all()
@@ -177,11 +164,11 @@ client.get_index_codes_all()
 
 ### 代码建议带市场前缀
 
-推荐写完整代码，例如 `sz000001`、`sh600000`、`bj920001`。部分接口可以自动补前缀，但完整代码更少歧义。
+推荐写完整代码，例如 `sz000001`、`sh600000`、`bj920001`。
 
 ### 原始协议数据可以保留
 
-排查协议解析问题时，可以打开 `include_raw=True`：
+排查协议解析问题时用 `include_raw=True`：
 
 ```python
 with TdxClient() as client:
