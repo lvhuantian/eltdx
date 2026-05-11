@@ -61,7 +61,7 @@ print(row.price, row.volume, row.amount)
 | 分时 | `get_minute()` / `get_history_minute()` | 实时分时和历史分时 |
 | 逐笔 | `get_trades()` / `get_trades_all()` | 实时逐笔、历史逐笔、自动翻页 |
 | K 线 | `get_kline()` / `get_kline_all()` | 支持分钟、日、周、月等周期 |
-| 复权 K 线 | `get_adjusted_kline()` / `get_adjusted_kline_all()` | 支持前复权 `qfq` 和后复权 `hfq` |
+| 复权 K 线 | `get_adjusted_kline()` / `get_adjusted_kline_all()` | 支持前复权和后复权 |
 | 集合竞价 | `get_call_auction()` | 集合竞价序列 |
 | 历史 09:25 | `get_auction_0925()` | 快速定位指定交易日 09:25 那一笔 |
 | 公司行为 / 股本 | `get_gbbq()` / `get_xdxr()` / `get_equity()` / `get_factors()` | 除权除息、股本变化、复权因子 |
