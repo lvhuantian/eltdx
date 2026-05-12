@@ -13,6 +13,18 @@
 pip install eltdx
 ```
 
+已安装过旧版本时：
+
+```bash
+pip install -U eltdx
+```
+
+需要 MCP 工具时：
+
+```bash
+pip install -U "eltdx[mcp]"
+```
+
 需要 Python 3.10 或更高版本。
 
 ## 快速示例
