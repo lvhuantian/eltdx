@@ -7,19 +7,13 @@
 [![Build](https://img.shields.io/github/actions/workflow/status/electkismet/eltdx/ci.yml?branch=main&label=build)](https://github.com/electkismet/eltdx/actions/workflows/ci.yml)
 [![License](https://img.shields.io/pypi/l/eltdx?label=license)](https://github.com/electkismet/eltdx/blob/main/LICENSE)
 
-## 安装
-
-```bash
-pip install eltdx
-```
-
-已安装过旧版本时：
+## 安装或升级
 
 ```bash
 pip install -U eltdx
 ```
 
-需要 MCP 工具时：
+如果要使用 MCP 工具：
 
 ```bash
 pip install -U "eltdx[mcp]"
