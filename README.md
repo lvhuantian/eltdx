@@ -118,10 +118,19 @@ pip install "eltdx[mcp]"
 eltdx-mcp
 ```
 
-| 工具 | 作用 |
-| --- | --- |
-| `tdx_get_kline` | 读 K 线，返回可 JSON 序列化结构 |
-| `tdx_get_quote` | 读实时行情快照 |
+| 类别 | 工具 | 作用 |
+| --- | --- | --- |
+| 行情 | `tdx_get_quote` | 实时行情快照 |
+| 行情 | `tdx_get_minute` | 实时 / 历史分时 |
+| K 线 | `tdx_get_kline` / `tdx_get_kline_all` | 单页 / 全量 K 线，支持 `qfq`、`hfq` 复权 |
+| 逐笔 | `tdx_get_trades` / `tdx_get_trades_all` | 单页 / 全量逐笔成交 |
+| 竞价 | `tdx_get_auction_0925` / `tdx_get_call_auction` | 历史 `09:25` 竞价笔、实时集合竞价序列 |
+| 代码表 | `tdx_get_count` / `tdx_get_codes` / `tdx_get_code_list` | 市场数量、分页代码表、A 股 / 股票 / ETF / 指数列表 |
+| 股本复权 | `tdx_get_gbbq` / `tdx_get_xdxr` / `tdx_get_factors` | 股本变迁、除权除息、复权因子 |
+| 股本复权 | `tdx_get_equity_changes` / `tdx_get_equity` / `tdx_get_turnover` | 股本变化、指定日期股本、换手率计算 |
+| 衍生 | `tdx_get_trade_minute_kline` | 用逐笔聚合分钟 K 线 |
+
+带 `_all` 的 MCP 工具默认只返回前 `1000` 条，并带 `total`、`start`、`limit` 字段；需要全量时显式传 `limit=null`。
 
 ## 注意
 

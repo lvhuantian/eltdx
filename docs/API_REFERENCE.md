@@ -672,9 +672,9 @@ with TdxClient() as client:
 - 内部维护 `gbbq` 与 `factors` 的**内存缓存**。
 - 适合在同一代码上重复做复权和股本查询。
 
-## 12. MCP 原型
+## 12. MCP
 
-当前提供一个最小 MCP server 原型，先暴露 K 线和行情快照两个工具，用于 Agent / MCP 客户端读取 A 股行情。
+`eltdx-mcp` 把 SDK 里适合 Agent 调用的行情、代码表、逐笔竞价、股本复权能力包装成 MCP 工具。普通 SDK 使用不依赖 MCP。
 
 安装：
 
@@ -687,6 +687,33 @@ python -m pip install "eltdx[mcp]"
 ```bash
 eltdx-mcp
 ```
+
+工具一览：
+
+| 类别 | 工具 | 作用 |
+| --- | --- | --- |
+| 行情 | `tdx_get_quote` | 实时行情快照 |
+| 行情 | `tdx_get_minute` | 实时 / 历史分时 |
+| K 线 | `tdx_get_kline` | 一页 K 线，支持股票 / 指数和复权参数 |
+| K 线 | `tdx_get_kline_all` | 自动翻页读取全量 K 线 |
+| 逐笔 | `tdx_get_trades` | 一页实时 / 历史逐笔 |
+| 逐笔 | `tdx_get_trades_all` | 自动翻页读取全量逐笔 |
+| 竞价 | `tdx_get_auction_0925` | 从历史逐笔里定位 `09:25` 竞价笔 |
+| 竞价 | `tdx_get_call_auction` | 实时集合竞价序列 |
+| 代码表 | `tdx_get_count` | 单市场代码表 / 股票 / A 股数量 |
+| 代码表 | `tdx_get_codes` | 单市场分页代码表 |
+| 代码表 | `tdx_get_code_list` | A 股、股票、ETF、指数代码列表 |
+| 股本复权 | `tdx_get_gbbq` | 股本变迁原始记录 |
+| 股本复权 | `tdx_get_xdxr` | 除权除息记录 |
+| 股本复权 | `tdx_get_equity_changes` | 流通股本 / 总股本变化序列 |
+| 股本复权 | `tdx_get_equity` | 指定日期有效股本记录 |
+| 股本复权 | `tdx_get_turnover` | 按成交量和流通股本计算换手率 |
+| 股本复权 | `tdx_get_factors` | 前复权 / 后复权因子序列 |
+| 衍生 | `tdx_get_trade_minute_kline` | 用逐笔聚合分钟 K 线 |
+
+通用参数：多数工具都支持 `host`、`timeout`、`probe_hosts`。不传 `host` 时使用包内默认服务器列表；`probe_hosts=True` 会在启动时按当前网络重新测速。
+
+输出规模：`tdx_get_kline_all`、`tdx_get_trades_all`、`tdx_get_factors`、`tdx_get_code_list` 默认 `limit=1000`，返回里会带 `total`、`start`、`limit`、`count`。需要全量时显式传 `limit=null`。
 
 ### `tdx_get_kline`
 
@@ -701,6 +728,7 @@ eltdx-mcp
 | `kind` | `str` | `stock` | `stock` 或 `index` |
 | `adjust` | `str | None` | `None` | `None` / `none` / `qfq` / `hfq`；复权只支持股票 K 线 |
 | `include_raw` | `bool` | `False` | 是否返回原始 frame/payload 十六进制 |
+| `host` | `str | None` | `None` | 指定单个 TDX 服务器 |
 | `timeout` | `float` | `8.0` | socket 请求超时秒数 |
 | `probe_hosts` | `bool` | `False` | 是否启动时对候选服务器重新测速 |
 
@@ -733,7 +761,7 @@ eltdx-mcp
 
 - MCP server 依赖是可选依赖，普通 SDK 使用不受影响。
 - 工具逻辑也可以在 Python 里直接调用：`from eltdx.mcp_tools import get_kline_data`。
-- 当前 MCP 原型只暴露 K 线和快照；后续可以按同样模式扩展分时、竞价等工具。
+- MCP 工具返回的是 JSON-friendly `dict`，日期时间会转成 ISO 字符串。
 
 ### `tdx_get_quote`
 
@@ -742,6 +770,7 @@ eltdx-mcp
 | 参数 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `codes` | `str` | 必填 | 单个代码或逗号分隔代码，例如 `sz000001,sh600000` |
+| `host` | `str | None` | `None` | 指定单个 TDX 服务器 |
 | `timeout` | `float` | `8.0` | socket 请求超时秒数 |
 | `pool_size` | `int` | `2` | 连接池大小，批量快照会在连接间分发 |
 | `probe_hosts` | `bool` | `False` | 是否启动时对候选服务器重新测速 |

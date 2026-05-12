@@ -30,7 +30,7 @@ class _FakeFastMCP:
         return self._tools
 
 
-def test_mcp_server_registers_kline_and_quote_tools(monkeypatch) -> None:
+def test_mcp_server_registers_market_data_tools(monkeypatch) -> None:
     fastmcp_module = types.ModuleType("mcp.server.fastmcp")
     fastmcp_module.FastMCP = _FakeFastMCP
     monkeypatch.setitem(sys.modules, "mcp", types.ModuleType("mcp"))
@@ -42,5 +42,23 @@ def test_mcp_server_registers_kline_and_quote_tools(monkeypatch) -> None:
         tools = await server.list_tools()
         return sorted(tool.name for tool in tools)
 
-    assert asyncio.run(run()) == ["tdx_get_kline", "tdx_get_quote"]
-
+    assert asyncio.run(run()) == [
+        "tdx_get_auction_0925",
+        "tdx_get_call_auction",
+        "tdx_get_code_list",
+        "tdx_get_codes",
+        "tdx_get_count",
+        "tdx_get_equity",
+        "tdx_get_equity_changes",
+        "tdx_get_factors",
+        "tdx_get_gbbq",
+        "tdx_get_kline",
+        "tdx_get_kline_all",
+        "tdx_get_minute",
+        "tdx_get_quote",
+        "tdx_get_trade_minute_kline",
+        "tdx_get_trades",
+        "tdx_get_trades_all",
+        "tdx_get_turnover",
+        "tdx_get_xdxr",
+    ]
