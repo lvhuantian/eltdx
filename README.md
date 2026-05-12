@@ -1,6 +1,6 @@
 # eltdx
 
-通达信在线行情协议 Python 库。可以拿沪深北 A 股的实时快照、分时、逐笔、K 线、集合竞价、历史 09:25 竞价、股本变化和复权因子。
+通达信在线行情协议 Python 库。可以拿沪深北 A 股的实时快照、分时、逐笔、K 线、集合竞价、历史 09:25 竞价、股本变化和复权因子，支持MCP工具
 
 [![PyPI](https://img.shields.io/pypi/v/eltdx?label=pypi&logo=pypi)](https://pypi.org/project/eltdx/)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue)](https://pypi.org/project/eltdx/)
