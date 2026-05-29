@@ -65,31 +65,19 @@ jobs:
           name: dist
           path: dist/
 
-      - name: Extract release notes from changelog
+      - name: Prepare release notes
         run: |
           python - <<'PY'
           from pathlib import Path
           import os
 
-          version = os.environ["GITHUB_REF_NAME"].removeprefix("v")
-          changelog = Path("CHANGELOG.md").read_text(encoding="utf-8").splitlines()
-          target_header = f"## {version} - "
-          collected: list[str] = []
-          capture = False
+          tag = os.environ["GITHUB_REF_NAME"]
+          if tag == "v1.0.0":
+            notes = Path("docs/UPDATE_FROM_0_5_1.md").read_text(encoding="utf-8")
+          else:
+            notes = f"# {tag}\n\n请参考仓库文档和提交记录查看本次更新。\n"
 
-          for line in changelog:
-            if line.startswith(target_header):
-              capture = True
-            elif capture and line.startswith("## "):
-              break
-
-            if capture:
-              collected.append(line)
-
-          if not collected:
-            raise SystemExit(f"Unable to find changelog section for {version}")
-
-          Path("RELEASE_NOTES.md").write_text("\n".join(collected).strip() + "\n", encoding="utf-8")
+          Path("RELEASE_NOTES.md").write_text(notes.strip() + "\n", encoding="utf-8")
           PY
 
       - name: Create GitHub Release

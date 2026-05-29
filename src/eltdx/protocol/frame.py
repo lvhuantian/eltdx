@@ -1,3 +1,5 @@
+"""7709 TCP frame encoding and decoding."""
+
 from __future__ import annotations
 
 import socket
@@ -5,11 +7,12 @@ import struct
 import zlib
 from dataclasses import dataclass
 
-from ..exceptions import ConnectionClosedError, ProtocolError
+from eltdx.exceptions import ConnectionClosedError, ProtocolError
+
 from .constants import CONTROL_DEFAULT, PREFIX, PREFIX_RESP
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class RequestFrame:
     msg_id: int
     msg_type: int
@@ -21,7 +24,7 @@ class RequestFrame:
         return struct.pack("<BIBHHH", PREFIX, self.msg_id, self.control, length, length, self.msg_type) + self.data
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class ResponseFrame:
     control: int
     msg_id: int
@@ -30,6 +33,7 @@ class ResponseFrame:
     length: int
     data: bytes
     raw: bytes
+    response_header_reserved: int = 0
 
 
 def read_exact(sock: socket.socket, size: int) -> bytes:
@@ -56,20 +60,21 @@ def read_response_frame(sock: socket.socket) -> bytes:
 def decode_response(raw: bytes) -> ResponseFrame:
     if len(raw) < 16:
         raise ProtocolError(f"invalid response length: {len(raw)}")
+    if raw[:4] != PREFIX_RESP:
+        raise ProtocolError(f"invalid response prefix: {raw[:4].hex()}")
 
     control = raw[4]
     msg_id = int.from_bytes(raw[5:9], "little", signed=False)
+    reserved = raw[9]
     msg_type = int.from_bytes(raw[10:12], "little", signed=False)
     zip_length = int.from_bytes(raw[12:14], "little", signed=False)
     length = int.from_bytes(raw[14:16], "little", signed=False)
-    data = raw[16:]
+    payload = raw[16:]
 
-    if len(data) != zip_length:
-        raise ProtocolError(f"zip length mismatch: expected {zip_length}, got {len(data)}")
+    if len(payload) != zip_length:
+        raise ProtocolError(f"zip length mismatch: expected {zip_length}, got {len(payload)}")
 
-    if zip_length != length:
-        data = zlib.decompress(data)
-
+    data = zlib.decompress(payload) if zip_length != length else payload
     if len(data) != length:
         raise ProtocolError(f"decoded length mismatch: expected {length}, got {len(data)}")
 
@@ -81,5 +86,5 @@ def decode_response(raw: bytes) -> ResponseFrame:
         length=length,
         data=data,
         raw=raw,
+        response_header_reserved=reserved,
     )
-

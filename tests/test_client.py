@@ -1,0 +1,844 @@
+from datetime import date, datetime
+from queue import Queue
+
+from eltdx import Client, HelperApi, TdxClient, __version__, to_json, to_jsonable
+from eltdx import WorkdayService
+from eltdx.api import ping
+from eltdx.exceptions import ResponseTimeoutError
+from eltdx.hosts import FALLBACK_HOSTS, DEFAULT_HOSTS, load_server_config, load_server_hosts
+from eltdx.protocol.constants import TYPE_REFRESH_STREAM
+from eltdx.protocol.frame import ResponseFrame
+from eltdx.protocol import COMMANDS, decode, encode, required_commands
+from eltdx.transport import PooledSocketTransport, SocketTransport
+
+
+def test_version_is_defined() -> None:
+    assert __version__ == "1.0.0"
+
+
+def test_packaged_server_hosts_load_from_json() -> None:
+    config = load_server_config()
+
+    assert config["schema_version"] == 1
+    assert load_server_hosts() == list(DEFAULT_HOSTS)
+    assert DEFAULT_HOSTS == FALLBACK_HOSTS
+
+
+def test_client_ping_returns_pong() -> None:
+    assert Client().ping() == "pong"
+    assert isinstance(TdxClient().transport, PooledSocketTransport)
+    assert TdxClient.in_memory().ping() == "pong"
+    assert isinstance(TdxClient.in_memory().helpers, HelperApi)
+
+
+def test_api_ping_uses_default_client() -> None:
+    assert ping() == "pong"
+
+
+def test_protocol_round_trip() -> None:
+    assert decode(encode("hello")) == "hello"
+
+
+def test_command_registry_contains_7709_documents() -> None:
+    assert len(COMMANDS) == 19
+    assert COMMANDS["snapshots"].hex == "0x054c"
+    assert COMMANDS["security_list"].document == "0x044d-代码表分页接口.md"
+    assert {item.name for item in required_commands()} >= {"handshake", "heartbeat", "snapshots", "klines"}
+
+
+def test_business_api_uses_command_numbers() -> None:
+    client = TdxClient.in_memory()
+    assert client.quotes.get_snapshots(["sz000001"])["command"] == "0x054c"
+    assert client.quotes.list_by_category("沪深A股", sort_by="涨幅")["command"] == "0x054b"
+    assert client.quotes.poll_push() is None
+    assert client.quotes.drain_pushes() == []
+    assert client.bars.get("sz000001", period="day")["payload"]["period"] == "day"
+    assert client.minutes.today("sz000001")["command"] == "0x0537"
+
+
+def test_compat_constructor_accepts_single_host() -> None:
+    client = TdxClient(host="127.0.0.1:7709", timeout=0.1, batch_size=999, heartbeat_interval=None)
+
+    assert isinstance(client.transport, PooledSocketTransport)
+    assert client.transport.hosts == ("127.0.0.1:7709",)
+    assert client.transport.heartbeat_interval is None
+    assert client.batch_size == 80
+
+
+def test_from_hosts_preserves_heartbeat_setting() -> None:
+    client = TdxClient.from_hosts(["127.0.0.1:7709"], timeout=0.1, heartbeat_interval=None)
+
+    assert client.timeout == 0.1
+    assert client.f10.timeout == 0.1
+    assert client.heartbeat_interval is None
+    assert client.transport.heartbeat_interval is None
+
+
+def test_compat_get_quote_batches_requests() -> None:
+    class FakeTransport:
+        def __init__(self) -> None:
+            self.payloads = []
+
+        def connect(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+        def request(self, command: str) -> str:
+            return "pong"
+
+        def execute(self, command: int, payload=None):
+            assert command == 0x054C
+            self.payloads.append(payload)
+            return [f"quote:{code}" for code in payload["codes"]]
+
+    transport = FakeTransport()
+    client = TdxClient(transport=transport, batch_size=2)
+
+    assert client.get_quote(["sz000001", "sh600000", "sz000002"]) == [
+        "quote:sz000001",
+        "quote:sh600000",
+        "quote:sz000002",
+    ]
+    assert [payload["codes"] for payload in transport.payloads] == [["sz000001", "sh600000"], ["sz000002"]]
+
+
+def test_compat_code_filters_use_security_categories() -> None:
+    from eltdx.models import SecurityCode
+
+    def item(exchange: str, code: str, category: str) -> SecurityCode:
+        return SecurityCode(
+            exchange=exchange,
+            market_id={"sz": 0, "sh": 1, "bj": 2}[exchange],
+            code=code,
+            name=code,
+            multiple=1,
+            decimal=2,
+            previous_close_price=0.0,
+            volume_ratio_base=0.0,
+            unknown0_raw=b"",
+            previous_close_raw=b"",
+            unknown3_raw=b"",
+            category=category,
+            category_reason="test",
+            board="none",
+            board_reason="test",
+        )
+
+    pages = {
+        "sh": [item("sh", "600000", "a_share"), item("sh", "900901", "b_share")],
+        "sz": [item("sz", "159915", "etf"), item("sz", "399001", "index")],
+        "bj": [item("bj", "920001", "a_share")],
+    }
+
+    class FakeTransport:
+        def connect(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+        def request(self, command: str) -> str:
+            return "pong"
+
+        def execute(self, command: int, payload=None):
+            assert command == 0x044D
+            return pages[payload["market"]] if payload["start"] == 0 else []
+
+    transport = FakeTransport()
+    client = TdxClient(transport=transport)
+
+    assert client.get_stock_codes_all() == ["sh600000", "sh900901", "bj920001"]
+    assert client.get_a_share_codes_all() == ["sh600000", "bj920001"]
+    assert client.get_etf_codes_all() == ["sz159915"]
+    assert client.get_index_codes_all() == ["sz399001"]
+    assert client.get_a_share_codes_all() == ["sh600000", "bj920001"]
+
+
+def test_static_code_cache_can_refresh() -> None:
+    from eltdx.models import SecurityCode
+
+    def item(exchange: str, code: str) -> SecurityCode:
+        return SecurityCode(
+            exchange=exchange,
+            market_id={"sz": 0, "sh": 1, "bj": 2}[exchange],
+            code=code,
+            name=code,
+            multiple=1,
+            decimal=2,
+            previous_close_price=0.0,
+            volume_ratio_base=0.0,
+            unknown0_raw=b"",
+            previous_close_raw=b"",
+            unknown3_raw=b"",
+            category="a_share",
+            category_reason="test",
+            board="none",
+            board_reason="test",
+        )
+
+    class FakeTransport:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def connect(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+        def request(self, command: str) -> str:
+            return "pong"
+
+        def execute(self, command: int, payload=None):
+            if command == 0x044E:
+                self.calls += 1
+                return 10 + self.calls
+            if command == 0x044D:
+                self.calls += 1
+                return [item(payload["market"], f"00000{self.calls}")] if payload["start"] == 0 else []
+            raise AssertionError(f"unexpected command: {command:#x}")
+
+    transport = FakeTransport()
+    client = TdxClient(transport=transport)
+
+    assert client.get_count("sz") == 11
+    assert client.get_count("sz") == 11
+    assert client.get_count("sz", refresh=True) == 12
+
+    first = client.get_codes_all("sz")
+    second = client.get_codes_all("sz")
+    refreshed = client.get_codes_all("sz", refresh=True)
+
+    assert first == second
+    assert refreshed != first
+
+
+def test_compat_kline_arg_order_and_adjust_payload() -> None:
+    class FakeTransport:
+        def __init__(self) -> None:
+            self.payload = None
+
+        def connect(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+        def request(self, command: str) -> str:
+            return "pong"
+
+        def execute(self, command: int, payload=None):
+            assert command == 0x052D
+            self.payload = payload
+            return payload
+
+    transport = FakeTransport()
+    client = TdxClient(transport=transport)
+
+    assert client.get_kline("day", "sz000001", count=5, adjust="qfq")["code"] == "sz000001"
+    assert transport.payload["period"] == "day"
+    assert transport.payload["adjust"] == "qfq"
+    assert client.get_kline("sz000001", "day", count=5)["period"] == "day"
+
+
+def test_compat_get_gbbq_forwards_include_raw() -> None:
+    class FakeTransport:
+        def connect(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+        def request(self, command: str) -> str:
+            return "pong"
+
+        def execute(self, command: int, payload=None):
+            assert command == 0x000F
+            return payload
+
+    result = TdxClient(transport=FakeTransport()).get_gbbq("sz000001", include_raw=True)
+
+    assert result == {"code": "sz000001", "include_raw": True}
+
+
+def test_gbbq_cache_skips_include_raw_and_allows_refresh() -> None:
+    class FakeTransport:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def connect(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+        def request(self, command: str) -> str:
+            return "pong"
+
+        def execute(self, command: int, payload=None):
+            assert command == 0x000F
+            self.calls += 1
+            return {"call": self.calls, "payload": dict(payload)}
+
+    transport = FakeTransport()
+    client = TdxClient(transport=transport)
+
+    assert client.get_gbbq("000001")["call"] == 1
+    assert client.get_gbbq("sz000001")["call"] == 1
+    assert client.get_gbbq("sz000001", include_raw=True)["call"] == 2
+    assert client.get_gbbq("sz000001")["call"] == 1
+    assert client.get_gbbq("sz000001", refresh=True)["call"] == 3
+
+
+def test_finance_batch_cache_and_clear_cache() -> None:
+    from eltdx.models import FinanceBatch
+
+    class FakeTransport:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def connect(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+        def request(self, command: str) -> str:
+            return "pong"
+
+        def execute(self, command: int, payload=None):
+            assert command == 0x0010
+            self.calls += 1
+            return FinanceBatch(records=(), raw_payload=str(self.calls).encode())
+
+    transport = FakeTransport()
+    client = TdxClient(transport=transport)
+
+    assert client.get_finance_batch(["000001"]).raw_payload == b"1"
+    assert client.get_finance_batch(["sz000001"]).raw_payload == b"1"
+    assert client.get_finance_batch(["sz000001"], refresh=True).raw_payload == b"2"
+    client.clear_cache()
+    assert client.get_finance_batch(["sz000001"]).raw_payload == b"3"
+
+
+def test_workday_service_weekday_fallback() -> None:
+    service = WorkdayService()
+
+    assert service.normalize("2026-05-27") == date(2026, 5, 27)
+    assert service.text("20260527") == "2026-05-27"
+    assert service.is_workday("2026-05-30") is False
+    assert service.next_workday("2026-05-30") == date(2026, 6, 1)
+    assert service.previous_workday("2026-05-30") == date(2026, 5, 29)
+    assert service.range("2026-05-29", "2026-06-02") == [
+        date(2026, 5, 29),
+        date(2026, 6, 1),
+        date(2026, 6, 2),
+    ]
+
+
+def test_workday_service_uses_client_daily_bars() -> None:
+    from eltdx.models import KlineBar, KlineSeries
+
+    def bar(day: date) -> KlineBar:
+        return KlineBar(
+            time=datetime(day.year, day.month, day.day, 15, 0),
+            open=1.0,
+            close=1.0,
+            high=1.0,
+            low=1.0,
+            open_price_milli=1000,
+            close_price_milli=1000,
+            high_price_milli=1000,
+            low_price_milli=1000,
+            last_close_price_milli=1000,
+            volume_raw=0,
+            amount_raw=0,
+            volume_wire_value=0,
+            volume_lots=0,
+            amount=0,
+            open_delta_raw=0,
+            close_delta_raw=0,
+            high_delta_raw=0,
+            low_delta_raw=0,
+        )
+
+    class FakeClient:
+        def get_kline_all(self, *args, **kwargs):
+            return KlineSeries(
+                exchange="sh",
+                market_id=1,
+                code="000001",
+                period_raw=4,
+                period_param_raw=1,
+                period_name="day",
+                start=0,
+                request_count=3,
+                adjust_mode_raw=0,
+                adjust_mode="none",
+                anchor_date_raw=0,
+                anchor_date=None,
+                bars=(bar(date(2026, 5, 27)), bar(date(2026, 5, 29)), bar(date(2026, 6, 1))),
+            )
+
+    service = WorkdayService(FakeClient())
+
+    assert service.refresh() == 3
+    assert service.is_workday("2026-05-28") is False
+    assert service.next_workday("2026-05-28") == date(2026, 5, 29)
+    assert service.previous_workday("2026-05-28") == date(2026, 5, 27)
+    assert service.range("2026-05-27", "2026-06-01") == [
+        date(2026, 5, 27),
+        date(2026, 5, 29),
+        date(2026, 6, 1),
+    ]
+
+
+def test_compat_corporate_derived_helpers() -> None:
+    from eltdx.models import CapitalChangeBlock, CapitalChangeRecord
+
+    def record(category: int, when: date, c1: float, c2: float, c3: float, c4: float) -> CapitalChangeRecord:
+        return CapitalChangeRecord(
+            exchange="sz",
+            market_id=0,
+            code="000001",
+            reserved_7=0,
+            date_raw=int(when.strftime("%Y%m%d")),
+            date=when,
+            category_raw=category,
+            category_name={1: "除权除息", 5: "股本变化"}.get(category),
+            c1_raw=b"",
+            c2_raw=b"",
+            c3_raw=b"",
+            c4_raw=b"",
+            c1_float=c1,
+            c2_float=c2,
+            c3_float=c3,
+            c4_float=c4,
+            c1_value=c1,
+            c2_value=c2,
+            c3_value=c3,
+            c4_value=c4,
+        )
+
+    block = CapitalChangeBlock(
+        exchange="sz",
+        market_id=0,
+        code="000001",
+        block_count=1,
+        records=(
+            record(1, date(2024, 6, 1), 1.0, 8.0, 2.0, 3.0),
+            record(5, date(2024, 7, 1), 0.0, 0.0, 100_000_000.0, 200_000_000.0),
+        ),
+    )
+
+    class FakeTransport:
+        def connect(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+        def request(self, command: str) -> str:
+            return "pong"
+
+        def execute(self, command: int, payload=None):
+            assert command == 0x000F
+            return block
+
+    client = TdxClient(transport=FakeTransport())
+
+    xdxr = client.get_xdxr("sz000001")
+    assert len(xdxr) == 1
+    assert xdxr[0].fenhong == 1.0
+    assert xdxr[0].songzhuangu == 2.0
+    equity = client.get_equity("sz000001", "2024-07-02")
+    assert equity.float_shares == 100_000_000
+    assert equity.total_shares == 200_000_000
+    assert client.get_turnover("sz000001", 10_000, on="2024-07-02", unit="hand") == 1.0
+
+
+def test_local_factor_response_and_adjustment() -> None:
+    from eltdx.equity import apply_factors_to_kline, build_factor_response
+    from eltdx.models import KlineBar, KlineSeries, XdxrRecord
+
+    def bar(when: datetime, close_milli: int, last_close_milli: int | None) -> KlineBar:
+        return KlineBar(
+            time=when,
+            open=close_milli / 1000,
+            close=close_milli / 1000,
+            high=close_milli / 1000,
+            low=close_milli / 1000,
+            open_price_milli=close_milli,
+            close_price_milli=close_milli,
+            high_price_milli=close_milli,
+            low_price_milli=close_milli,
+            last_close_price_milli=last_close_milli,
+            volume_raw=0,
+            amount_raw=0,
+            volume_wire_value=0,
+            volume_lots=0,
+            amount=0,
+            open_delta_raw=0,
+            close_delta_raw=0,
+            high_delta_raw=0,
+            low_delta_raw=0,
+        )
+
+    series = KlineSeries(
+        exchange="sz",
+        market_id=0,
+        code="000001",
+        period_raw=4,
+        period_param_raw=1,
+        period_name="day",
+        start=0,
+        request_count=2,
+        adjust_mode_raw=0,
+        adjust_mode="none",
+        anchor_date_raw=0,
+        anchor_date=None,
+        bars=(
+            bar(datetime(2024, 5, 31, 15, 0), 10000, 9000),
+            bar(datetime(2024, 6, 3, 15, 0), 8000, 10000),
+        ),
+    )
+    xdxr = XdxrRecord(
+        code="sz000001",
+        date=date(2024, 6, 1),
+        category=1,
+        category_name="除权除息",
+        fenhong=1.0,
+        peigujia=0.0,
+        songzhuangu=2.0,
+        peigu=0.0,
+    )
+
+    factors = build_factor_response(series, [xdxr])
+    assert factors.count == 2
+    assert factors.items[1].pre_last_close_price_milli == 8250
+    assert factors.items[0].qfq_factor == 0.825
+
+    adjusted = apply_factors_to_kline(series, factors, adjust="qfq")
+    assert adjusted.adjust_mode == "local_qfq"
+    assert adjusted.bars[0].close_price_milli == 8250
+
+
+def test_compat_trades_all_pages_until_short_page() -> None:
+    from eltdx.models import TradePage, TradeTick
+
+    tick = TradeTick(
+        index=0,
+        absolute_index=0,
+        time_minutes=570,
+        time_label="09:30",
+        trade_datetime=None,
+        price=10.0,
+        price_milli=10000,
+        volume=1,
+        order_count=0,
+        status_raw=0,
+        side="buy",
+        price_delta_raw=0,
+        price_acc_raw=1000,
+    )
+
+    class FakeTransport:
+        def connect(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+        def request(self, command: str) -> str:
+            return "pong"
+
+        def execute(self, command: int, payload=None):
+            assert command == 0x0FC5
+            count = 2 if payload["start"] == 0 else 1
+            return TradePage(
+                exchange="sz",
+                market_id=0,
+                code="000001",
+                start=payload["start"],
+                request_count=payload["count"],
+                ticks=tuple(tick for _ in range(count)),
+            )
+
+    page = TdxClient(transport=FakeTransport()).get_trades_all("sz000001", page_size=2)
+
+    assert page.start == 0
+    assert page.request_count == 3
+    assert page.count == 3
+
+
+def test_compat_auction_0925_from_history_trades() -> None:
+    from eltdx.models import TradePage, TradeTick
+
+    tick = TradeTick(
+        index=0,
+        absolute_index=0,
+        time_minutes=9 * 60 + 25,
+        time_label="09:25",
+        trade_datetime=None,
+        price=11.11,
+        price_milli=11110,
+        volume=123,
+        order_count=1,
+        status_raw=2,
+        side="neutral",
+        price_delta_raw=0,
+        price_acc_raw=1111,
+    )
+
+    class FakeTransport:
+        def connect(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+        def request(self, command: str) -> str:
+            return "pong"
+
+        def execute(self, command: int, payload=None):
+            assert command == 0x0FC6
+            return TradePage(
+                exchange="sz",
+                market_id=0,
+                code="000001",
+                start=payload["start"],
+                request_count=payload["count"],
+                ticks=(tick,),
+                trading_date=date(2026, 5, 20),
+            )
+
+    result = TdxClient(transport=FakeTransport()).get_auction_0925("000001", "2026-05-20")
+
+    assert result.code == "sz000001"
+    assert result.has_auction_0925 is True
+    assert result.price == 11.11
+    assert result.amount == 11.11 * 123 * 100
+    assert result.source_mode == "history_ticks_scan"
+
+
+def test_json_helpers_handle_models_and_bytes() -> None:
+    from eltdx.models import QuoteLevel
+
+    value = {"date": date(2026, 5, 20), "level": QuoteLevel(price=1.23, volume=100, price_delta_raw=1), "raw": b"\x01\x02"}
+
+    assert to_jsonable(value) == {
+        "date": "2026-05-20",
+        "level": {"price": 1.23, "volume": 100, "price_delta_raw": 1},
+        "raw": "0102",
+    }
+    assert '"raw": "0102"' in to_json(value)
+
+
+def test_codes_all_pages_until_short_page() -> None:
+    class FakeTransport:
+        def connect(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+        def request(self, command: str) -> str:
+            return "pong"
+
+        def execute(self, command: int, payload=None):
+            assert command == 0x044D
+            start = payload["start"]
+            if start == 0:
+                return ["a", "b"]
+            if start == 2:
+                return ["c"]
+            raise AssertionError(f"unexpected start: {start}")
+
+    assert TdxClient(transport=FakeTransport()).codes.all("sz", page_size=2) == ["a", "b", "c"]
+
+
+def test_bars_all_pages_until_short_page() -> None:
+    from eltdx.models import KlineSeries
+
+    class FakeTransport:
+        def connect(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+        def request(self, command: str) -> str:
+            return "pong"
+
+        def execute(self, command: int, payload=None):
+            assert command == 0x052D
+            start = payload["start"]
+            count = payload["count"]
+            bars = tuple(range(count if start == 0 else 1))
+            return KlineSeries(
+                exchange="sz",
+                market_id=0,
+                code="000001",
+                period_raw=4,
+                period_param_raw=1,
+                period_name="day",
+                start=start,
+                request_count=count,
+                adjust_mode_raw=0,
+                adjust_mode="none",
+                anchor_date_raw=0,
+                anchor_date=None,
+                bars=bars,
+            )
+
+    page = TdxClient(transport=FakeTransport()).bars.all("sz000001", page_size=2)
+
+    assert page.start == 0
+    assert page.request_count == 3
+    assert page.bars == (0, 1, 0)
+
+
+def test_finance_batch_field_filter_is_local() -> None:
+    from eltdx.models import FinanceBatch, FinanceRecord
+
+    class FakeTransport:
+        def connect(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+        def request(self, command: str) -> str:
+            return "pong"
+
+        def execute(self, command: int, payload=None):
+            assert command == 0x0010
+            assert "fields" not in payload
+            record = FinanceRecord(
+                exchange="sz",
+                market_id=0,
+                code="000001",
+                finance_info_raw=b"",
+                liu_tong_gu_ben_raw_float=100.0,
+                province_raw=0,
+                industry_raw=0,
+                updated_date_raw=0,
+                updated_date=None,
+                ipo_date_raw=0,
+                ipo_date=None,
+                zong_gu_ben_raw_float=200.0,
+                guo_jia_gu_raw_float=0.0,
+                fa_qi_ren_fa_ren_gu_raw_float=0.0,
+                fa_ren_gu_raw_float=0.0,
+                b_gu_raw_float=0.0,
+                h_gu_raw_float=0.0,
+                eps_raw=0.0,
+                zong_zi_chan_raw_float=0.0,
+                liu_dong_zi_chan_raw_float=0.0,
+                gu_ding_zi_chan_raw_float=0.0,
+                wu_xing_zi_chan_raw_float=0.0,
+                gu_dong_ren_shu_raw_float=0.0,
+                liu_dong_fu_zhai_raw_float=0.0,
+                chang_qi_fu_zhai_raw_float=0.0,
+                zi_ben_gong_ji_jin_raw_float=0.0,
+                jing_zi_chan_raw_float=0.0,
+                zhu_ying_shou_ru_raw_float=0.0,
+                zhu_ying_li_run_raw_float=0.0,
+                ying_shou_zhang_kuan_raw_float=0.0,
+                ying_ye_li_run_raw_float=0.0,
+                tou_zi_shou_yu_raw_float=0.0,
+                jing_ying_xian_jin_liu_raw_float=0.0,
+                zong_xian_jin_liu_raw_float=0.0,
+                cun_huo_raw_float=0.0,
+                li_run_zong_he_raw_float=0.0,
+                shui_hou_li_run_raw_float=0.0,
+                jing_li_run_raw_float=0.0,
+                wei_fen_li_run_raw_float=0.0,
+                mei_gu_jing_zi_chan_raw_float=0.0,
+                bao_liu_2_raw_float=0.0,
+            )
+            return FinanceBatch(records=(record,))
+
+    selected = TdxClient(transport=FakeTransport()).corporate.finance_batch(["sz000001"], fields=["流通股本", "total_shares"])
+
+    assert selected == [{"full_code": "sz000001", "流通股本": 1_000_000.0, "total_shares": 2_000_000.0}]
+
+
+def test_socket_transport_routes_unmatched_push_frames() -> None:
+    transport = SocketTransport(hosts=["127.0.0.1:1"], timeout=0.1)
+    response = ResponseFrame(
+        control=0,
+        msg_id=0x290000,
+        msg_type=TYPE_REFRESH_STREAM,
+        zip_length=2,
+        length=2,
+        data=bytes.fromhex("9393"),
+        raw=b"",
+    )
+
+    transport._route_response(response)
+
+    assert transport.pending_push_count == 1
+    parsed = transport.poll_push(parse=True)
+    assert parsed.count == 0
+    assert parsed.decoded_payload == b"\x00\x00"
+
+
+def test_socket_transport_routes_matched_response_to_pending_queue() -> None:
+    transport = SocketTransport(hosts=["127.0.0.1:1"], timeout=0.1)
+    response = ResponseFrame(
+        control=0,
+        msg_id=123,
+        msg_type=TYPE_REFRESH_STREAM,
+        zip_length=2,
+        length=2,
+        data=bytes.fromhex("9393"),
+        raw=b"",
+    )
+    pending: Queue = Queue(maxsize=1)
+    transport._pending[(response.msg_id, response.msg_type)] = pending
+
+    transport._route_response(response)
+
+    assert pending.get_nowait() is response
+    assert transport.pending_push_count == 0
+
+
+def test_socket_transport_request_timeout_raises_response_timeout() -> None:
+    class FakeSocket:
+        def sendall(self, data: bytes) -> None:
+            pass
+
+    transport = SocketTransport(hosts=["127.0.0.1:1"], timeout=0.01)
+    transport._socket = FakeSocket()
+    transport._reader_thread = object()
+
+    try:
+        transport._request_locked(TYPE_REFRESH_STREAM, {"codes": ["sz000001"]})
+    except ResponseTimeoutError as exc:
+        assert "0x0547" in str(exc)
+    else:
+        raise AssertionError("expected ResponseTimeoutError")
+
+
+def test_socket_transport_reader_keeps_running_after_timeout() -> None:
+    import socket
+
+    transport = SocketTransport(hosts=["127.0.0.1:1"], timeout=0.1)
+    calls = {"count": 0}
+
+    def fake_read():
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise TimeoutError("idle")
+        transport._stop_reader.set()
+        raise socket.timeout("idle")
+
+    transport._read_response_locked = fake_read
+
+    transport._reader_loop()
+
+    assert calls["count"] == 2
+    assert transport._reader_error is None

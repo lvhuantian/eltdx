@@ -1,65 +1,160 @@
+"""eltdx 对外客户端入口。"""
+
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
-from itertools import cycle
-from threading import Lock
+from collections.abc import Sequence
+from dataclasses import dataclass, field, replace
+from typing import Any
 
-from .adjustment import apply_factors_to_kline, build_factor_response
-from .bse import fetch_bj_codes
-from .equity import compute_turnover, filter_equity_items, pick_equity
-from .exceptions import ProtocolError
-from .hosts import DEFAULT_HOSTS, DEFAULT_PROBE_TIMEOUT, DEFAULT_PROBE_WORKERS, sort_hosts_by_latency, unique_hosts
-from .models import Auction0925Result, CodePage, EquityResponse, FactorResponse, KlineResponse, SecurityCode, TradeResponse
-from .protocol.constants import CODE_PAGE_SIZE, HISTORY_TRADE_PAGE_SIZE, KLINE_PAGE_SIZE, TRADE_PAGE_SIZE
-from .protocol.unit import (
-    add_prefix,
-    is_a_share_entry,
-    is_etf_entry,
-    is_index,
-    is_stock_entry,
-    normalize_exchange,
-    normalize_kline_period,
-    normalize_trading_date,
+from .api.auctions import AuctionApi
+from .api.bars import BarApi
+from .api.codes import CodeApi
+from .api.corporate import CorporateApi
+from .api.limits import LimitApi
+from .api.minutes import MinuteApi
+from .api.quotes import QuoteApi
+from .api.session import SessionApi
+from .api.trades import TradeApi
+from .equity import (
+    apply_factors_to_kline,
+    build_factor_response,
+    compute_turnover,
+    filter_equity_records,
+    filter_xdxr_records,
+    pick_equity,
 )
-from .trade_kline import build_trade_minute_kline
-from .transport import TdxConnection
+from .f10 import F10Client
+from .helpers import HelperApi
+from .models import Auction0925Result, SecurityCode
+from .hosts import DEFAULT_PROBE_TIMEOUT, DEFAULT_PROBE_WORKERS
+from .protocol.commands.klines import normalize_period
+from .protocol.constants import DEFAULT_CODE_PAGE_SIZE
+from .protocol.unit import normalize_code, normalize_market
+from .transport import InMemoryTransport, PooledSocketTransport, SocketTransport, Transport
+from .workday import WorkdayService
+
+DEFAULT_QUOTE_BATCH_SIZE = 80
+DEFAULT_KLINE_PAGE_SIZE = 800
+DEFAULT_TODAY_TRADE_PAGE_SIZE = 1800
+DEFAULT_HISTORY_TRADE_PAGE_SIZE = 2000
 
 
+@dataclass(slots=True)
 class TdxClient:
-    def __init__(
-        self,
-        host: str | None = None,
+    """面向业务能力组织的客户端总入口。
+
+    协议命令号保留在底层 registry 里。使用者调用
+    ``client.quotes.get_snapshots(...)`` 这类业务方法，不需要直接关心
+    ``0x054c`` 这类命令号。
+    """
+
+    transport: Transport | None = None
+    host: str | None = None
+    hosts: Sequence[str] | None = None
+    timeout: float = 8.0
+    pool_size: int = 1
+    batch_size: int = DEFAULT_QUOTE_BATCH_SIZE
+    probe_hosts: bool = False
+    probe_timeout: float = DEFAULT_PROBE_TIMEOUT
+    probe_workers: int = DEFAULT_PROBE_WORKERS
+    heartbeat_interval: float | None = 30.0
+    session: SessionApi = field(init=False)
+    codes: CodeApi = field(init=False)
+    quotes: QuoteApi = field(init=False)
+    bars: BarApi = field(init=False)
+    minutes: MinuteApi = field(init=False)
+    trades: TradeApi = field(init=False)
+    auctions: AuctionApi = field(init=False)
+    corporate: CorporateApi = field(init=False)
+    limits: LimitApi = field(init=False)
+    workdays: WorkdayService = field(init=False)
+    f10: F10Client = field(init=False)
+    helpers: HelperApi = field(init=False)
+    _code_count_cache: dict[str, int] = field(init=False, repr=False)
+    _codes_all_cache: dict[str, list[SecurityCode]] = field(init=False, repr=False)
+    _gbbq_cache: dict[str, Any] = field(init=False, repr=False)
+    _finance_cache: dict[tuple[str, ...], Any] = field(init=False, repr=False)
+
+    @classmethod
+    def from_hosts(
+        cls,
         hosts: list[str] | tuple[str, ...] | None = None,
         *,
         timeout: float = 8.0,
-        pool_size: int = 2,
-        batch_size: int = 80,
+        pool_size: int = 1,
+        batch_size: int = DEFAULT_QUOTE_BATCH_SIZE,
         probe_hosts: bool = False,
         probe_timeout: float = DEFAULT_PROBE_TIMEOUT,
         probe_workers: int = DEFAULT_PROBE_WORKERS,
-    ) -> None:
-        resolved_hosts = unique_hosts(list(hosts or ([host] if host else DEFAULT_HOSTS)))
-        if not resolved_hosts:
-            raise ValueError("at least one host is required")
-        if probe_hosts and len(resolved_hosts) > 1:
-            resolved_hosts = sort_hosts_by_latency(resolved_hosts, timeout=probe_timeout, max_workers=probe_workers)
+        heartbeat_interval: float | None = 30.0,
+    ) -> TdxClient:
+        """创建连接真实 7709 行情主站的客户端。"""
 
-        self._hosts = resolved_hosts
-        self._timeout = timeout
-        self._pool_size = max(1, pool_size)
-        self._batch_size = min(80, max(1, batch_size))
-        self._connections = [TdxConnection(self._rotate_hosts(index), timeout=self._timeout) for index in range(self._pool_size)]
-        self._executor: ThreadPoolExecutor | None = None
-        self._round_robin = cycle(range(len(self._connections)))
-        self._round_robin_lock = Lock()
-        self._code_cache: dict[str, list[SecurityCode]] = {}
-        self._connected = False
+        return cls(
+            transport=PooledSocketTransport(
+                hosts=hosts,
+                timeout=timeout,
+                pool_size=pool_size,
+                probe_hosts=probe_hosts,
+                probe_timeout=probe_timeout,
+                probe_workers=probe_workers,
+                heartbeat_interval=heartbeat_interval,
+            ),
+            hosts=hosts,
+            timeout=timeout,
+            pool_size=pool_size,
+            probe_hosts=probe_hosts,
+            probe_timeout=probe_timeout,
+            probe_workers=probe_workers,
+            batch_size=batch_size,
+            heartbeat_interval=heartbeat_interval,
+        )
 
-    def _rotate_hosts(self, offset: int) -> list[str]:
-        if not self._hosts:
-            return []
-        index = offset % len(self._hosts)
-        return self._hosts[index:] + self._hosts[:index]
+    @classmethod
+    def in_memory(cls) -> TdxClient:
+        """创建用于测试和示例的内存客户端。"""
+
+        return cls(transport=InMemoryTransport())
+
+    def __post_init__(self) -> None:
+        if self.transport is None:
+            resolved_hosts = _resolve_hosts(self.host, self.hosts)
+            self.transport = PooledSocketTransport(
+                hosts=resolved_hosts or None,
+                timeout=self.timeout,
+                pool_size=self.pool_size,
+                probe_hosts=self.probe_hosts,
+                probe_timeout=self.probe_timeout,
+                probe_workers=self.probe_workers,
+                heartbeat_interval=self.heartbeat_interval,
+            )
+        self.batch_size = min(DEFAULT_QUOTE_BATCH_SIZE, max(1, int(self.batch_size)))
+        self.session = SessionApi(self.transport)
+        self.codes = CodeApi(self.transport)
+        self.quotes = QuoteApi(self.transport)
+        self.bars = BarApi(self.transport)
+        self.minutes = MinuteApi(self.transport)
+        self.trades = TradeApi(self.transport)
+        self.auctions = AuctionApi(self.transport)
+        self.corporate = CorporateApi(self.transport)
+        self.limits = LimitApi(self.transport)
+        self.workdays = WorkdayService(self)
+        self.f10 = F10Client(timeout=self.timeout)
+        self.helpers = HelperApi(self)
+        self._code_count_cache = {}
+        self._codes_all_cache = {}
+        self._gbbq_cache = {}
+        self._finance_cache = {}
+
+    def connect(self) -> None:
+        """打开底层连接。"""
+
+        self.transport.connect()
+
+    def close(self) -> None:
+        """关闭底层连接。"""
+
+        self.transport.close()
 
     def __enter__(self) -> TdxClient:
         self.connect()
@@ -68,237 +163,312 @@ class TdxClient:
     def __exit__(self, exc_type, exc, tb) -> None:
         self.close()
 
-    def connect(self) -> None:
-        if self._connected:
-            return
-        try:
-            for connection in self._connections:
-                connection.connect()
-            self._executor = ThreadPoolExecutor(max_workers=len(self._connections), thread_name_prefix="eltdx-pool")
-            self._connected = True
-        except Exception:
-            if self._executor is not None:
-                self._executor.shutdown(wait=True)
-                self._executor = None
-            for connection in self._connections:
-                connection.close()
-            self._connected = False
-            raise
+    def ping(self) -> str:
+        """客户端可用性检查。"""
 
-    def close(self) -> None:
-        if self._executor is not None:
-            self._executor.shutdown(wait=True)
-            self._executor = None
-        for connection in self._connections:
-            connection.close()
-        self._connected = False
+        return self.session.ping()
 
-    def get_count(self, exchange) -> int:
-        resolved_exchange = normalize_exchange(exchange).value
-        if resolved_exchange == "bj":
-            return len(self._get_bj_codes())
-        self.connect()
-        return self._pick_connection().request_count(resolved_exchange)
+    def clear_cache(self) -> None:
+        """清空代码表、股本变迁和财务信息等低频数据缓存。"""
 
-    def get_codes(self, exchange, *, start: int = 0, limit: int | None = CODE_PAGE_SIZE) -> CodePage:
-        total, items = self._collect_codes(exchange, start=start, limit=limit)
-        return CodePage(exchange=normalize_exchange(exchange).value, start=start, count=len(items), total=total, items=items)
+        self._code_count_cache.clear()
+        self._codes_all_cache.clear()
+        self._gbbq_cache.clear()
+        self._finance_cache.clear()
 
-    def get_codes_all(self, exchange) -> list[SecurityCode]:
-        _, items = self._collect_codes(exchange, start=0, limit=None)
-        return items
+    def get_quote(self, codes: str | Sequence[str]):
+        """兼容旧版：按代码列表批量查询行情快照，自动按 80 个一批拆分。"""
 
-    def get_stock_count(self, exchange) -> int:
-        return sum(1 for item in self.get_codes_all(exchange) if is_stock_entry(item.full_code))
+        code_list = _as_code_list(codes)
+        if not code_list:
+            return []
 
-    def get_a_share_count(self, exchange) -> int:
-        return sum(1 for item in self.get_codes_all(exchange) if is_a_share_entry(item.full_code))
+        results: list[Any] = []
+        for batch in _chunks(code_list, self.batch_size):
+            page = self.quotes.get_snapshots(batch)
+            if isinstance(page, list):
+                results.extend(page)
+            elif isinstance(page, tuple):
+                results.extend(page)
+            else:
+                return page
+        return results
 
-    def get_stock_codes_all(self) -> list[str]:
-        return [item.full_code for item in self._get_all_codes() if is_stock_entry(item.full_code)]
+    def get_count(self, exchange, *, refresh: bool = False) -> int:
+        """兼容旧版：查询某市场代码数量。"""
 
-    def get_a_share_codes_all(self) -> list[str]:
-        return [item.full_code for item in self._get_all_codes() if is_a_share_entry(item.full_code)]
+        market = normalize_market(exchange)
+        if not refresh and market in self._code_count_cache:
+            return self._code_count_cache[market]
+        count = self.codes.count(market)
+        self._code_count_cache[market] = count
+        return count
 
-    def get_etf_codes_all(self) -> list[str]:
-        return [item.full_code for item in self._get_all_codes() if is_etf_entry(item.full_code, item.name)]
+    def get_gbbq(self, code: str, *, include_raw: bool = False, refresh: bool = False):
+        """兼容旧版：查询股本变迁 / 除权相关事件。"""
 
-    def get_index_codes_all(self) -> list[str]:
-        return [item.full_code for item in self._get_all_codes() if is_index(item.full_code)]
+        full_code = normalize_code(code)
+        if not include_raw and not refresh and full_code in self._gbbq_cache:
+            return self._gbbq_cache[full_code]
+        block = self.corporate.capital_changes(full_code, include_raw=include_raw)
+        if not include_raw:
+            self._gbbq_cache[full_code] = block
+        return block
 
-    def _collect_codes(self, exchange, *, start: int, limit: int | None) -> tuple[int, list[SecurityCode]]:
+    def get_xdxr(self, code: str, *, refresh: bool = False):
+        """从股本变迁中整理除权除息记录。"""
+
+        return filter_xdxr_records(self.get_gbbq(code, refresh=refresh))
+
+    def get_equity_changes(self, code: str, *, refresh: bool = False):
+        """从股本变迁中整理股本变化记录。"""
+
+        return filter_equity_records(self.get_gbbq(code, refresh=refresh))
+
+    def get_equity(self, code: str, on=None, *, refresh: bool = False):
+        """取某日之前最近一条股本记录。"""
+
+        return pick_equity(self.get_equity_changes(code, refresh=refresh).items, on)
+
+    def get_turnover(self, code: str, volume: int | float, *, on=None, unit: str = "hand", refresh: bool = False) -> float:
+        """用成交量和流通股本计算换手率。"""
+
+        return compute_turnover(self.get_equity(code, on=on, refresh=refresh), volume, unit=unit)
+
+    def get_factors(self, code: str, *, refresh: bool = False):
+        """基于不复权日 K 和除权除息记录计算本地复权因子。"""
+
+        return build_factor_response(self.bars.all(code, period="day", adjust="none"), self.get_xdxr(code, refresh=refresh))
+
+    def get_codes(self, exchange, *, start: int = 0, limit: int | None = DEFAULT_CODE_PAGE_SIZE):
+        """兼容旧版：分页查询代码表。"""
+
+        market = normalize_market(exchange)
         if start < 0:
             raise ValueError("start must be >= 0")
-        if limit is not None and limit < 0:
+        if limit is None:
+            return self.codes.all(market)[start:]
+        if limit < 0:
             raise ValueError("limit must be >= 0")
+        return self.codes.list(market, start=start, limit=limit)
 
-        resolved_exchange = normalize_exchange(exchange).value
-        if resolved_exchange == "bj":
-            items = self._get_bj_codes()
-            total = len(items)
-            if limit == 0:
-                return total, []
-            if start >= total:
-                return total, []
-            end = total if limit is None else min(start + limit, total)
-            return total, items[start:end]
+    def get_codes_all(self, exchange, *, refresh: bool = False) -> list:
+        """兼容旧版：拉取某市场全量代码表。"""
 
-        self.connect()
-        total = self.get_count(resolved_exchange)
-        if limit == 0:
-            return total, []
-        if start >= total:
-            return total, []
+        market = normalize_market(exchange)
+        if not refresh and market in self._codes_all_cache:
+            return list(self._codes_all_cache[market])
+        items = list(self.codes.all(market))
+        self._codes_all_cache[market] = items
+        self._code_count_cache[market] = len(items)
+        return list(items)
 
-        remaining = total - start if limit is None else min(limit, total - start)
-        current = start
-        items: list[SecurityCode] = []
+    def get_stock_count(self, exchange) -> int:
+        return len([item for item in self.get_codes_all(exchange) if _is_stock(item)])
 
-        while remaining > 0:
-            page = self._pick_connection().request_codes(resolved_exchange, current)
-            if not page:
-                break
+    def get_a_share_count(self, exchange) -> int:
+        return len([item for item in self.get_codes_all(exchange) if _is_a_share(item)])
 
-            take = min(len(page), remaining)
-            items.extend(page[:take])
-            current += len(page)
-            remaining -= take
+    def get_stock_codes_all(self) -> list[str]:
+        return [item.full_code for item in self._all_security_codes() if _is_stock(item)]
 
-            if len(page) < CODE_PAGE_SIZE:
-                break
+    def get_a_share_codes_all(self) -> list[str]:
+        return [item.full_code for item in self._all_security_codes() if _is_a_share(item)]
 
-        return total, items
+    def get_etf_codes_all(self) -> list[str]:
+        return [item.full_code for item in self._all_security_codes() if _is_etf(item)]
 
-    def _get_all_codes(self) -> list[SecurityCode]:
-        items: list[SecurityCode] = []
-        for exchange in ("sh", "sz", "bj"):
-            items.extend(self.get_codes_all(exchange))
-        return items
+    def get_index_codes_all(self) -> list[str]:
+        return [item.full_code for item in self._all_security_codes() if _is_index(item)]
 
-    def _get_bj_codes(self) -> list[SecurityCode]:
-        cached = self._code_cache.get("bj")
-        if cached is None:
-            cached = fetch_bj_codes(timeout=self._timeout)
-            self._code_cache["bj"] = cached
-        return cached
+    def get_finance_batch(self, codes: str | Sequence[str], *, refresh: bool = False):
+        """批量查询财务基础信息，并缓存完整返回。"""
 
-    def get_gbbq(self, code: str, *, include_raw: bool = False):
-        self.connect()
-        return self._pick_connection().request_gbbq(code, include_raw=include_raw)
-
-    def get_xdxr(self, code: str):
-        self.connect()
-        return self._pick_connection().request_xdxr(code)
-
-    def get_equity_changes(self, code: str) -> EquityResponse:
-        return filter_equity_items(self.get_gbbq(code).items)
-
-    def get_equity(self, code: str, on=None):
-        return pick_equity(self.get_equity_changes(code).items, on)
-
-    def get_turnover(self, code: str, volume: int | float, *, on=None, unit: str = "hand") -> float:
-        return compute_turnover(self.get_equity(code, on), volume, unit=unit)
-
-    def get_factors(self, code: str) -> FactorResponse:
-        day_kline = self.get_kline_all("day", code)
-        xdxr_items = self.get_xdxr(code)
-        return build_factor_response(day_kline, xdxr_items)
+        code_list = _as_code_list(codes)
+        full_codes = tuple(normalize_code(code) for code in code_list)
+        if not refresh and full_codes in self._finance_cache:
+            return self._finance_cache[full_codes]
+        batch = self.corporate.finance_batch(full_codes)
+        self._finance_cache[full_codes] = batch
+        return batch
 
     def get_minute(self, code: str, date=None, *, include_raw: bool = False):
-        self.connect()
-        connection = self._pick_connection()
+        """兼容旧版：不传日期取当日分时，传日期取历史分时。"""
+
         if date is None:
-            return connection.request_minute(code, include_raw=include_raw)
-        return connection.request_history_minute(code, date, include_raw=include_raw)
+            return self.minutes.today(code, include_raw=include_raw)
+        return self.minutes.history(code, date, include_raw=include_raw)
 
     def get_history_minute(self, code: str, date, *, include_raw: bool = False):
         return self.get_minute(code, date, include_raw=include_raw)
 
-    def get_kline(self, arg1, arg2, *, start: int = 0, count: int = KLINE_PAGE_SIZE, kind: str = "stock", include_raw: bool = False):
-        if start < 0:
-            raise ValueError("start must be >= 0")
-        if count <= 0:
-            raise ValueError("count must be > 0")
-        if kind not in {"stock", "index"}:
-            raise ValueError("kind must be 'stock' or 'index'")
+    def get_kline(
+        self,
+        arg1,
+        arg2=None,
+        *,
+        start: int = 0,
+        count: int = DEFAULT_KLINE_PAGE_SIZE,
+        kind: str = "stock",
+        adjust: str | None = None,
+        anchor_date=None,
+        include_raw: bool = False,
+    ):
+        """兼容旧版：查询一页 K 线，支持 ``(period, code)`` 或 ``(code, period)``。"""
 
         period, code = self._resolve_kline_args(arg1, arg2)
-        page_count = min(KLINE_PAGE_SIZE, count)
-        self.connect()
-        return self._pick_connection().request_kline(period, code, start, page_count, kind=kind, include_raw=include_raw)
+        return self.bars.get(
+            code,
+            period=period,
+            start=start,
+            count=count,
+            adjust=adjust,
+            anchor_date=anchor_date,
+            kind=kind,
+            include_raw=include_raw,
+        )
 
-    def get_kline_all(self, arg1, arg2, *, kind: str = "stock") -> KlineResponse:
-        if kind not in {"stock", "index"}:
-            raise ValueError("kind must be 'stock' or 'index'")
+    def get_kline_all(
+        self,
+        arg1,
+        arg2=None,
+        *,
+        kind: str = "stock",
+        adjust: str | None = None,
+        anchor_date=None,
+        page_size: int = DEFAULT_KLINE_PAGE_SIZE,
+        max_pages: int | None = 200,
+        include_raw: bool = False,
+    ):
+        """兼容旧版：分页拉取完整 K 线。"""
 
         period, code = self._resolve_kline_args(arg1, arg2)
-        self.connect()
-        return self._collect_kline_pages(
-            lambda start, count: self._pick_connection().request_kline(period, code, start, count, kind=kind),
-            KLINE_PAGE_SIZE,
+        return self.bars.all(
+            code,
+            period=period,
+            adjust=adjust,
+            anchor_date=anchor_date,
+            kind=kind,
+            page_size=page_size,
+            max_pages=max_pages,
+            include_raw=include_raw,
         )
 
-    def get_adjusted_kline(self, period, code: str, *, adjust="qfq", start: int = 0, count: int = KLINE_PAGE_SIZE, include_raw: bool = False) -> KlineResponse:
-        factors = self.get_factors(code)
-        response = self.get_kline(period, code, start=start, count=count, include_raw=include_raw)
-        return apply_factors_to_kline(response, factors, adjust)
+    def get_trades(
+        self,
+        code: str,
+        date=None,
+        *,
+        start: int = 0,
+        count: int | None = None,
+        include_raw: bool = False,
+    ):
+        """兼容旧版：不传日期取当日成交明细，传日期取历史成交明细。"""
 
-    def get_adjusted_kline_all(self, period, code: str, *, adjust="qfq") -> KlineResponse:
-        factors = self.get_factors(code)
-        response = self.get_kline_all(period, code)
-        return apply_factors_to_kline(response, factors, adjust)
-
-    def get_trades(self, code: str, date=None, *, start: int = 0, count: int = TRADE_PAGE_SIZE, include_raw: bool = False):
-        if start < 0:
-            raise ValueError("start must be >= 0")
-        if count <= 0:
-            raise ValueError("count must be > 0")
-
-        page_size = HISTORY_TRADE_PAGE_SIZE if date is not None else TRADE_PAGE_SIZE
-        page_count = min(page_size, count)
-        self.connect()
         if date is None:
-            return self._pick_connection().request_trade(code, start, page_count, include_raw=include_raw)
-        return self._pick_connection().request_history_trade(code, date, start, page_count, include_raw=include_raw)
-
-    def get_trades_all(self, code: str, date=None):
-        self.connect()
-        if date is None:
-            fetch_page = lambda start, count: self._pick_connection().request_trade(code, start, count)
-            trading_date = None
-            page_size = TRADE_PAGE_SIZE
-        else:
-            fetch_page = lambda start, count: self._pick_connection().request_history_trade(code, date, start, count)
-            trading_date = date
-            page_size = HISTORY_TRADE_PAGE_SIZE
-
-        return self._collect_trade_pages(
-            fetch_page,
-            trading_date,
-            page_size,
+            return self.trades.today(code, start=start, count=count or DEFAULT_TODAY_TRADE_PAGE_SIZE, include_raw=include_raw)
+        return self.trades.history(
+            code,
+            date,
+            start=start,
+            count=count or DEFAULT_HISTORY_TRADE_PAGE_SIZE,
+            include_raw=include_raw,
         )
 
-    def get_trade(self, code: str, *, start: int = 0, count: int = TRADE_PAGE_SIZE, include_raw: bool = False):
+    def get_trades_all(
+        self,
+        code: str,
+        date=None,
+        *,
+        page_size: int | None = None,
+        max_pages: int | None = 100,
+        include_raw: bool = False,
+    ):
+        """兼容旧版：分页拉取成交明细，直到服务端返回短页。"""
+
+        page_size = page_size or (DEFAULT_HISTORY_TRADE_PAGE_SIZE if date is not None else DEFAULT_TODAY_TRADE_PAGE_SIZE)
+        if page_size <= 0 or page_size > 0xFFFF:
+            raise ValueError("page_size must be between 1 and 65535")
+        if max_pages is not None and max_pages <= 0:
+            raise ValueError("max_pages must be positive or None")
+
+        start = 0
+        pages = 0
+        first_page = None
+        ticks = []
+        while True:
+            page = self.get_trades(code, date, start=start, count=page_size, include_raw=include_raw)
+            if not hasattr(page, "ticks") or not hasattr(page, "count"):
+                return page
+            if first_page is None:
+                first_page = page
+            ticks.extend(page.ticks)
+            pages += 1
+            if page.count < page_size:
+                return replace(first_page, start=0, request_count=len(ticks), ticks=tuple(ticks))
+            if max_pages is not None and pages >= max_pages:
+                raise RuntimeError("get_trades_all reached max_pages before the server returned a short page")
+            start += page_size
+
+    def get_trade(self, code: str, *, start: int = 0, count: int = DEFAULT_TODAY_TRADE_PAGE_SIZE, include_raw: bool = False):
         return self.get_trades(code, start=start, count=count, include_raw=include_raw)
 
-    def get_history_trade(self, code: str, date, *, start: int = 0, count: int = HISTORY_TRADE_PAGE_SIZE, include_raw: bool = False):
+    def get_trade_all(self, code: str, *, include_raw: bool = False):
+        return self.get_trades_all(code, include_raw=include_raw)
+
+    def get_history_trade(
+        self,
+        code: str,
+        date,
+        *,
+        start: int = 0,
+        count: int = DEFAULT_HISTORY_TRADE_PAGE_SIZE,
+        include_raw: bool = False,
+    ):
         return self.get_trades(code, date, start=start, count=count, include_raw=include_raw)
 
-    def get_auction_0925(self, code: str, date) -> Auction0925Result:
-        resolved_code = add_prefix(code)
-        self.connect()
+    def get_history_trade_day(self, code: str, date, *, include_raw: bool = False):
+        return self.get_trades_all(code, date, include_raw=include_raw)
+
+    def get_auction_0925(
+        self,
+        code: str,
+        date,
+        *,
+        page_size: int = DEFAULT_HISTORY_TRADE_PAGE_SIZE,
+        max_pages: int | None = 100,
+    ) -> Auction0925Result:
+        """兼容旧版：从历史成交明细里获取 09:25 竞价成交快照。"""
+
+        if page_size <= 0 or page_size > 0xFFFF:
+            raise ValueError("page_size must be between 1 and 65535")
+        if max_pages is not None and max_pages <= 0:
+            raise ValueError("max_pages must be positive or None")
+
+        full_code = normalize_code(code)
         pages_used = 0
-        for start in (4000, 2000, 0):
-            probe = self._pick_connection().request_history_trade_probe(resolved_code, date, start, HISTORY_TRADE_PAGE_SIZE)
+        for start in range(0, 0x10000, page_size):
+            page = self.trades.history(full_code, date, start=start, count=page_size)
             pages_used += 1
-            if probe.count == 0:
-                continue
-            if probe.item_0925 is not None:
-                return self._build_auction_0925_result(resolved_code, probe.trading_date, probe.item_0925, pages_used, f"fast_hit@{start}")
-            if probe.count < HISTORY_TRADE_PAGE_SIZE:
+            tick = next((item for item in getattr(page, "ticks", ()) if item.time_minutes == 9 * 60 + 25), None)
+            if tick is not None:
                 return Auction0925Result(
-                    code=resolved_code,
-                    trading_date=probe.trading_date,
+                    code=full_code,
+                    trading_date=getattr(page, "trading_date", None),
+                    has_auction_0925=True,
+                    price=tick.price,
+                    price_milli=tick.price_milli,
+                    volume=tick.volume,
+                    amount=round(tick.trade_amount_yuan, 2),
+                    status=tick.status_raw,
+                    side=tick.side,
+                    pages_used=pages_used,
+                    source_mode="history_ticks_scan",
+                )
+            if not hasattr(page, "count") or page.count < page_size:
+                return Auction0925Result(
+                    code=full_code,
+                    trading_date=getattr(page, "trading_date", None),
                     has_auction_0925=False,
                     price=None,
                     price_milli=None,
@@ -307,160 +477,114 @@ class TdxClient:
                     status=None,
                     side=None,
                     pages_used=pages_used,
-                    source_mode=f"fast_no_0925@{start}",
+                    source_mode="history_ticks_no_0925",
                 )
+            if max_pages is not None and pages_used >= max_pages:
+                raise RuntimeError("get_auction_0925 reached max_pages before the server returned a short page")
+        raise RuntimeError("get_auction_0925 exceeded protocol page limit")
 
-        for start in range(0, 65536, HISTORY_TRADE_PAGE_SIZE):
-            probe = self._pick_connection().request_history_trade_probe(resolved_code, date, start, HISTORY_TRADE_PAGE_SIZE)
-            pages_used += 1
-            if probe.count == 0:
-                return Auction0925Result(
-                    code=resolved_code,
-                    trading_date=probe.trading_date,
-                    has_auction_0925=False,
-                    price=None,
-                    price_milli=None,
-                    volume=None,
-                    amount=None,
-                    status=None,
-                    side=None,
-                    pages_used=pages_used,
-                    source_mode="fallback_empty",
-                )
-            if probe.item_0925 is not None:
-                return self._build_auction_0925_result(resolved_code, probe.trading_date, probe.item_0925, pages_used, "fallback_scan")
-            if probe.count < HISTORY_TRADE_PAGE_SIZE:
-                return Auction0925Result(
-                    code=resolved_code,
-                    trading_date=probe.trading_date,
-                    has_auction_0925=False,
-                    price=None,
-                    price_milli=None,
-                    volume=None,
-                    amount=None,
-                    status=None,
-                    side=None,
-                    pages_used=pages_used,
-                    source_mode="fallback_no_0925",
-                )
-        raise ProtocolError("history trade probe exceeded protocol page limit")
+    def get_call_auction(self, code: str, *, include_raw: bool = False):
+        return self.auctions.series(code, include_raw=include_raw)
 
-    def get_trade_all(self, code: str):
-        return self.get_trades_all(code)
+    def get_adjusted_kline(
+        self,
+        period,
+        code: str,
+        *,
+        adjust="qfq",
+        start: int = 0,
+        count: int = DEFAULT_KLINE_PAGE_SIZE,
+        include_raw: bool = False,
+    ):
+        """兼容旧版名称：当前直接使用 0x052d 的服务端复权参数。"""
 
-    def get_history_trade_day(self, code: str, date):
-        return self.get_trades_all(code, date)
+        return self.bars.get(code, period=period, adjust=adjust, start=start, count=count, include_raw=include_raw)
 
-    def get_trade_minute_kline(self, code: str) -> KlineResponse:
-        return build_trade_minute_kline(self.get_trade_all(code))
+    def get_adjusted_kline_all(
+        self,
+        period,
+        code: str,
+        *,
+        adjust="qfq",
+        page_size: int = DEFAULT_KLINE_PAGE_SIZE,
+        max_pages: int | None = 200,
+        include_raw: bool = False,
+    ):
+        """兼容旧版名称：当前直接使用 0x052d 的服务端复权参数。"""
 
-    def get_history_trade_minute_kline(self, code: str, date) -> KlineResponse:
-        return build_trade_minute_kline(self.get_history_trade_day(code, date))
+        return self.bars.all(code, period=period, adjust=adjust, page_size=page_size, max_pages=max_pages, include_raw=include_raw)
 
-    def get_call_auction(self, code: str, include_raw: bool = False):
-        return self._pick_connection().request_call_auction(code, include_raw=include_raw)
+    def get_local_adjusted_kline_all(self, period, code: str, *, adjust="qfq"):
+        """高级工具：用本地复权因子调整不复权 K 线。"""
 
-    def get_quote(self, codes: str | list[str] | tuple[str, ...]):
-        code_list = [codes] if isinstance(codes, str) else list(codes)
-        if not code_list:
-            return []
+        base = self.bars.all(code, period=period, adjust="none")
+        return apply_factors_to_kline(base, self.get_factors(code), adjust=adjust)
 
-        self.connect()
-        batches = [code_list[index : index + self._batch_size] for index in range(0, len(code_list), self._batch_size)]
-        if len(batches) == 1:
-            return self._pick_connection().request_quotes(batches[0])
+    def _all_security_codes(self) -> list[SecurityCode]:
+        items: list[SecurityCode] = []
+        for market in ("sh", "sz", "bj"):
+            items.extend(self.get_codes_all(market))
+        return items
 
-        assert self._executor is not None
-        futures = []
-        for index, batch in enumerate(batches):
-            connection = self._connections[index % len(self._connections)]
-            futures.append(self._executor.submit(connection.request_quotes, batch))
-
-        quotes = []
-        for future in futures:
-            quotes.extend(future.result())
-        return quotes
-
-    def _collect_kline_pages(self, fetch_page, page_size: int) -> KlineResponse:
-        pages = []
-        total = 0
-        previous_page_first = None
-
-        for start in range(0, 65536, page_size):
-            page = fetch_page(start, page_size)
-            if previous_page_first is not None and page.items:
-                previous_page_first.last_close_price_milli = page.items[-1].close_price_milli
-                previous_page_first.last_close_price = page.items[-1].close_price
-            if page.items:
-                previous_page_first = page.items[0]
-            pages.append(page.items)
-            total += len(page.items)
-            if page.count < page_size:
-                break
-
-        items = []
-        for page_items in reversed(pages):
-            items.extend(page_items)
-        return KlineResponse(count=total, items=items)
-
-    def _collect_trade_pages(self, fetch_page, trading_date, page_size: int) -> TradeResponse:
-        pages: list[list] = []
-        total = 0
-        response_date = None
-
-        for start in range(0, 65536, page_size):
-            page = fetch_page(start, page_size)
-            pages.append(page.items)
-            total += len(page.items)
-            response_date = page.trading_date
-            if page.count < page_size:
-                break
-
-        items = []
-        for page_items in reversed(pages):
-            items.extend(page_items)
-
-        if response_date is None:
-            _, response_date = normalize_trading_date(trading_date)
-        return TradeResponse(count=total, trading_date=response_date, items=items)
-
-    def _pick_connection(self) -> TdxConnection:
-        with self._round_robin_lock:
-            index = next(self._round_robin)
-        return self._connections[index]
-
-    def _resolve_kline_args(self, arg1, arg2) -> tuple[object, str]:
-        first_is_period = self._is_kline_period(arg1)
-        second_is_period = self._is_kline_period(arg2)
-
+    def _resolve_kline_args(self, arg1, arg2) -> tuple[Any, str]:
+        if arg2 is None:
+            raise ValueError("get_kline requires both period and code")
+        first_is_period = _is_kline_period(arg1)
+        second_is_period = _is_kline_period(arg2)
         if first_is_period and not second_is_period:
-            return arg1, arg2
+            return arg1, str(arg2)
         if second_is_period and not first_is_period:
-            return arg2, arg1
+            return arg2, str(arg1)
         if first_is_period and second_is_period:
-            return arg1, arg2
-        raise ValueError("one of the first two positional arguments must be a valid kline frequency")
-
-    def _build_auction_0925_result(self, code: str, trading_date, item, pages_used: int, source_mode: str) -> Auction0925Result:
-        return Auction0925Result(
-            code=code,
-            trading_date=trading_date,
-            has_auction_0925=True,
-            price=item.price,
-            price_milli=item.price_milli,
-            volume=item.volume,
-            amount=round(item.price * item.volume * 100, 2),
-            status=item.status,
-            side=item.side,
-            pages_used=pages_used,
-            source_mode=source_mode,
-        )
-
-    def _is_kline_period(self, value) -> bool:
-        try:
-            normalize_kline_period(value)
-        except (ProtocolError, TypeError, ValueError):
-            return False
-        return True
+            return arg1, str(arg2)
+        raise ValueError("one of the first two positional arguments must be a valid kline period")
 
 
+def _as_code_list(codes: str | Sequence[str]) -> list[str]:
+    if isinstance(codes, str):
+        return [codes]
+    return list(codes)
+
+
+def _resolve_hosts(host: str | None, hosts: Sequence[str] | None) -> list[str]:
+    if hosts is None:
+        resolved_hosts = []
+    elif isinstance(hosts, str):
+        resolved_hosts = [hosts]
+    else:
+        resolved_hosts = list(hosts)
+    if host is not None:
+        resolved_hosts.insert(0, host)
+    return resolved_hosts
+
+
+def _chunks(items: Sequence[str], size: int):
+    for index in range(0, len(items), size):
+        yield list(items[index : index + size])
+
+
+def _is_kline_period(value) -> bool:
+    try:
+        normalize_period(value)
+    except Exception:
+        return False
+    return True
+
+
+def _is_a_share(item: SecurityCode) -> bool:
+    return item.category == "a_share"
+
+
+def _is_stock(item: SecurityCode) -> bool:
+    return item.category in {"a_share", "b_share"}
+
+
+def _is_etf(item: SecurityCode) -> bool:
+    return item.category == "etf"
+
+
+def _is_index(item: SecurityCode) -> bool:
+    return item.category == "index"
+
+
+Client = TdxClient

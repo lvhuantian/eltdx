@@ -1,150 +1,116 @@
-# 调试指南
+# 排错指南
 
-如果你遇到下面这些情况，可以先看这页：
+这份文档用来定位三类问题：连不上主站、数据返回异常、协议字段需要核对。
 
-- 接口没有按预期返回数据
-- 你想看原始十六进制数据
-- 你怀疑是服务器地址的问题
-- 你不确定某个返回值是不是解析错了
+## 连不上
 
-## 建议先这样排查
+先确认 TCP 连接状态：
 
-### 第一步：先跑最简单的调用
+```python
+from eltdx.hosts import DEFAULT_HOSTS, probe_hosts
+
+results = probe_hosts(DEFAULT_HOSTS[:10], timeout=1.2)
+for item in results:
+    print(item.host, item.ok, item.latency_ms, item.error)
+```
+
+如果大部分主站都连不上，优先检查网络、防火墙、代理和当前环境是否允许直连 `7709` TCP 端口。
+
+如果只是个别主站慢，可以打开测速排序：
 
 ```python
 from eltdx import TdxClient
 
-with TdxClient() as client:
-    quote = client.get_quote("sz000001")[0]
-    print(quote.code, quote.last_price, quote.last_close_price, quote.server_time)
+with TdxClient(probe_hosts=True, timeout=3) as client:
+    print(client.transport.hosts[:5])
+    print(client.get_quote("sz000001")[0].last_price)
 ```
 
-如果这一步都不通，先别急着看复杂字段，先确认连接和地址是不是正常。
+也可以手动指定主站：
 
-### 第二步：自己指定服务器地址试一下
+```python
+with TdxClient(host="116.205.183.150:7709", timeout=3) as client:
+    print(client.get_count("sz"))
+```
+
+## 主站列表
+
+默认主站来自包内 `tdx_server.json`：
+
+```python
+from eltdx.hosts import DEFAULT_HOSTS, load_server_config
+
+print(load_server_config()["schema_version"])
+print(DEFAULT_HOSTS[:3])
+```
+
+如果包内 JSON 缺失或格式坏了，客户端会退回代码内置主站列表。
+
+## 长时间空闲
+
+真实 socket 默认每 30 秒发一次 `0x0004` 心跳。普通短脚本不用处理。
+
+需要调整：
 
 ```python
 from eltdx import TdxClient
 
-with TdxClient(host="124.71.187.122:7709") as client:
-    quote = client.get_quote("sz000001")[0]
-    print(quote.last_price)
+client = TdxClient(heartbeat_interval=60)
 ```
 
-如果你手头有多个地址，也可以这样传：
+需要关闭：
 
 ```python
-from eltdx import TdxClient
-
-hosts = [
-    "124.71.187.122:7709",
-    "122.51.120.217:7709",
-    "111.229.247.189:7709",
-]
-
-with TdxClient(hosts=hosts, pool_size=2) as client:
-    quote = client.get_quote("sz000001")[0]
-    print(quote.last_price)
+client = TdxClient(heartbeat_interval=None)
 ```
 
-### 第三步：打开 `include_raw=True`
+程序需要创建较多客户端实例时，使用 `with TdxClient(...) as client:` 自动关闭连接和后台线程。
 
-很多接口都支持 `include_raw=True`。如果你想知道“原始返回是什么、我们又解析成了什么”，这是最直接的办法。
+## 请求超时
 
-支持查看 raw 数据的常用方法：
+超时通常有三种原因：
 
-| 方法 | 可查看字段 |
+| 现象 | 处理 |
 | --- | --- |
-| `get_minute()` | `raw_frame_hex`, `raw_payload_hex` |
-| `get_history_minute()` | `raw_frame_hex`, `raw_payload_hex` |
-| `get_trades()` | `raw_frame_hex`, `raw_payload_hex` |
-| `get_history_trade()` | `raw_frame_hex`, `raw_payload_hex` |
-| `get_kline()` | `raw_frame_hex`, `raw_payload_hex` |
-| `get_adjusted_kline()` | `raw_frame_hex`, `raw_payload_hex` |
-| `get_call_auction()` | `raw_frame_hex`, `raw_payload_hex`, `items[].raw_hex` |
-| `get_gbbq()` | `raw_frame_hex`, `raw_payload_hex` |
+| 第一次请求就超时 | 换主站或打开 `probe_hosts=True` |
+| 偶发超时 | 增大 `timeout`，例如 `timeout=8` |
+| 长时间运行后超时 | 确认没有忘记关闭旧客户端，必要时降低连接池数量 |
 
-## raw 数据怎么查看
+## 字段对不上
 
-### 看分时
+需要看原始 payload 时，打开 `include_raw=True`：
 
 ```python
 from eltdx import TdxClient
 
-with TdxClient() as client:
-    minute = client.get_minute("sz000001", include_raw=True)
-    print(minute.raw_frame_hex)
-    print(minute.raw_payload_hex)
-    print(minute.items[0].time, minute.items[0].price_milli, minute.items[0].price)
+with TdxClient(timeout=3) as client:
+    kline = client.get_kline("day", "sz000001", count=5, include_raw=True)
+
+print(kline.raw_payload.hex())
+print(kline.bars[0].record_hex)
 ```
 
-### 看 K 线
+常见 raw 字段：
+
+| 字段 | 意思 |
+| --- | --- |
+| `raw_payload` | 当前响应 payload 原始 bytes |
+| `record_hex` | 单条记录原始十六进制 |
+| `decoded_payload` | 少数 XOR 编码接口解码后的 payload |
+
+这些字段主要用于抓包对照和排查解析问题。
+
+## 推送队列
+
+部分接口会有服务端主动推送帧。真实 transport 会把没匹配到请求的帧放进本地队列：
 
 ```python
 from eltdx import TdxClient
 
-with TdxClient() as client:
-    response = client.get_kline("sz000001", "day", count=10, include_raw=True)
-    print(response.raw_frame_hex)
-    print(response.raw_payload_hex)
-    print(response.items[0].open_price_milli, response.items[0].open_price)
+with TdxClient(timeout=3) as client:
+    client.get_quote("sz000001")
+    print(client.transport.pending_push_count)
+    print(client.transport.drain_pushes(parse=True))
 ```
 
-### 看集合竞价
-
-```python
-from eltdx import TdxClient
-
-with TdxClient() as client:
-    response = client.get_call_auction("sz000001", include_raw=True)
-    first = response.items[0]
-    print(first.raw_hex)
-    print(first.price_milli, first.price)
-    print(first.match, first.unmatched, first.flag)
-```
-
-## 常见问题
-
-### 为什么 `get_count("sh")` 看起来特别大？
-
-因为它表示的是代码表条目数，不是股票总数。
-
-如果你想看更接近股票口径的数量，优先用：
-
-- `get_stock_count("sh")`
-- `get_a_share_count("sh")`
-
-### 为什么 `get_codes()` / `get_codes_all()` 看起来不全是股票？
-
-因为这里面会混有股票、指数、板块分类项、ETF、基金、债券回购等条目。
-
-如果你想直接拿一组更常用的代码去拉行情，优先用：
-
-- `get_stock_codes_all()`
-- `get_a_share_codes_all()`
-- `get_etf_codes_all()`
-- `get_index_codes_all()`
-
-### `sh900xxx` 和 `sz200xxx` 是什么？
-
-它们通常对应 B 股代码，不是 A 股代码。
-
-如果你只想拿 A 股，优先用：
-
-- `get_a_share_codes_all()`
-- `get_a_share_count()`
-
-### 为什么 `Quote.server_time` 有时是 `None`？
-
-因为 `server_time` 是尽量恢复出来的时间字段：
-
-- 原始值在 `server_time_raw`
-- 如果原始值没法转成合法时间，`server_time` 允许是 `None`
-- 排查时可以同时看 `server_time_raw` 和 `server_time`
-
-### `with TdxClient()` 是不是必须用？
-
-不是。
-
-- 只是临时拉一次数据：推荐 `with`
-- 需要长期保持连接：手动 `connect()` / `close()` 也可以
+主动查询可以直接使用 `client.quotes.refresh()`，服务端主动推送帧可以通过 `poll_push()` / `drain_pushes()` 读取。

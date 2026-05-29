@@ -1,43 +1,81 @@
 # 脚本说明
 
-这里放的是仓库附带的辅助脚本，按用途分成两类。
+这里放源码仓库自带的辅助脚本。普通用户直接调用 `eltdx` API 或安装后的命令行入口即可；这些脚本主要用于开发、发布前自测和排查真实主站问题。
 
-如果你想先看库本身怎么安装、怎么调用 API、怎么查字段，可以先看：[`../docs/README.md`](../docs/README.md)
+安装后可直接使用的命令：
+
+```bash
+eltdx-smoke --help
+eltdx-f10-smoke --help
+```
+
+MCP 工具服务启动后会占用当前终端作为 stdio 服务：
+
+```bash
+eltdx-mcp
+```
+
+下面的 `python scripts/...` 写法适用于源码仓库目录。
 
 ## smoke
 
-- 目录：`scripts/smoke/`
-- 作用：快速验证单个接口或整条联网链路是否正常
-- 适合：临时自测、环境联通检查、升级后快速回归
+目录：`scripts/smoke/`
 
-常用命令：
+用途：快速确认当前环境的真实 `7709` 主站连接状态，以及核心 API 返回情况。
+
+查看帮助：
 
 ```bash
-python scripts/smoke/smoke_codes.py
-python scripts/smoke/smoke_minute.py
-python scripts/smoke/smoke_trade.py
-python scripts/smoke/smoke_kline.py
-python scripts/smoke/smoke_call_auction.py
-python scripts/smoke/smoke_live_all.py
-python scripts/smoke/export_auction_925_daily.py --start 2026-04-01 --end 2026-04-09 --export-dir output/auction_0925
+eltdx-smoke --help
+python scripts/smoke/live_smoke.py --help
 ```
 
-补充：
+轻量检查：
 
-- `export_auction_925_daily.py` 会按交易日输出一个 CSV
-- 默认列是 `date`、`code`、`has_auction_0925`、`open_price`、`auction_volume_hand`、`auction_amount_yuan`
-- 底层走 `get_auction_0925()`，适合做历史 `09:25` 批量导出
+```bash
+python scripts/smoke/live_smoke.py
+python scripts/smoke/smoke_codes.py
+python scripts/smoke/smoke_kline.py
+python scripts/smoke/smoke_minute.py
+python scripts/smoke/smoke_trade.py
+python scripts/smoke/smoke_workday.py
+```
+
+F10 / 资料网关检查：
+
+```bash
+eltdx-f10-smoke --code 000034 --timeout 8
+python scripts/smoke/smoke_f10.py --code 000034 --timeout 8
+```
+
+指定代码、主站和日期：
+
+```bash
+python scripts/smoke/live_smoke.py --code sz000001 --history-date 2026-05-20 --host 116.205.183.150:7709
+```
+
+发布前完整一点的检查：
+
+```bash
+python scripts/smoke/live_smoke.py --deep --probe-hosts --pool-size 2
+```
+
+`--deep` 会多跑全量 K 线、全量成交明细、全市场代码表、股本/复权因子等，耗时会比默认检查长。
+
+批量导出每日 09:25 竞价成交快照：
+
+```bash
+python scripts/smoke/export_auction_925_daily.py --code sz000001 --start 2026-04-01 --end 2026-04-30
+```
+
+输出 CSV 默认写到 `output/auction_0925/`，可以用 `--output` 指定完整文件路径。
 
 ## validation
 
-- 目录：`scripts/validation/`
-- 作用：导出联网验证样本、整理核对结果、生成汇总 CSV
-- 适合：协议对拍、人工核验、版本验收
+目录：`scripts/validation/`
 
-常用命令：
+用途：导出小样本 CSV，方便人工核对或发版留档。
 
 ```bash
-python scripts/validation/export_live_validation.py
-python scripts/validation/export_validation_csv.py
-python scripts/validation/export_executive_summary_csv.py
+python scripts/validation/export_live_validation.py --output output/live_validation.csv
 ```

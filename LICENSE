@@ -1,21 +1,28 @@
-MIT License
+ELTDX Research-Only License
 
-Copyright (c) 2026 ax
+Copyright (c) 2026 ELTDX contributors
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+This project is provided only for personal learning, protocol research, and
+non-commercial study.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+You may read, use, copy, and modify the source code for personal research
+purposes.
+
+You may not use this project, its source code, its derived works, or data
+obtained through it for any commercial activity, paid service, production
+service, resale, redistribution for profit, market-data vending, automated
+trading service, or any activity that violates applicable laws, regulations,
+exchange rules, third-party service agreements, or the rights of any person or
+organization.
+
+You are solely responsible for your access to third-party servers and services,
+for your use of any data obtained through this project, and for any resulting
+legal, regulatory, financial, operational, or data-related consequences.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+IMPLIED, INCLUDING BUT NOT LIMITED TO WARRANTIES OF MERCHANTABILITY, FITNESS FOR
+A PARTICULAR PURPOSE, DATA ACCURACY, AVAILABILITY, NON-INFRINGEMENT, OR
+COMPLIANCE. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR
+ANY CLAIM, DAMAGES, LOSSES, OR OTHER LIABILITY ARISING FROM OR RELATED TO THE
+SOFTWARE, DATA, THIRD-PARTY SERVICES, OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.

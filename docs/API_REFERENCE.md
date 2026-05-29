@@ -1,817 +1,518 @@
-# API 用法
+# API 参考
 
-这份文档就是“每个函数怎么用”的总说明。
+本文档描述 `eltdx 1.0` 的对外调用方式。按方法查看参数和解析字段时，优先看 [METHOD_REFERENCE.md](METHOD_REFERENCE.md)。底层命令号、请求 payload 和响应字段以 `docs/COMMANDS_7709.md` 及协议相关文档为准。
 
-你可以把它当作查表页：想找初始化方式、参数、返回值、示例，就来这里看。
+## 总入口
 
-先记住这几件事：
-
-- 推荐尽量使用完整代码，例如 `sz000001`、`sh600000`、`bj920001`
-- 多数接口也接受裸六码，内部会自动补前缀
-- 时间字段会直接转换成 Python 原生对象：交易日用 `date`，带时分秒的字段用 `datetime`
-- 价格字段会同时保留浮点值和 `*_milli` 整数值
-- 很多接口支持 `include_raw=True`，需要排查时可以直接看 `raw_frame_hex` 和 `raw_payload_hex`
-
-配套阅读：
-
-- 字段说明：[`FIELD_REFERENCE.md`](./FIELD_REFERENCE.md)
-- 调试指南：[`DEBUG_GUIDE.md`](./DEBUG_GUIDE.md)
-- 使用示例：[`EXAMPLES.md`](./EXAMPLES.md)
-
-> 本页示例只用于说明调用方式和字段含义，实时行情会变化，示例数值不代表固定结果。
-
-## 1. `TdxClient` 初始化
+真实连接 7709 主站：
 
 ```python
 from eltdx import TdxClient
 
-client = TdxClient()
-custom = TdxClient(host="124.71.187.122:7709")
-cluster = TdxClient(
-    hosts=["124.71.187.122:7709", "122.51.120.217:7709"],
-    timeout=8.0,
-    pool_size=2,
-    batch_size=80,
-)
-
-# 可选：按当前网络对候选服务器测速后再连接
-probed = TdxClient(probe_hosts=True)
+with TdxClient(timeout=3) as client:
+    count = client.codes.count("sz")
 ```
 
-参数说明：
-
-| 参数 | 类型 | 默认值 | 说明 |
-| --- | --- | --- | --- |
-| `host` | `str | None` | `None` | 单个服务器地址，格式如 `124.71.187.122:7709` |
-| `hosts` | `list[str] | tuple[str, ...] | None` | `None` | 服务器地址列表；传入后优先于 `host` |
-| `timeout` | `float` | `8.0` | 单个 socket 请求超时秒数 |
-| `pool_size` | `int` | `2` | 连接池大小；默认两条长连接 |
-| `batch_size` | `int` | `80` | `get_quote()` 自动分批上限，内部会限制在 `1~80` |
-| `probe_hosts` | `bool` | `False` | 是否在初始化时对候选服务器做一次 TCP 连接测速，并按延迟重排 |
-| `probe_timeout` | `float` | `1.2` | 单个服务器测速超时秒数，仅在 `probe_hosts=True` 时生效 |
-| `probe_workers` | `int` | `32` | 并发测速线程数，仅在 `probe_hosts=True` 时生效 |
-
-默认服务器列表来自包内 `tdx_server.json`，维护时已经按测速结果从快到慢排序。`pool_size > 1` 时，不同连接会从不同的快服务器开始尝试，避免所有连接都挤到同一台。传入 `host=` 或 `hosts=` 后会覆盖默认列表。
-
-连接模式：
-
-- **一次性脚本**：`with TdxClient() as client:`
-- **长连接常驻**：手动 `connect()`，在需要时再 `close()`
-
-## 2. 生命周期
-
-### `connect() -> None`
-
-建立连接池并准备线程池。
-
-说明：
-
-- 可重复调用，已经连接时会直接返回。
-- 大多数业务方法内部也会自动触发连接；你可以手动先连上，也可以直接调用业务方法。
-
-### `close() -> None`
-
-关闭线程池与全部底层 socket 连接。
-
-说明：
-
-- 建议脚本结束前调用，避免留下僵尸连接。
-- 对于实时长连场景，不需要每次请求后都关闭。
-
-### `with TdxClient() as client:`
-
-上下文管理器模式，进入时自动 `connect()`，离开时自动 `close()`。
+默认 `TdxClient()` 使用真实 `7709` 主站。单元测试或离线示例可以显式使用内存客户端：
 
 ```python
-from eltdx import TdxClient
+with TdxClient.in_memory() as client:
+    request = client.codes.count("sz")
+```
 
-with TdxClient() as client:
+可以直接传主站：
+
+```python
+with TdxClient(host="116.205.183.150:7709", timeout=3) as client:
     quotes = client.get_quote(["sz000001", "sh600000"])
-    print(quotes[0].last_price)
 ```
 
-## 3. 市场 / 代码表
-
-### `get_count(exchange: str) -> int`
-
-返回单个市场的代码表条目数。
-
-参数说明：
-
-- `exchange`：`"sh"`、`"sz"`、`"bj"`
-
-返回说明：
-
-- 返回的是**底层代码表条目数**。
-- 不能把它直接理解成“这个市场有多少只股票”。
-
-### `get_codes(exchange: str, start: int = 0, limit: int | None = 1000) -> CodePage`
-
-分页读取单个市场的代码表。
-
-参数说明：
-
-- `exchange`：市场代码
-- `start`：起始偏移，必须大于等于 `0`
-- `limit`：读取条数；传 `None` 表示从 `start` 读到结尾
-
-返回结构：
-
-- `CodePage.exchange`：市场
-- `CodePage.start`：起始偏移
-- `CodePage.count`：本页返回数量
-- `CodePage.total`：该市场代码表总条数
-- `CodePage.items`：`list[SecurityCode]`
-
-`SecurityCode` 关键字段：
-
-- `exchange`：市场前缀
-- `code`：六码
-- `name`：名称
-- `full_code`：完整代码属性，例如 `sz000001`
-- `multiple`：价格倍率相关原始参数
-- `decimal`：小数位相关原始参数
-- `last_price`：最近价浮点值
-- `last_price_raw`：最近价原始整数值
-
-### `get_codes_all(exchange: str) -> list[SecurityCode]`
-
-读取单个市场完整代码表。
-
-说明：
-
-- `sh` / `sz` 走通达信代码表。
-- `bj` 当前走北交所官方兜底源，口径与 `sh` / `sz` 不是完全同源，但对使用层足够实用。
-
-### `get_stock_count(exchange: str) -> int`
-
-对 `get_codes_all(exchange)` 做过滤后返回“股票类代码条目数”。
-
-说明：
-
-- 这是**本库 helper 统计**，不是服务端原生接口。
-- 当前股票 helper 包含：上海 `900xxx`、深圳 `200xxx` 这类 B 股。
-
-### `get_a_share_count(exchange: str) -> int`
-
-对 `get_codes_all(exchange)` 做过滤后返回“A 股代码条目数”。
-
-说明：
-
-- 这是**更严格的 A 股 helper 统计**。
-- 会排除上海 `900xxx`、深圳 `200xxx` 这类 B 股。
-- 北交所当前按 `920xxx` 识别为股票范围。
-
-### `get_stock_codes_all() -> list[str]`
-### `get_a_share_codes_all() -> list[str]`
-### `get_etf_codes_all() -> list[str]`
-### `get_index_codes_all() -> list[str]`
-
-这些方法都是在完整代码表基础上做的“实用过滤 helper”。
-
-说明：
-
-- 适合直接拿去做 `quote`、`minute`、`trade`、`kline` 拉取。
-- 不应把它们理解成交易所官方分类主表。
-- 如果你只关心 A 股，优先使用 `get_a_share_codes_all()`。
-- 如果你希望 A 股 + B 股一起抓，可以使用 `get_stock_codes_all()`。
-
-## 4. 行情快照
-
-### `get_quote(codes: str | list[str] | tuple[str, ...]) -> list[Quote]`
-
-获取一个或多个证券的实时行情快照。
+也可以使用连接池和主站测速：
 
 ```python
-with TdxClient() as client:
-    one = client.get_quote("sz000001")
-    many = client.get_quote(["sz000001", "sh600000", "sh000001"])
+with TdxClient.from_hosts(pool_size=2, probe_hosts=True, timeout=3) as client:
+    quotes = client.get_quote(["sz000001", "sh600000"])
 ```
 
-行为说明：
+`probe_hosts=True` 会先用 TCP connect 测一遍候选主站，把连得上的、延迟低的排在前面。默认不开测速，避免启动时等待过久。
 
-- 单个代码会被自动包装成列表返回。
-- 返回类型始终是 `list[Quote]`。
-- 当代码数量超过 `batch_size` 时会自动分批。
-- 默认 `batch_size=80`，默认 `pool_size=2`，会在两条长连接间分发请求。
+不传 `host` / `hosts` 时，客户端会读取包内 `tdx_server.json` 的默认主站列表。如果这个文件缺失，会退回代码内置的主站列表。
 
-`Quote` 关键字段：
-
-- `exchange`、`code`
-- `server_time_raw`：服务端原始时间整数
-- `server_time`：解析后的 Python `datetime | None`
-- `last_price`、`last_price_milli`：最新价
-- `open_price`、`open_price_milli`
-- `high_price`、`high_price_milli`
-- `low_price`、`low_price_milli`
-- `last_close_price`、`last_close_price_milli`：昨收 / 前收价
-- `total_hand`：总手数
-- `current_hand`：现手数（现量）
-- `amount`：成交额
-- `call_auction_amount`：竞价额，仅在集合竞价阶段更有参考意义
-- `call_auction_rate`：竞价涨幅，按 `(open_price - last_close_price) / last_close_price * 100` 计算
-- `inside_dish`、`outer_disc`
-- `buy_levels`、`sell_levels`：五档盘口，元素类型是 `QuoteLevel`
-- `rate`：涨跌幅相关字段
-
-说明：
-
-- `server_time` 是 best-effort 解析结果；若原始值非法，`server_time` 可能是 `None`，这时应以 `server_time_raw` 为准。
-- 当前快照字段约定是：`last_price` 表示最新价，`last_close_price` 表示昨收 / 前收价。
-- 更完整的字段中文映射见 [`FIELD_REFERENCE.md`](./FIELD_REFERENCE.md#6-quote--quotelevel-行情快照)
-
-## 5. 分时
-
-### `get_minute(code: str, date: str | None = None, include_raw: bool = False) -> MinuteResponse`
-
-读取分时序列；这是统一入口。
+真实 socket 默认每 30 秒发一次 `0x0004` 心跳，用来维持长时间空闲连接。短脚本不用管；需要改间隔或关闭时：
 
 ```python
-with TdxClient() as client:
-    today_minute = client.get_minute("sz000001")
-    history_minute = client.get_minute("sz000001", "2026-03-06", include_raw=True)
-
-print(today_minute.trading_date)
-print(today_minute.items[0].time, today_minute.items[0].price)
-print(history_minute.raw_payload_hex)
+TdxClient(heartbeat_interval=60)
+TdxClient(heartbeat_interval=None)
 ```
 
-参数说明：
+常用连接参数：
 
-- `code`：证券代码，支持 `sz000001` / `000001` 形式
-- `date`：`None`、`YYYY-MM-DD`、`YYYYMMDD`、`date`、`datetime`
-- `include_raw`：是否附带原始调试字段
-
-行为说明：
-
-- `date is None` 时走**实时分时协议路径**。
-- 传入 `date` 时走**历史分时协议路径**。
-- 两条路径统一返回 `MinuteResponse` 模型。
-
-返回结构：
-
-- `MinuteResponse.count`
-- `MinuteResponse.trading_date`
-- `MinuteResponse.items`
-- `MinuteResponse.raw_frame_hex`
-- `MinuteResponse.raw_payload_hex`
-
-`MinuteItem` 关键字段：
-
-- `time`：Python `datetime`
-- `price`：浮点价格
-- `price_milli`：整数毫厘价格
-- `volume`：成交量
-
-### `get_history_minute(code: str, date, include_raw: bool = False) -> MinuteResponse`
-
-`get_minute(code, date=...)` 的兼容别名，仅对应历史分时路径。
-
-## 6. 逐笔
-
-### `get_trades(code: str, date: str | None = None, start: int = 0, count: int = 1800, include_raw: bool = False) -> TradeResponse`
-
-读取一页逐笔成交。
-
-```python
-with TdxClient() as client:
-    live_page = client.get_trades("sz000001", start=0, count=100)
-    history_page = client.get_trades("sz000001", "2026-03-06", start=0, count=200, include_raw=True)
-```
-
-说明：
-
-- 不传 `date` 时读取实时逐笔。
-- 传入 `date` 时读取指定交易日的历史逐笔。
-- 实时单页上限是 `1800`。
-- 历史单页上限是 `2000`。
-
-`TradeResponse` 关键字段：
-
-- `count`
-- `trading_date`
-- `items`
-- `raw_frame_hex`
-- `raw_payload_hex`
-
-`TradeItem` 关键字段：
-
-- `time`：Python `datetime`
-- `price`、`price_milli`
-- `volume`
-- `status`
-- `side`
-- `order_count`
-
-### `get_trades_all(code: str, date: str | None = None) -> TradeResponse`
-
-自动翻页拉取完整逐笔。
-
-说明：
-
-- 不传 `date` 时返回实时全量逐笔。
-- 传入 `date` 时返回指定交易日全量逐笔。
-
-### `get_auction_0925(code: str, date) -> Auction0925Result`
-
-快速定位指定交易日历史逐笔里的 `09:25` 那一笔。
-
-```python
-with TdxClient() as client:
-    row = client.get_auction_0925("000001", "2026-04-09")
-    print(row.code, row.trading_date, row.has_auction_0925)
-    print(row.price, row.volume, row.amount)
-```
-
-说明：
-
-- 这是**历史逐笔专用 helper**，只用于找 `09:25`，不替代 `get_trades()` / `get_trades_all()`
-- 返回的 `code` 会统一规范成完整代码，例如 `sz000001`
-- 如果这天没有 `09:25` 成交，返回 `has_auction_0925=False`，其余数值字段为 `None`
-- `pages_used` 表示这次定位一共探测了多少页
-- `source_mode` 是内部路径标记，适合调试或统计，不建议当成业务主键
-
-`Auction0925Result` 关键字段：
-
-- `code`
-- `trading_date`
-- `has_auction_0925`
-- `price`、`price_milli`：`09:25` 这笔成交价
-- `volume`：`09:25` 这笔成交量，当前按“手”口径解释
-- `amount`：按 `price * volume * 100` 计算得到的成交额
-- `status`、`side`
-- `pages_used`
-- `source_mode`
-
-### 逐笔别名
-
-- `get_trade()`：`get_trades()` 的实时别名
-- `get_history_trade()`：`get_trades(code, date, ...)` 的历史页别名
-- `get_trade_all()`：`get_trades_all(code)` 的实时别名
-- `get_history_trade_day()`：`get_trades_all(code, date)` 的历史全量别名
-
-## 7. K 线
-
-### `get_kline(code: str, freq: str, start: int = 0, count: int = 800, kind: str = "stock", include_raw: bool = False) -> KlineResponse`
-
-读取一页 K 线。
-
-```python
-with TdxClient() as client:
-    day_page = client.get_kline("sz000001", "day", count=10)
-    minute_page = client.get_kline("sz000001", "1m", count=30)
-    index_page = client.get_kline("sh000001", "day", kind="index", count=10)
-```
-
-频率说明：
-
-- 冻结推荐值：`1m`、`5m`、`15m`、`30m`、`60m`、`day`、`week`、`month`、`quarter`、`year`
-- 兼容别名也支持，例如 `1min`、`daily`、`1w`、`1mo`、`1y`
-
-参数说明：
-
-- `start`：起始偏移，必须大于等于 `0`
-- `count`：单页条数，必须大于 `0`，内部单页上限 `800`
-- `kind`：`"stock"` 或 `"index"`
-- `include_raw`：是否附带原始调试字段
-
-说明：
-
-- 推荐调用形式是 `get_kline(code, freq, ...)`。
-- 当前实现也兼容 `get_kline(freq, code, ...)`，用于兼容旧调用习惯。
-- `get_kline()` 返回单页结果，保持通达信服务端这一页的时间顺序，通常为从旧到新。
-- `get_kline_all()` 会自动翻页并返回整体时间升序结果，适合落库、画图和 MCP 输出。
-- 指数场景建议显式传 `kind="index"`，这样 `up_count` / `down_count` 等字段语义才更完整。
-- 如果需要 JSON / MCP 友好的输出，可以使用 `to_jsonable(response)`，时间会转成 ISO 字符串。
-
-`KlineResponse` 关键字段：
-
-- `count`
-- `items`
-- `raw_frame_hex`
-- `raw_payload_hex`
-
-`KlineItem` 关键字段：
-
-- `time`
-- `open_price`、`open_price_milli`
-- `high_price`、`high_price_milli`
-- `low_price`、`low_price_milli`
-- `close_price`、`close_price_milli`
-- `last_close_price`、`last_close_price_milli`
-- `volume`
-- `amount`、`amount_milli`
-- `order_count`
-- `up_count`、`down_count`
-
-### `get_kline_all(code: str, freq: str, kind: str = "stock") -> KlineResponse`
-
-自动翻页拉取完整 K 线。
-
-说明：
-
-- 推荐调用形式是 `get_kline_all(code, freq)`。
-- 当前实现也兼容 `get_kline_all(freq, code)`。
-
-### `get_adjusted_kline(period, code, adjust="qfq", ...) -> KlineResponse`
-### `get_adjusted_kline_all(period, code, adjust="qfq") -> KlineResponse`
-
-返回复权 K 线。
-
-```python
-with TdxClient() as client:
-    qfq_page = client.get_adjusted_kline("day", "sz000001", adjust="qfq", count=10)
-    hfq_all = client.get_adjusted_kline_all("day", "sz000001", adjust="hfq")
-```
-
-说明：
-
-- `adjust` 支持 `qfq` / `hfq`
-- 这两个方法是计算型 helper，底层链路是：`gbbq -> xdxr -> factors -> adjusted_kline`
-
-### K 线转 JSON-friendly 结构
-
-```python
-from eltdx import TdxClient, to_jsonable
-
-with TdxClient() as client:
-    response = client.get_kline("sz000001", "day", count=10)
-    payload = to_jsonable(response)
-
-print(payload["items"][0]["time"])
-print(payload["items"][0]["close_price"])
-```
-
-说明：
-
-- `to_jsonable()` 不改变原始 dataclass，只返回可 JSON 序列化的 `dict` / `list` / 基础类型。
-- `datetime` / `date` 会转成 ISO 字符串，例如 `2026-05-11T15:00:00+08:00`。
-- `*_milli` 整数字段会保留，适合下游精确计算或落库。
-
-## 8. 集合竞价
-
-### `get_call_auction(code: str, include_raw: bool = False) -> CallAuctionResponse`
-
-读取集合竞价序列。
-
-```python
-with TdxClient() as client:
-    auction = client.get_call_auction("sz000001", include_raw=True)
-
-print(auction.count)
-print(auction.items[0].time, auction.items[0].price, auction.items[0].flag)
-print(auction.items[0].raw_hex)
-```
-
-`CallAuctionResponse` 关键字段：
-
-- `count`
-- `items`
-- `raw_frame_hex`
-- `raw_payload_hex`
-
-`CallAuctionItem` 关键字段：
-
-- `time`：Python `datetime`
-- `price`、`price_milli`
-- `match`：撮合量
-- `unmatched`：未撮合量
-- `flag`：`1` 表示买未撮合，`-1` 表示卖未撮合
-- `raw_hex`：单条记录原始十六进制，仅在 `include_raw=True` 时返回
-
-## 9. 股本变动 / 复权 / 因子
-
-### `get_gbbq(code: str, include_raw: bool = False) -> GbbqResponse`
-
-读取原始股本变迁表。
-
-```python
-with TdxClient() as client:
-    gbbq = client.get_gbbq("sz000001", include_raw=True)
-    print(gbbq.items[0].time, gbbq.items[0].category_name)
-```
-
-`GbbqItem` 关键字段：
-
-- `code`
-- `time`
-- `category`、`category_name`
-- `c1`、`c2`、`c3`、`c4`
-
-### `get_xdxr(code: str) -> list[XdxrItem]`
-
-从 `gbbq` 数据中过滤出除权除息相关记录。
-
-```python
-with TdxClient() as client:
-    xdxr = client.get_xdxr("sz000001")
-    print(xdxr[0].time, xdxr[0].fenhong, xdxr[0].peigujia)
-```
-
-### `get_equity_changes(code: str) -> EquityResponse`
-
-从股本变动记录中提取流通股本、总股本变化序列。
-
-```python
-with TdxClient() as client:
-    equity_changes = client.get_equity_changes("sz000001")
-    print(equity_changes.count)
-```
-
-### `get_equity(code: str, on=None) -> EquityItem | None`
-
-取某一日期对应的股本记录；默认取最新有效记录。
-
-```python
-with TdxClient() as client:
-    latest_equity = client.get_equity("sz000001")
-    equity_on_day = client.get_equity("sz000001", on="2026-03-06")
-```
-
-### `get_turnover(code: str, volume: int | float, on=None, unit: str = "hand") -> float`
-
-根据股本记录计算换手率百分比。
-
-```python
-with TdxClient() as client:
-    turnover = client.get_turnover("sz000001", 1000, on="2026-03-06", unit="hand")
-    print(turnover)
-```
-
-说明：
-
-- `volume`：成交量数值
-- `unit`：支持 `share` / `shares` / `stock` / `hand` / `hands` / `lot` / `lots`
-- 默认 `hand`，即按“手”解释，内部会乘以 `100`
-
-### `get_factors(code: str) -> FactorResponse`
-
-根据日 K 与除权除息记录构造复权因子序列。
-
-```python
-with TdxClient() as client:
-    factors = client.get_factors("sz000001")
-    print(factors.items[0].qfq_factor, factors.items[0].hfq_factor)
-```
-
-`FactorItem` 关键字段：
-
-- `time`
-- `last_close_price`、`last_close_price_milli`
-- `pre_last_close_price`、`pre_last_close_price_milli`
-- `qfq_factor`
-- `hfq_factor`
-
-## 10. 衍生 helper
-
-### `get_trade_minute_kline(code: str) -> KlineResponse`
-### `get_history_trade_minute_kline(code: str, date) -> KlineResponse`
-
-把逐笔数据聚合成分钟 K 线。
-
-```python
-with TdxClient() as client:
-    live_trade_kline = client.get_trade_minute_kline("sz000001")
-    history_trade_kline = client.get_history_trade_minute_kline("sz000001", "2026-03-06")
-```
-
-说明：
-
-- 这是计算型 helper，不是独立协议接口。
-- 它基于逐笔成交聚合得到 1 分钟 K 线序列。
-
-## 11. 服务层对象
-
-服务层不是必须使用；它们是围绕公开 API 做的便捷封装。
-
-### `CodesService`
-
-```python
-from eltdx import TdxClient
-from eltdx.services import CodesService
-
-with TdxClient() as client:
-    service = CodesService(client)
-    service.refresh()
-    print(service.get_name("sz000001"))
-    print(service.get_stocks()[:5])
-```
-
-主要方法：
-
-- `get_page(exchange, start=0, limit=1000)`
-- `get_all(exchange)`
-- `refresh()`
-- `all()`
-- `by_exchange(exchange)`
-- `get(code)` / `get_name(code)`
-- `stocks()` / `etfs()` / `indexes()`
-- `get_stocks()` / `get_etfs()` / `get_indexes()`
-
-说明：
-
-- 内部是**内存缓存**，不是数据库缓存。
-- 适合做代码表查名、分市场遍历、快速过滤。
-
-### `WorkdayService`
-
-```python
-from eltdx import TdxClient
-from eltdx.services import WorkdayService
-
-with TdxClient() as client:
-    workday = WorkdayService(client)
-    print(workday.is_workday("2026-03-06"))
-    print(workday.next_workday("2026-03-06"))
-```
-
-主要方法：
-
-- `today()`
-- `normalize(value)`
-- `text(value)`
-- `same_day(left, right)`
-- `refresh()`
-- `is_workday(value)` / `today_is_workday()`
-- `range(start, end)` / `iter_days(start, end)`
-- `next_workday(value)` / `previous_workday(value)`
-
-说明：
-
-- 传入 `client` 时，会用 `sh000001` 的日线历史构建真实交易日集合。
-- 不传 `client` 时，会退化为“周一到周五”的简单规则。
-
-### `GbbqService`
-
-```python
-from eltdx import TdxClient
-from eltdx.services import GbbqService
-
-with TdxClient() as client:
-    service = GbbqService(client)
-    print(service.get_equity("sz000001"))
-    print(service.get_factors("sz000001").count)
-```
-
-主要方法：
-
-- `refresh(code, include_raw=False)`
-- `clear(code=None)`
-- `get_gbbq(code, refresh=False, include_raw=False)`
-- `items(code)`
-- `get_xdxr(code)`
-- `get_equity_changes(code)`
-- `get_equity(code, on=None)`
-- `get_turnover(code, volume, on=None, unit="hand")`
-- `get_factors(code)`
-- `get_adjusted_kline(code, freq, adjust="qfq")`
-- `get_adjusted_kline_all(code, freq, adjust="qfq")`
-
-说明：
-
-- 内部维护 `gbbq` 与 `factors` 的**内存缓存**。
-- 适合在同一代码上重复做复权和股本查询。
-
-## 12. MCP
-
-`eltdx-mcp` 把 SDK 里适合 Agent 调用的行情、代码表、逐笔竞价、股本复权能力包装成 MCP 工具。普通 SDK 使用不依赖 MCP。
-
-安装：
-
-```bash
-python -m pip install "eltdx[mcp]"
-```
-
-启动：
-
-```bash
-eltdx-mcp
-```
-
-工具一览：
-
-| 类别 | 工具 | 作用 |
+| 参数 | 默认值 | 说明 |
 | --- | --- | --- |
-| 行情 | `tdx_get_quote` | 实时行情快照 |
-| 行情 | `tdx_get_minute` | 实时 / 历史分时 |
-| K 线 | `tdx_get_kline` | 一页 K 线，支持股票 / 指数和复权参数 |
-| K 线 | `tdx_get_kline_all` | 自动翻页读取全量 K 线 |
-| 逐笔 | `tdx_get_trades` | 一页实时 / 历史逐笔 |
-| 逐笔 | `tdx_get_trades_all` | 自动翻页读取全量逐笔 |
-| 竞价 | `tdx_get_auction_0925` | 从历史逐笔里定位 `09:25` 竞价笔 |
-| 竞价 | `tdx_get_call_auction` | 实时集合竞价序列 |
-| 代码表 | `tdx_get_count` | 单市场代码表 / 股票 / A 股数量 |
-| 代码表 | `tdx_get_codes` | 单市场分页代码表 |
-| 代码表 | `tdx_get_code_list` | A 股、股票、ETF、指数代码列表 |
-| 股本复权 | `tdx_get_gbbq` | 股本变迁原始记录 |
-| 股本复权 | `tdx_get_xdxr` | 除权除息记录 |
-| 股本复权 | `tdx_get_equity_changes` | 流通股本 / 总股本变化序列 |
-| 股本复权 | `tdx_get_equity` | 指定日期有效股本记录 |
-| 股本复权 | `tdx_get_turnover` | 按成交量和流通股本计算换手率 |
-| 股本复权 | `tdx_get_factors` | 前复权 / 后复权因子序列 |
-| 衍生 | `tdx_get_trade_minute_kline` | 用逐笔聚合分钟 K 线 |
+| `host` | `None` | 指定单个 7709 主站 |
+| `hosts` | `None` | 指定多个 7709 主站 |
+| `timeout` | `8.0` | 单次 socket 请求等待秒数 |
+| `pool_size` | `1` | 连接池连接数 |
+| `batch_size` | `80` | `get_quote()` 自动拆批大小 |
+| `probe_hosts` | `False` | 启动时是否先测速排序 |
+| `heartbeat_interval` | `30.0` | 后台心跳秒数；`None` 或小于等于 0 表示关闭 |
 
-通用参数：多数工具都支持 `host`、`timeout`、`probe_hosts`。不传 `host` 时使用包内默认服务器列表；`probe_hosts=True` 会在启动时按当前网络重新测速。
+## 便捷兼容方法
 
-输出规模：`tdx_get_kline_all`、`tdx_get_trades_all`、`tdx_get_factors`、`tdx_get_code_list` 默认 `limit=1000`，返回里会带 `total`、`start`、`limit`、`count`。需要全量时显式传 `limit=null`。
+这一组方法是旧版常用入口的外层包装，底层仍然调用下面的分组 API。
 
-### `tdx_get_kline`
+### `get_quote(codes)`
 
-读取一页 K 线，返回 JSON-friendly `dict`。
+批量查询行情快照，自动按 80 个代码拆批，对应 `client.quotes.get_snapshots()`。
 
-| 参数 | 类型 | 默认值 | 说明 |
-| --- | --- | --- | --- |
-| `code` | `str` | 必填 | 证券代码，推荐完整代码，如 `sz000001` |
-| `period` | `str` | `day` | K 线周期，如 `1m`、`5m`、`day`、`week` |
-| `start` | `int` | `0` | 起始偏移 |
-| `count` | `int` | `200` | 读取条数，单页上限仍由底层 K 线接口限制 |
-| `kind` | `str` | `stock` | `stock` 或 `index` |
-| `adjust` | `str | None` | `None` | `None` / `none` / `qfq` / `hfq`；复权只支持股票 K 线 |
-| `include_raw` | `bool` | `False` | 是否返回原始 frame/payload 十六进制 |
-| `host` | `str | None` | `None` | 指定单个 TDX 服务器 |
-| `timeout` | `float` | `8.0` | socket 请求超时秒数 |
-| `probe_hosts` | `bool` | `False` | 是否启动时对候选服务器重新测速 |
-
-返回结构示意：
-
-```json
-{
-  "code": "sz000001",
-  "period": "day",
-  "kind": "stock",
-  "adjust": null,
-  "start": 0,
-  "request_count": 200,
-  "count": 1,
-  "items": [
-    {
-      "time": "2026-05-11T15:00:00+08:00",
-      "open_price": 11.2,
-      "open_price_milli": 11200,
-      "close_price": 11.28,
-      "close_price_milli": 11280
-    }
-  ],
-  "raw_frame_hex": null,
-  "raw_payload_hex": null
-}
+```python
+client.get_quote(["sz000001", "sh600000"])
 ```
 
-说明：
+### 代码表便捷方法
 
-- MCP server 依赖是可选依赖，普通 SDK 使用不受影响。
-- 工具逻辑也可以在 Python 里直接调用：`from eltdx.mcp_tools import get_kline_data`。
-- MCP 工具返回的是 JSON-friendly `dict`，日期时间会转成 ISO 字符串。
-
-### `tdx_get_quote`
-
-读取一只或多只证券的实时行情快照，返回 JSON-friendly `dict`。
-
-| 参数 | 类型 | 默认值 | 说明 |
-| --- | --- | --- | --- |
-| `codes` | `str` | 必填 | 单个代码或逗号分隔代码，例如 `sz000001,sh600000` |
-| `host` | `str | None` | `None` | 指定单个 TDX 服务器 |
-| `timeout` | `float` | `8.0` | socket 请求超时秒数 |
-| `pool_size` | `int` | `2` | 连接池大小，批量快照会在连接间分发 |
-| `probe_hosts` | `bool` | `False` | 是否启动时对候选服务器重新测速 |
-
-返回结构示意：
-
-```json
-{
-  "codes": ["sz000001", "sh600000"],
-  "request_count": 2,
-  "count": 2,
-  "quotes": [
-    {
-      "exchange": "sz",
-      "code": "000001",
-      "server_time": "2026-05-12T15:33:19.730000+08:00",
-      "last_price": 11.28,
-      "last_price_milli": 11280,
-      "last_close_price": 11.2,
-      "last_close_price_milli": 11200,
-      "buy_levels": [],
-      "sell_levels": []
-    }
-  ]
-}
+```python
+client.get_count("sz")
+client.get_codes("sz", start=0, limit=1600)
+client.get_codes_all("sz")
+client.get_a_share_codes_all()
+client.get_stock_codes_all()
+client.get_etf_codes_all()
+client.get_index_codes_all()
 ```
 
-## 13. 模型别名与延伸阅读
+其中 A 股、股票、ETF、指数过滤使用 `0x044d` 代码表解析出的 `category` 派生字段。
 
-当前还保留了几组兼容别名：
+### K 线便捷方法
 
-- `Code = SecurityCode`
-- `MinuteSeries = MinuteResponse`
-- `Trade = TradeItem`
-- `TradePage = TradeResponse`
-- `Kline = KlineItem`
-- `KlinePage = KlineResponse`
+```python
+client.get_kline("day", "sz000001", count=30)
+client.get_kline("sz000001", "day", count=30)
+client.get_kline_all("day", "sz000001")
+client.get_adjusted_kline("day", "sz000001", adjust="qfq")
+client.get_adjusted_kline("week", "sz000001", adjust="hfq")
+client.get_kline("1m", "sz000001", count=240)
+```
 
-继续阅读：
+`get_kline()` 同时支持旧版常见的 `(period, code)` 和 `(code, period)` 参数顺序。`get_adjusted_kline()` 直接使用 `0x052d` 的服务端复权参数；本地复权因子可用 `get_factors()` 查看。
 
-1. API 用法总览：[`README.md`](../README.md)
-2. 字段中文说明：[`FIELD_REFERENCE.md`](./FIELD_REFERENCE.md)
-3. 调试与 raw 比对：[`DEBUG_GUIDE.md`](./DEBUG_GUIDE.md)
-4. 使用示例：[`EXAMPLES.md`](./EXAMPLES.md)
+常用周期：
+
+| `period` | 含义 |
+| --- | --- |
+| `1m`, `5m`, `15m`, `30m`, `60m` | 分钟 K 线 |
+| `day` | 日 K |
+| `week` | 周 K |
+| `month` | 月 K |
+| `quarter` | 季 K |
+| `year` | 年 K |
+| `10m`, `2d`, `5s` | 协议层支持的自定义分钟、N 日、N 秒形式；实际覆盖以服务端返回为准 |
+
+复权参数：
+
+| `adjust` | 含义 |
+| --- | --- |
+| `None` / `none` | 不复权 |
+| `qfq` / `front` | 前复权 |
+| `hfq` / `back` | 后复权 |
+| `fixed_qfq` / `fixed_front` | 定点前复权，需要 `anchor_date` |
+| `fixed_hfq` / `fixed_back` | 定点后复权，需要 `anchor_date` |
+
+定点复权示例：
+
+```python
+client.get_kline("day", "sz000001", adjust="fixed_qfq", anchor_date="2024-06-03")
+client.get_kline("day", "sz000001", adjust="fixed_hfq", anchor_date=20240603)
+```
+
+### 分时和成交明细便捷方法
+
+```python
+client.get_minute("sz000001")
+client.get_history_minute("sz000001", "2026-05-20")
+client.get_trades("sz000001")
+client.get_trades("sz000001", "2026-05-20")
+client.get_trades_all("sz000001", "2026-05-20")
+```
+
+成交明细别名也保留：
+
+```python
+client.get_trade("sz000001")
+client.get_trade_all("sz000001")
+client.get_history_trade("sz000001", "2026-05-20")
+client.get_history_trade_day("sz000001", "2026-05-20")
+```
+
+### 集合竞价便捷方法
+
+```python
+client.get_call_auction("sz000001")
+client.get_auction_0925("sz000001", "2026-05-20")
+```
+
+`get_call_auction()` 返回 `0x056a` 当前交易日集合竞价明细。`get_auction_0925()` 从历史成交明细接口里扫描 09:25 竞价成交快照。
+
+### 股本变迁便捷方法
+
+```python
+client.get_gbbq("sz000001")
+client.get_xdxr("sz000001")
+client.get_equity_changes("sz000001")
+client.get_equity("sz000001", "2026-05-20")
+client.get_turnover("sz000001", 123456, unit="hand")
+client.get_factors("sz000001")
+```
+
+`get_gbbq()` 是旧版名称，新版底层调用 `client.corporate.capital_changes()`，对应 `0x000f`。
+
+`get_xdxr()`、`get_equity_changes()`、`get_equity()` 是从 `0x000f` 返回的股本变迁记录里本地整理出来的。
+
+`get_turnover()` 使用成交量和流通股本计算换手率：
+
+```text
+换手率 = 成交股数 / 流通股本 * 100
+```
+
+`unit="hand"` 表示传入成交量单位是手，`unit="share"` 表示传入成交量单位是股。
+
+`get_factors()` 用不复权日 K 和除权除息记录计算本地复权因子。普通取复权 K 线时，仍推荐直接使用服务端复权参数：
+
+```python
+client.get_adjusted_kline("day", "sz000001", adjust="qfq")
+client.bars.get("sz000001", period="day", adjust="hfq")
+```
+
+需要研究或校验本地复权时，可以用：
+
+```python
+client.get_local_adjusted_kline_all("day", "sz000001", adjust="qfq")
+```
+
+### 低频数据缓存
+
+客户端默认缓存低频数据：代码数量、全量代码表、股本变迁和财务基础信息。实时行情、分时、成交明细、K 线每次按请求读取。
+
+强制刷新：
+
+```python
+client.get_count("sz", refresh=True)
+client.get_codes_all("sz", refresh=True)
+client.get_gbbq("sz000001", refresh=True)
+client.get_finance_batch(["sz000001"], refresh=True)
+```
+
+清空全部缓存：
+
+```python
+client.clear_cache()
+```
+
+### `include_raw`
+
+部分调试场景可以传 `include_raw=True`：
+
+```python
+client.get_gbbq("sz000001", include_raw=True)
+client.get_kline("day", "sz000001", include_raw=True)
+client.get_history_trade("sz000001", "2026-05-20", include_raw=True)
+```
+
+大多数返回模型已经保留 `raw_payload` 或单条记录的 `record_hex`，用于抓包对照和协议解析排查。
+
+### JSON 输出
+
+```python
+from eltdx import to_json, to_jsonable
+
+data = to_jsonable(client.get_quote("sz000001"))
+text = to_json(data, indent=2)
+```
+
+## `client.session`
+
+### `handshake()`
+
+连接后握手，对应 `0x000d`。
+
+```python
+client.session.handshake()
+```
+
+### `heartbeat()`
+
+心跳保活，对应 `0x0004`。
+
+```python
+client.session.heartbeat()
+```
+
+## `client.codes`
+
+### `count(market)`
+
+查询某市场代码数量，对应 `0x044e`。
+
+```python
+client.codes.count("sz")
+client.codes.count("sh")
+client.codes.count("bj")
+```
+
+### `list(market, start=0, limit=1600)`
+
+分页查询代码表，对应 `0x044d`。
+
+```python
+client.codes.list("sz", start=0, limit=1600)
+```
+
+### `all(market)`
+
+拉取某市场全量代码表。
+
+```python
+client.codes.all("bj")
+```
+
+## `client.quotes`
+
+### `get_snapshots(codes)`
+
+按显式代码列表查询批量行情快照，对应 `0x054c`。
+
+```python
+client.quotes.get_snapshots(["sz000001", "sh600000"])
+```
+
+别名：
+
+```python
+client.quotes.get(["sz000001", "sh600000"])
+```
+
+### `list_by_category(category, sort_by=None, start=0, count=80, ascending=False)`
+
+查询分类行情列表，对应 `0x054b`。
+
+```python
+client.quotes.list_by_category("沪深A股", sort_by="涨幅", count=100)
+```
+
+### `refresh(codes=None, cursors=None)`
+
+行情增量刷新协议，对应 `0x0547`。
+
+```python
+client.quotes.refresh(["sz000001"], cursors={"sz000001": 0})
+```
+
+`refresh()` 发起一次增量刷新请求。服务端主动推送帧会进入 transport 的 push queue，可用下面两个方法读取。
+
+### `poll_push(timeout=0.0, parse=False)`
+
+读取一个未配对推送帧，默认返回原始 `ResponseFrame`。确认推送帧可直接按当前上下文解析时，可以传 `parse=True`。
+
+```python
+frame = client.quotes.poll_push(timeout=0.5)
+event = client.quotes.poll_push(timeout=0.5, parse=True)
+```
+
+### `drain_pushes(parse=False)`
+
+取出当前队列里已经收到的全部推送帧。
+
+```python
+frames = client.quotes.drain_pushes()
+```
+
+## `client.bars`
+
+### `get(code, period="day", start=0, count=800, adjust=None, anchor_date=None, include_raw=False)`
+
+查询 K 线 / 周期线，对应 `0x052d`。
+
+```python
+client.bars.get("sz000001", period="day", count=800)
+client.bars.get("sz000001", period="week", count=200)
+client.bars.get("sz000001", period="month", count=120)
+client.bars.get("sz000001", period="quarter", count=80)
+client.bars.get("sz000001", period="year", count=30)
+client.bars.get("sz000001", period="1m", count=800)
+client.bars.get("sz000001", period="day", adjust="qfq", count=800)
+```
+
+返回 `KlineSeries`，主要字段：
+
+| 字段 | 含义 |
+| --- | --- |
+| `period_name` | 服务端返回周期名 |
+| `adjust_mode` | 复权模式，`none`、`qfq`、`hfq`、`fixed_qfq`、`fixed_hfq` |
+| `bars` | K 线记录列表 |
+| `bars[].time` | K 线时间 |
+| `bars[].open/high/low/close` | 开高低收 |
+| `bars[].volume_lots` | 成交量，单位手 |
+| `bars[].amount` | 成交额 |
+
+周期和复权参数同上。定点复权可同时传 `anchor_date`。
+
+### `all(code, period="day", adjust=None, page_size=800, max_pages=200, include_raw=False)`
+
+分页拉取 K 线，直到服务端返回短页。`max_pages` 用来避免异常情况下无限循环。
+
+```python
+client.bars.all("sz000001", period="day")
+```
+
+## `client.minutes`
+
+### `today(code, include_raw=False)`
+
+查询当日分时，对应 `0x0537`。
+
+```python
+client.minutes.today("sz000001")
+```
+
+### `history(code, trading_date, include_raw=False)`
+
+查询指定日期历史分时，对应 `0x0fb4`。
+
+```python
+client.minutes.history("sz000001", "2026-05-20")
+```
+
+### `recent(code, trading_date, include_raw=False)`
+
+查询近期历史分时，对应 `0x0feb`。
+
+```python
+client.minutes.recent("sz000001", "2026-05-20")
+```
+
+### `aux(code, kind, include_raw=False)`
+
+查询分时副图数据，对应 `0x051b`。
+
+```python
+client.minutes.aux("sz000001", kind="buy_sell_strength")
+client.minutes.aux("sz000001", kind="volume_comparison")
+```
+
+### `sparkline(code, selector=1, window=20, include_raw=False)`
+
+查询单标的小走势图，对应 `0x0fd1`。
+
+```python
+client.minutes.sparkline("sz000001", selector=1)
+```
+
+## `client.trades`
+
+### `today(code, start=0, count=1800, include_raw=False)`
+
+查询当日成交明细，对应 `0x0fc5`。
+
+```python
+client.trades.today("sz000001", start=0, count=1800)
+```
+
+### `history(code, trading_date, start=0, count=2000, include_raw=False)`
+
+查询历史成交明细增强接口，对应 `0x0fc6`。
+
+```python
+client.trades.history("sz000001", "2026-05-20")
+```
+
+## `client.auctions`
+
+### `series(code, include_raw=False)`
+
+查询当前交易日集合竞价明细，对应 `0x056a`。
+
+```python
+client.auctions.series("sz000001")
+```
+
+## `client.corporate`
+
+### `capital_changes(code, include_raw=False)`
+
+查询股本变迁 / 除权相关数据，对应 `0x000f`。
+
+```python
+client.corporate.capital_changes("sz000001")
+```
+
+### `finance_batch(codes, fields=None, include_raw=False)`
+
+批量查询财务字段，对应 `0x0010`。`fields` 只过滤本地返回字段，底层仍按 `0x0010` 请求完整记录。
+
+```python
+client.corporate.finance_batch(["sz000001", "sh600000"])
+client.corporate.finance_batch(["sz000001"], fields=["流通股本", "total_shares"])
+```
+
+## `client.limits`
+
+### `special(start_index=0)`
+
+查询特殊品种涨跌停限制表，对应 `0x0452`。
+
+```python
+client.limits.special(start_index=0)
+```
+
+`0x0452` 按表内行号分页取记录。需要查询某个代码时，先扫描建本地索引：
+
+```python
+records = client.limits.scan_special()
+```
+
+## `client.f10`
+
+`client.f10` 走 `7615/TQLEX` HTTP 网关，独立于 `7709` socket 握手。它适合查询 F10 资料、题材、公告、财务报表和估值数据。
+
+```python
+client.f10.company_profile("000034")
+client.f10.hot_topics("000034")
+client.f10.announcements("000034")
+client.f10.finance_report("000034")
+client.f10.valuation("000034")
+```
+
+所有方法返回 `F10Response`，常用数据在第一张表的 `rows`：
+
+```python
+response = client.f10.hot_topics("000034")
+print(response.entry)
+print(response.rows[:3])
+```
+
+需要直接调用 Entry 时，可以使用通用 TQLEX 调用：
+
+```python
+client.f10.call("CWServ.tdxf10_gg_gsgk", params=["8", "000034", ""])
+```
+
+完整 F10 方法表见 [F10_7615.md](F10_7615.md)。
+
+## `client.helpers`
+
+`client.helpers` 提供常用问题的组合调用。
+
+```python
+with TdxClient(timeout=3) as client:
+    profiles = client.helpers.stock_profile_table(["sz000001", "sh600000"])
+    topics = client.helpers.stock_topics("000034")
+    stocks = client.helpers.topic_stocks("000034", topic_name="存储芯片")
+    auction = client.helpers.auction_data("sz000001", "2026-05-20")
+```
+
+- [想拿某个或某些股票的表头信息怎么办？](helpers/股票信息汇总.md)
+- [想查询某个股票都有哪些概念板块怎么办？](helpers/个股概念板块.md)
+- [想查询某个概念板块都有哪些股票怎么办？](helpers/概念板块成分股.md)
+- [想拿集合竞价数据怎么办？](helpers/竞价数据.md)
+- [想给一批股票整理行情表怎么办？](helpers/批量行情表.md)
+- [想拿复权或不复权 K 线怎么办？](helpers/复权K线.md)

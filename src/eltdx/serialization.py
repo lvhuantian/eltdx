@@ -1,22 +1,25 @@
+"""JSON serialization helpers for eltdx return models."""
+
 from __future__ import annotations
 
 import json
 from dataclasses import fields, is_dataclass
 from datetime import date, datetime
-from enum import Enum
 from pathlib import Path
 from typing import Any
 
 
 def to_jsonable(value: Any) -> Any:
+    """Convert eltdx models and common Python objects to JSON-safe values."""
+
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
 
     if isinstance(value, (datetime, date)):
         return value.isoformat()
 
-    if isinstance(value, Enum):
-        return value.value
+    if isinstance(value, bytes):
+        return value.hex()
 
     if is_dataclass(value) and not isinstance(value, type):
         return {field.name: to_jsonable(getattr(value, field.name)) for field in fields(value)}
@@ -34,5 +37,6 @@ def to_jsonable(value: Any) -> Any:
 
 
 def to_json(value: Any, *, ensure_ascii: bool = False, indent: int | None = None) -> str:
-    return json.dumps(to_jsonable(value), ensure_ascii=ensure_ascii, indent=indent)
+    """Serialize eltdx models to a JSON string."""
 
+    return json.dumps(to_jsonable(value), ensure_ascii=ensure_ascii, indent=indent)
