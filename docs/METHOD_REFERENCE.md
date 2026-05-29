@@ -456,7 +456,10 @@ series = client.get_kline_all("day", "sz000001")
 ```python
 client.get_adjusted_kline("day", "sz000001", adjust="qfq")
 client.get_adjusted_kline_all("day", "sz000001", adjust="hfq")
+client.get_adjusted_kline("day", "sz000001", adjust="fixed_qfq", anchor_date="2024-06-03")
 ```
+
+`anchor_date` 会透传给 `0x052d`，可用于定点前复权 / 定点后复权。
 
 ## 分时
 

@@ -540,13 +540,22 @@ class TdxClient:
         code: str,
         *,
         adjust="qfq",
+        anchor_date=None,
         start: int = 0,
         count: int = DEFAULT_KLINE_PAGE_SIZE,
         include_raw: bool = False,
     ):
         """兼容旧版名称：当前直接使用 0x052d 的服务端复权参数。"""
 
-        return self.bars.get(code, period=period, adjust=adjust, start=start, count=count, include_raw=include_raw)
+        return self.bars.get(
+            code,
+            period=period,
+            adjust=adjust,
+            anchor_date=anchor_date,
+            start=start,
+            count=count,
+            include_raw=include_raw,
+        )
 
     def get_adjusted_kline_all(
         self,
@@ -554,13 +563,22 @@ class TdxClient:
         code: str,
         *,
         adjust="qfq",
+        anchor_date=None,
         page_size: int = DEFAULT_KLINE_PAGE_SIZE,
         max_pages: int | None = 200,
         include_raw: bool = False,
     ):
         """兼容旧版名称：当前直接使用 0x052d 的服务端复权参数。"""
 
-        return self.bars.all(code, period=period, adjust=adjust, page_size=page_size, max_pages=max_pages, include_raw=include_raw)
+        return self.bars.all(
+            code,
+            period=period,
+            adjust=adjust,
+            anchor_date=anchor_date,
+            page_size=page_size,
+            max_pages=max_pages,
+            include_raw=include_raw,
+        )
 
     def get_local_adjusted_kline_all(self, period, code: str, *, adjust="qfq"):
         """高级工具：用本地复权因子调整不复权 K 线。"""

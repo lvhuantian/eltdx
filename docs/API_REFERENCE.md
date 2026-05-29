@@ -99,10 +99,11 @@ client.get_kline("sz000001", "day", count=30)
 client.get_kline_all("day", "sz000001")
 client.get_adjusted_kline("day", "sz000001", adjust="qfq")
 client.get_adjusted_kline("week", "sz000001", adjust="hfq")
+client.get_adjusted_kline("day", "sz000001", adjust="fixed_qfq", anchor_date="2024-06-03")
 client.get_kline("1m", "sz000001", count=240)
 ```
 
-`get_kline()` 同时支持旧版常见的 `(period, code)` 和 `(code, period)` 参数顺序。`get_adjusted_kline()` 直接使用 `0x052d` 的服务端复权参数；本地复权因子可用 `get_factors()` 查看。
+`get_kline()` 同时支持旧版常见的 `(period, code)` 和 `(code, period)` 参数顺序。`get_adjusted_kline()` 直接使用 `0x052d` 的服务端复权参数，也可传 `anchor_date` 做定点复权；本地复权因子可用 `get_factors()` 查看。
 
 常用周期：
 

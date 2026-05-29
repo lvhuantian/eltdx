@@ -353,6 +353,15 @@ def test_compat_kline_arg_order_and_adjust_payload() -> None:
     assert transport.payload["period"] == "day"
     assert transport.payload["adjust"] == "qfq"
     assert client.get_kline("sz000001", "day", count=5)["period"] == "day"
+    assert client.get_adjusted_kline(
+        "day",
+        "sz000001",
+        adjust="fixed_qfq",
+        anchor_date="2024-06-03",
+        count=5,
+    )["code"] == "sz000001"
+    assert transport.payload["adjust"] == "fixed_qfq"
+    assert transport.payload["anchor_date"] == "2024-06-03"
 
 
 def test_compat_get_gbbq_forwards_include_raw() -> None:
