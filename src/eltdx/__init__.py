@@ -34,4 +34,4 @@ __all__ = [
     "to_json",
     "to_jsonable",
 ]
-__version__ = "1.0.1"
+__version__ = "1.0.2"
