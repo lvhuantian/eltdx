@@ -38,7 +38,7 @@ with TdxClient(timeout=3) as client:
 | 财务基础信息         | `client.corporate.finance_batch()`                  | 查询流通股本、总股本、EPS、资产、收入、利润等字段 |
 | 特殊品种涨跌停限制      | `client.limits.special()`                           | 查询特殊品种涨跌停限制表               |
 
-底层命令和业务 API 的对应关系见 [COMMANDS_7709.md](COMMANDS_7709.md)。
+底层命令和业务 API 的对应关系见 [COMMANDS_7709.md](https://github.com/electkismet/eltdx/blob/v1.0.0/docs/COMMANDS_7709.md)。
 
 ## F10 / 资料能力
 
@@ -58,7 +58,7 @@ with TdxClient(timeout=3) as client:
 | 公告、新闻、研报 | `client.f10.news()` / `announcements()` / `company_news()` | 查询公司资讯、公告、研报和路演列表          |
 | 详情正文     | `client.f10.detail()`                                      | 按记录 ID 查询正文标题和正文内容         |
 
-完整 Entry 对照见 [F10_7615.md](F10_7615.md)。
+完整 Entry 对照见 [F10_7615.md](https://github.com/electkismet/eltdx/blob/v1.0.0/docs/F10_7615.md)。
 
 ## 常用场景 Helper
 
@@ -66,14 +66,14 @@ with TdxClient(timeout=3) as client:
 
 | 常用问题                | 调用入口                                   | 文档                            |
 | ------------------- | -------------------------------------- | ----------------------------- |
-| 想拿某个或某些股票的表头信息怎么办？  | `client.helpers.stock_profile_table()` | [股票信息汇总](helpers/股票信息汇总.md)   |
-| 想查询某个股票都有哪些概念板块怎么办？ | `client.helpers.stock_topics()`        | [个股概念板块](helpers/个股概念板块.md)   |
-| 想查询某个概念板块都有哪些股票怎么办？ | `client.helpers.topic_stocks()`        | [概念板块成分股](helpers/概念板块成分股.md) |
-| 想拿集合竞价数据怎么办？        | `client.helpers.auction_data()`        | [竞价数据](helpers/竞价数据.md)       |
-| 想给一批股票整理行情表怎么办？     | `client.helpers.quote_table()`         | [批量行情表](helpers/批量行情表.md)     |
-| 想拿复权或不复权 K 线怎么办？    | `client.helpers.adjusted_kline()`      | [复权K线](helpers/复权K线.md)       |
+| 想拿某个或某些股票的表头信息怎么办？  | `client.helpers.stock_profile_table()` | [股票信息汇总](https://github.com/electkismet/eltdx/blob/v1.0.0/docs/helpers/股票信息汇总.md)   |
+| 想查询某个股票都有哪些概念板块怎么办？ | `client.helpers.stock_topics()`        | [个股概念板块](https://github.com/electkismet/eltdx/blob/v1.0.0/docs/helpers/个股概念板块.md)   |
+| 想查询某个概念板块都有哪些股票怎么办？ | `client.helpers.topic_stocks()`        | [概念板块成分股](https://github.com/electkismet/eltdx/blob/v1.0.0/docs/helpers/概念板块成分股.md) |
+| 想拿集合竞价数据怎么办？        | `client.helpers.auction_data()`        | [竞价数据](https://github.com/electkismet/eltdx/blob/v1.0.0/docs/helpers/竞价数据.md)       |
+| 想给一批股票整理行情表怎么办？     | `client.helpers.quote_table()`         | [批量行情表](https://github.com/electkismet/eltdx/blob/v1.0.0/docs/helpers/批量行情表.md)     |
+| 想拿复权或不复权 K 线怎么办？    | `client.helpers.adjusted_kline()`      | [复权K线](https://github.com/electkismet/eltdx/blob/v1.0.0/docs/helpers/复权K线.md)       |
 
-常用问题入口见 [helpers/README.md](helpers/README.md)。
+常用问题入口见 [helpers/README.md](https://github.com/electkismet/eltdx/blob/v1.0.0/docs/helpers/README.md)。
 
 ## 连接、缓存和调试
 
@@ -94,22 +94,22 @@ with TdxClient(timeout=3) as client:
 eltdx-mcp
 ```
 
-当前 MCP 工具覆盖行情快照、K 线、个股题材、题材成分股、F10 概况、热点题材和 09:25 竞价成交快照。详细说明见 [MCP.md](MCP.md)。
+当前 MCP 工具覆盖行情快照、K 线、个股题材、题材成分股、F10 概况、热点题材和 09:25 竞价成交快照。详细说明见 [MCP.md](https://github.com/electkismet/eltdx/blob/v1.0.0/docs/MCP.md)。
 
 ## 文档体系
 
 `v1.0.0` 补充了面向使用者的中文文档：
 
-- [README](../README.md)：项目能力、安装方式、快速开始和文档入口。
-- [METHOD_REFERENCE.md](METHOD_REFERENCE.md)：每个调用方法的参数、底层接口和解析字段。
-- [methods/README.md](methods/README.md)：每个调用方法的独立说明页。
-- [FIELD_REFERENCE.md](FIELD_REFERENCE.md)：返回模型字段中文含义。
-- [COMMANDS_7709.md](COMMANDS_7709.md)：`7709` 命令和业务 API 对照。
-- [F10_7615.md](F10_7615.md)：`7615 / TQLEX` Entry 和资料接口说明。
-- [API_REFERENCE.md](API_REFERENCE.md)：`TdxClient`、`F10Client` 和业务 API 说明。
-- [EXAMPLES.md](EXAMPLES.md)：复制即用的调用示例。
-- [DEBUG_GUIDE.md](DEBUG_GUIDE.md)：主站、连接和协议排查。
-- [MCP.md](MCP.md)：MCP 工具服务说明。
+- [README](https://github.com/electkismet/eltdx/blob/v1.0.0/README.md)：项目能力、安装方式、快速开始和文档入口。
+- [METHOD_REFERENCE.md](https://github.com/electkismet/eltdx/blob/v1.0.0/docs/METHOD_REFERENCE.md)：每个调用方法的参数、底层接口和解析字段。
+- [methods/README.md](https://github.com/electkismet/eltdx/blob/v1.0.0/docs/methods/README.md)：每个调用方法的独立说明页。
+- [FIELD_REFERENCE.md](https://github.com/electkismet/eltdx/blob/v1.0.0/docs/FIELD_REFERENCE.md)：返回模型字段中文含义。
+- [COMMANDS_7709.md](https://github.com/electkismet/eltdx/blob/v1.0.0/docs/COMMANDS_7709.md)：`7709` 命令和业务 API 对照。
+- [F10_7615.md](https://github.com/electkismet/eltdx/blob/v1.0.0/docs/F10_7615.md)：`7615 / TQLEX` Entry 和资料接口说明。
+- [API_REFERENCE.md](https://github.com/electkismet/eltdx/blob/v1.0.0/docs/API_REFERENCE.md)：`TdxClient`、`F10Client` 和业务 API 说明。
+- [EXAMPLES.md](https://github.com/electkismet/eltdx/blob/v1.0.0/docs/EXAMPLES.md)：复制即用的调用示例。
+- [DEBUG_GUIDE.md](https://github.com/electkismet/eltdx/blob/v1.0.0/docs/DEBUG_GUIDE.md)：主站、连接和协议排查。
+- [MCP.md](https://github.com/electkismet/eltdx/blob/v1.0.0/docs/MCP.md)：MCP 工具服务说明。
 
 ## 与旧版的主要差异
 
@@ -150,7 +150,7 @@ with TdxClient(timeout=3) as client:
 | 查询 F10 资料 | `client.f10` 或 `F10Client`                                                    |
 | 启动 MCP    | `eltdx-mcp`                                                                   |
 
-旧字段和当前字段的关系见 [FIELD_MIGRATION.md](FIELD_MIGRATION.md)。
+旧字段和当前字段的关系见 [FIELD_MIGRATION.md](https://github.com/electkismet/eltdx/blob/v1.0.0/docs/FIELD_MIGRATION.md)。
 
 ## 安装和验证
 
