@@ -1,5 +1,9 @@
 # eltdx
 
+[![PyPI](https://img.shields.io/pypi/v/eltdx?label=pypi&logo=pypi)](https://pypi.org/project/eltdx/)
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue)](https://pypi.org/project/eltdx/)
+[![Build](https://img.shields.io/github/actions/workflow/status/electkismet/eltdx/ci.yml?branch=main&label=build)](https://github.com/electkismet/eltdx/actions/workflows/ci.yml)
+
 通达信在线行情协议 Python 库。可以拿 A 股的行情、分时、成交明细、K 线、竞价、公司信息、题材信息等信息，支持 MCP 工具。
 
 1. 本项目仅以个人学习、协议研究和非商业研究为目的进行开发。
