@@ -21,11 +21,45 @@ def _catalog() -> dict:
     return json.loads(payload[:-1])
 
 
+def _taxonomy_assignments(catalog: dict) -> dict[str, tuple[str, str | None]]:
+    items = catalog["items"]
+    item_ids = {item["id"] for item in items}
+    assignments: dict[str, tuple[str, str | None]] = {}
+
+    def assign(item_id: str, layer_id: str, group_id: str | None) -> None:
+        assert item_id in item_ids
+        assert item_id not in assignments
+        assignments[item_id] = (layer_id, group_id)
+
+    for layer in catalog["taxonomy"]["layers"]:
+        for item_id in layer.get("item_ids", []):
+            assign(item_id, layer["id"], None)
+        for group in layer.get("groups", []):
+            for item_id in group.get("item_ids", []):
+                assign(item_id, layer["id"], group["id"])
+
+    for layer in catalog["taxonomy"]["layers"]:
+        for group in layer.get("groups", []):
+            if source := group.get("source"):
+                for item in items:
+                    if item["id"] not in assignments and item["source"] == source:
+                        assign(item["id"], layer["id"], group["id"])
+
+    for layer in catalog["taxonomy"]["layers"]:
+        if source := layer.get("source"):
+            for item in items:
+                if item["id"] not in assignments and item["source"] == source:
+                    assign(item["id"], layer["id"], None)
+
+    assert set(assignments) == item_ids
+    return assignments
+
+
 def test_pages_catalog_has_expected_public_interfaces() -> None:
     catalog = _catalog()
     items = catalog["items"]
 
-    assert catalog["schema_version"] == 3
+    assert catalog["schema_version"] == 4
     assert len(items) == 64
     assert Counter(item["source"] for item in items) == {
         "7709": 28,
@@ -36,44 +70,42 @@ def test_pages_catalog_has_expected_public_interfaces() -> None:
     assert len({item["id"] for item in items}) == len(items)
 
 
-def test_pages_catalog_has_two_exclusive_interface_layers() -> None:
+def test_pages_catalog_is_organized_by_source_and_call_level() -> None:
     catalog = _catalog()
-    items = catalog["items"]
-    item_ids = {item["id"] for item in items}
-    layers = {layer["id"]: layer for layer in catalog["taxonomy"]["layers"]}
+    ordered_layers = catalog["taxonomy"]["layers"]
+    layers = {layer["id"]: layer for layer in ordered_layers}
+    assignments = _taxonomy_assignments(catalog)
 
-    assert set(layers) == {"binary", "wrapper"}
-    assert layers["binary"]["label"] == "二进制接口解析"
-    assert layers["wrapper"]["label"] == "上层接口"
-
-    binary_groups = layers["binary"]["groups"]
-    binary_ids = [item_id for group in binary_groups for item_id in group["item_ids"]]
-    wrapper_ids = item_ids - set(binary_ids)
-
-    assert len(binary_ids) == len(set(binary_ids)) == 21
-    assert set(binary_ids) <= item_ids
-    assert len(wrapper_ids) == 43
-    assert Counter(item["source"] for item in items if item["id"] in wrapper_ids) == {
-        "7709": 7,
-        "F10": 21,
-        "Helper": 6,
-        "MCP": 9,
-    }
-    assert [(group["id"], group["label"], group["source"]) for group in layers["wrapper"]["groups"]] == [
-        ("tdx-wrappers", "7709 协议封装", "7709"),
-        ("f10", "7615 / F10 协议封装", "F10"),
-        ("helpers", "Helpers 功能封装", "Helper"),
-        ("mcp", "MCP 工具", "MCP"),
+    assert [(layer["id"], layer["label"]) for layer in ordered_layers] == [
+        ("7709", "7709 行情接口"),
+        ("7615", "7615 / F10 接口"),
+        ("helpers", "Helpers 功能接口"),
+        ("mcp", "MCP 工具"),
     ]
+    assert Counter(layer_id for layer_id, _ in assignments.values()) == {
+        "7709": 28,
+        "7615": 21,
+        "helpers": 6,
+        "mcp": 9,
+    }
+    assert Counter(group_id for layer_id, group_id in assignments.values() if layer_id == "7709") == {
+        "commands": 21,
+        "convenience": 7,
+    }
+    assert Counter(group_id for layer_id, group_id in assignments.values() if layer_id == "7615") == {
+        "entry": 1,
+        "features": 20,
+    }
+    assert layers["helpers"]["source"] == "Helper" and "groups" not in layers["helpers"]
+    assert layers["mcp"]["source"] == "MCP" and "groups" not in layers["mcp"]
+    assert assignments["f10-generic-entry"] == ("7615", "entry")
 
 
 def test_pages_catalog_covers_every_registered_7709_command() -> None:
     catalog = _catalog()
-    binary_ids = {
-        item_id
-        for group in catalog["taxonomy"]["layers"][0]["groups"]
-        for item_id in group["item_ids"]
-    }
+    tdx_layer = next(layer for layer in catalog["taxonomy"]["layers"] if layer["id"] == "7709")
+    commands_group = next(group for group in tdx_layer["groups"] if group["id"] == "commands")
+    binary_ids = set(commands_group["item_ids"])
     binary_protocols = [item["protocol"].lower() for item in catalog["items"] if item["id"] in binary_ids]
 
     assert len(COMMANDS) == len(binary_ids) == 21
@@ -108,6 +140,8 @@ def test_pages_catalog_ui_exposes_taxonomy_navigation() -> None:
     assert "data-interface-scope-select" in page
     assert "window.location.hash" in app
     assert 'layer.id + "/" + group.id' in app
+    assert '"wrapper/helpers": "helpers"' in app
+    assert "catalog-tree-leaf" in app
 
 
 def test_readme_promotes_the_static_pages_catalog() -> None:

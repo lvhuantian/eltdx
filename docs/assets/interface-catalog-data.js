@@ -1,32 +1,54 @@
 window.ELTDX_CATALOG = {
-  "schema_version": 3,
+  "schema_version": 4,
   "taxonomy": {
     "layers": [
       {
-        "id": "binary",
-        "label": "二进制接口解析",
-        "description": "21 个 7709 二进制命令，按请求编码、响应解析和业务领域组织。",
+        "id": "7709",
+        "label": "7709 行情接口",
+        "tag_label": "7709",
+        "stat_label": "7709 行情",
+        "description": "28 项 7709 行情能力，包括 21 个二进制命令和 7 个便捷调用。",
         "groups": [
-          {"id": "session", "label": "会话", "item_ids": ["7709-handshake", "7709-heartbeat"]},
-          {"id": "codes", "label": "证券代码", "item_ids": ["7709-code-count", "7709-code-list"]},
-          {"id": "quotes", "label": "行情", "item_ids": ["7709-quote-snapshots", "7709-legacy-quotes", "7709-category-quotes", "7709-quote-refresh"]},
-          {"id": "klines", "label": "K 线", "item_ids": ["7709-kline"]},
-          {"id": "minutes", "label": "分时", "item_ids": ["7709-minute-today", "7709-minute-history", "7709-minute-recent", "7709-minute-aux", "7709-sparkline"]},
-          {"id": "trades-auctions", "label": "逐笔与竞价", "item_ids": ["7709-trades-today", "7709-trades-history", "7709-auction-series"]},
-          {"id": "corporate", "label": "公司与交易基础", "item_ids": ["7709-gbbq", "7709-finance", "7709-special-limits"]},
-          {"id": "resources", "label": "服务器资源", "item_ids": ["7709-file-content"]}
+          {
+            "id": "commands",
+            "label": "二进制命令",
+            "item_ids": [
+              "7709-handshake", "7709-heartbeat", "7709-code-count", "7709-code-list",
+              "7709-quote-snapshots", "7709-legacy-quotes", "7709-category-quotes", "7709-quote-refresh",
+              "7709-kline", "7709-minute-today", "7709-minute-history", "7709-minute-recent",
+              "7709-minute-aux", "7709-sparkline", "7709-trades-today", "7709-trades-history",
+              "7709-auction-series", "7709-gbbq", "7709-finance", "7709-special-limits", "7709-file-content"
+            ]
+          },
+          {"id": "convenience", "label": "便捷调用", "source": "7709"}
         ]
       },
       {
-        "id": "wrapper",
-        "label": "上层接口",
-        "description": "43 个面向调用者的协议封装、功能封装与 MCP 工具。",
+        "id": "7615",
+        "label": "7615 / F10 接口",
+        "tag_label": "7615 / F10",
+        "stat_label": "7615 / F10",
+        "description": "21 项 7615 / F10 能力，包括 1 个通用 Entry 和 20 个功能调用。",
         "groups": [
-          {"id": "tdx-wrappers", "label": "7709 协议封装", "source": "7709"},
-          {"id": "f10", "label": "7615 / F10 协议封装", "source": "F10"},
-          {"id": "helpers", "label": "Helpers 功能封装", "source": "Helper"},
-          {"id": "mcp", "label": "MCP 工具", "source": "MCP"}
+          {"id": "entry", "label": "通用 Entry", "item_ids": ["f10-generic-entry"]},
+          {"id": "features", "label": "功能调用", "source": "F10"}
         ]
+      },
+      {
+        "id": "helpers",
+        "label": "Helpers 功能接口",
+        "tag_label": "Helpers",
+        "stat_label": "Helpers",
+        "description": "6 项面向使用场景的功能接口，组合公开 API 并整理或计算新的结果。",
+        "source": "Helper"
+      },
+      {
+        "id": "mcp",
+        "label": "MCP 工具",
+        "tag_label": "MCP",
+        "stat_label": "MCP",
+        "description": "9 项 MCP 工具，向 Agent 暴露现有的行情、F10、Helper 和文档能力。",
+        "source": "MCP"
       }
     ]
   },

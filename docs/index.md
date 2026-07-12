@@ -24,10 +24,10 @@ hide:
     <header class="catalog-heading">
       <p class="catalog-kicker">接口目录</p>
       <h1 data-interface-heading>接口文档</h1>
-      <p data-interface-lead>当前公开的二进制协议解析与上层调用能力。每项均链接到参数、返回字段和示例说明。</p>
+      <p data-interface-lead>当前公开的 7709 行情、7615 / F10、Helpers 和 MCP 能力。每项均链接到参数、返回字段和示例说明。</p>
     </header>
 
-    <div class="interface-stats" data-interface-stats aria-label="接口层级统计"></div>
+    <div class="interface-stats" data-interface-stats aria-label="接口来源统计"></div>
 
     <div class="interface-controls">
       <div class="interface-control-field interface-search-field">
@@ -47,7 +47,7 @@ hide:
     <div class="interface-table" role="table" aria-label="eltdx 接口目录">
       <div class="interface-table-head" role="row">
         <span role="columnheader">接口 / 调用</span>
-        <span role="columnheader">层级 / 目录</span>
+        <span role="columnheader">来源 / 目录</span>
         <span role="columnheader">协议 / 类型</span>
         <span role="columnheader">说明</span>
         <span role="columnheader">返回 / 文档</span>
@@ -60,8 +60,9 @@ hide:
 
     <section class="catalog-scope" aria-labelledby="catalog-scope-title">
       <h2 id="catalog-scope-title">统计口径</h2>
-      <p><code>二进制接口解析</code> 按 21 个已注册的 7709 命令组织；同一命令的编码、解码和对应方法只保留一份底层说明。</p>
-      <p><code>上层接口</code> 收录 43 个面向调用者的能力：协议封装围绕协议处理分页、拆批和字段整理；Helpers 功能封装围绕实际场景组合接口并计算结果；MCP 工具负责向 Agent 暴露已有能力。</p>
+      <p><code>7709</code> 收录 21 个二进制命令和 7 个便捷调用；便捷调用负责分页、拆批、协议组合及本地整理，结果仍属于原有行情领域。</p>
+      <p><code>7615 / F10</code> 收录 1 个通用 Entry 和 20 个功能调用；它使用 HTTP POST 与 JSON，不属于二进制协议。</p>
+      <p><code>Helpers</code> 面向实际场景组合公开 API 并计算新结果；<code>MCP</code> 负责向 Agent 暴露已有能力。</p>
       <p>目录数据随静态页面发布，打开后不会连接行情主站、F10 网关或任何 eltdx 后台服务。</p>
     </section>
   </div>

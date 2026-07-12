@@ -33,6 +33,13 @@
   var itemMeta = Object.create(null);
   var scopes = Object.create(null);
   var taxonomyErrors = [];
+  var scopeAliases = {
+    "binary": "7709/commands",
+    "wrapper/tdx-wrappers": "7709/convenience",
+    "wrapper/f10": "7615",
+    "wrapper/helpers": "helpers",
+    "wrapper/mcp": "mcp"
+  };
 
   function createElement(tag, className, text) {
     var element = document.createElement(tag);
@@ -75,10 +82,24 @@
   });
 
   layers.forEach(function (layer) {
+    (layer.item_ids || []).forEach(function (itemId) {
+      registerItem(itemId, layer, null);
+    });
     (layer.groups || []).forEach(function (group) {
       (group.item_ids || []).forEach(function (itemId) {
         registerItem(itemId, layer, group);
       });
+    });
+  });
+
+  layers.forEach(function (layer) {
+    if (!layer.source) {
+      return;
+    }
+    items.forEach(function (item) {
+      if (!itemMeta[item.id] && item.source === layer.source) {
+        registerItem(item.id, layer, null);
+      }
     });
   });
 
@@ -109,7 +130,7 @@
   function countScope(layerId, groupId) {
     return items.filter(function (item) {
       var meta = itemMeta[item.id];
-      return meta.layer.id === layerId && (!groupId || meta.group.id === groupId);
+      return meta.layer.id === layerId && (!groupId || (meta.group && meta.group.id === groupId));
     }).length;
   }
 
@@ -117,7 +138,7 @@
     scopes.all = {
       id: "all",
       label: "接口文档",
-      description: "共 " + items.length + " 项公开能力，按二进制接口解析与上层接口两层组织。",
+      description: "共 " + items.length + " 项公开能力，按 7709、7615 / F10、Helpers 和 MCP 组织。",
       count: items.length
     };
     layers.forEach(function (layer) {
@@ -156,6 +177,10 @@
   function renderTree() {
     tree.appendChild(scopeLink("all", "全部接口", items.length, "catalog-tree-all"));
     layers.forEach(function (layer) {
+      if (!(layer.groups || []).length) {
+        tree.appendChild(scopeLink(layer.id, layer.label, scopes[layer.id].count, "catalog-tree-leaf"));
+        return;
+      }
       var details = createElement("details", "catalog-tree-layer");
       details.open = true;
       var summary = createElement("summary", "catalog-tree-summary");
@@ -181,6 +206,12 @@
     scopeSelect.appendChild(allOption);
 
     layers.forEach(function (layer) {
+      if (!(layer.groups || []).length) {
+        var directOption = createElement("option", "", layer.label + " (" + scopes[layer.id].count + ")");
+        directOption.value = layer.id;
+        scopeSelect.appendChild(directOption);
+        return;
+      }
       var optionGroup = createElement("optgroup");
       optionGroup.label = layer.label;
       var layerOption = createElement("option", "", "全部 " + layer.label + " (" + scopes[layer.id].count + ")");
@@ -198,7 +229,7 @@
 
   function renderStats() {
     layers.forEach(function (layer) {
-      var stat = scopeLink(layer.id, layer.label, scopes[layer.id].count, "interface-stat");
+      var stat = scopeLink(layer.id, layer.stat_label || layer.label, scopes[layer.id].count, "interface-stat");
       var count = stat.querySelector("em");
       var label = stat.querySelector("span");
       stat.textContent = "";
@@ -221,7 +252,7 @@
       item.summary,
       item.return_model,
       meta.layer.label,
-      meta.group.label
+      meta.group ? meta.group.label : ""
     ].join(" "));
   }
 
@@ -232,7 +263,7 @@
       row.setAttribute("role", "row");
       row.dataset.interfaceItem = "";
       row.dataset.layer = meta.layer.id;
-      row.dataset.group = meta.group.id;
+      row.dataset.group = meta.group ? meta.group.id : "";
       row.dataset.source = item.source;
       row.dataset.search = searchText(item, meta);
 
@@ -245,10 +276,10 @@
 
       var directory = createElement("div", "interface-cell interface-source");
       directory.setAttribute("role", "cell");
-      var layerTag = createElement("span", "interface-layer-tag", meta.layer.label);
+      var layerTag = createElement("span", "interface-layer-tag", meta.layer.tag_label || meta.layer.label);
       layerTag.dataset.layer = meta.layer.id;
       directory.appendChild(layerTag);
-      var directoryDetail = meta.group.label + (meta.layer.id === "binary" ? " · 7709" : "");
+      var directoryDetail = meta.group ? meta.group.label : item.category;
       directory.appendChild(createElement("small", "", directoryDetail));
 
       var protocol = createElement("div", "interface-cell interface-protocol");
@@ -283,7 +314,16 @@
     } catch (error) {
       raw = "";
     }
-    return scopes[raw] ? raw : "all";
+    if (scopes[raw]) {
+      return raw;
+    }
+    if (scopeAliases[raw]) {
+      return scopeAliases[raw];
+    }
+    if (raw.indexOf("binary/") === 0) {
+      return "7709/commands";
+    }
+    return "all";
   }
 
   function rowMatchesScope(row, scope) {
