@@ -5,9 +5,7 @@
 </p>
 
 <p align="center">
-  <a href="https://electkismet.github.io/eltdx/"><strong>在线文档</strong></a>
-  ·
-  <a href="https://electkismet.github.io/eltdx/">接口一览</a>
+  <a href="https://electkismet.github.io/eltdx/"><strong>接口一览</strong></a>
   ·
   <a href="https://pypi.org/project/eltdx/">PyPI</a>
 </p>

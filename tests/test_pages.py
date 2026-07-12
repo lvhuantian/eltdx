@@ -66,6 +66,7 @@ def test_pages_remains_static_and_outside_runtime_dependencies() -> None:
 def test_readme_promotes_the_static_pages_catalog() -> None:
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
 
-    assert '<a href="https://electkismet.github.io/eltdx/"><strong>在线文档</strong></a>' in readme
+    assert '<a href="https://electkismet.github.io/eltdx/"><strong>接口一览</strong></a>' in readme
+    assert "<strong>在线文档</strong>" not in readme
     assert 'src=".github/assets/eltdx-readme-banner.png"' in readme
     assert README_BANNER_PATH.is_file()
