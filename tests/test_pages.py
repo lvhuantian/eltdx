@@ -120,6 +120,30 @@ def test_pages_catalog_links_to_existing_docs() -> None:
             assert f"{{#{anchor}}}" in doc_path.read_text(encoding="utf-8"), item["id"]
 
 
+def test_quote_command_docs_explain_the_three_distinct_roles() -> None:
+    command_map = (REPO_ROOT / "docs" / "COMMANDS_7709.md").read_text(encoding="utf-8")
+    assert "## 三个行情命令的边界" in command_map
+    assert "不能互换解析器" in command_map
+    assert "client.get_quote(codes)" in command_map
+
+    expected_roles = {
+        "7709-批量快照.md": "无游标的一次性基础快照",
+        "7709-增量刷新推送队列.md": "按代码和游标刷新行情",
+        "7709-旧版批量行情.md": "无游标的旧版完整快照",
+    }
+    for filename, role in expected_roles.items():
+        text = (REPO_ROOT / "docs" / "methods" / filename).read_text(encoding="utf-8")
+        lower_text = text.lower()
+        assert "## 与 `0x" in text
+        assert role in text
+        assert all(command in lower_text for command in ("0x054c", "0x0547", "0x053e"))
+
+    items = {item["id"]: item for item in _catalog()["items"]}
+    assert "一次性基础快照" in items["7709-quote-snapshots"]["summary"]
+    assert "旧版完整快照" in items["7709-legacy-quotes"]["summary"]
+    assert "代码和游标" in items["7709-quote-refresh"]["summary"]
+
+
 def test_pages_remains_static_and_outside_runtime_dependencies() -> None:
     app = (REPO_ROOT / "docs" / "assets" / "interface-catalog.js").read_text(encoding="utf-8")
     pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
