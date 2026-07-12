@@ -16,9 +16,8 @@
   var layers = catalog.taxonomy.layers;
   var sourceLabels = {
     "7709": "7709",
-    "F10": "7615 / F10",
-    "Helper": "Helper",
-    "MCP": "MCP"
+    "F10": "7615",
+    "Helper": "Helpers"
   };
   var searchInput = root.querySelector("[data-interface-search]");
   var scopeSelect = root.querySelector("[data-interface-scope-select]");
@@ -34,11 +33,14 @@
   var scopes = Object.create(null);
   var taxonomyErrors = [];
   var scopeAliases = {
-    "binary": "7709/commands",
-    "wrapper/tdx-wrappers": "7709/convenience",
+    "binary": "7709",
+    "7709/commands": "7709",
+    "7709/convenience": "helpers",
+    "7615/entry": "7615",
+    "7615/features": "7615",
+    "wrapper/tdx-wrappers": "helpers",
     "wrapper/f10": "7615",
-    "wrapper/helpers": "helpers",
-    "wrapper/mcp": "mcp"
+    "wrapper/helpers": "helpers"
   };
 
   function createElement(tag, className, text) {
@@ -138,7 +140,7 @@
     scopes.all = {
       id: "all",
       label: "接口文档",
-      description: "共 " + items.length + " 项公开能力，按 7709、7615 / F10、Helpers 和 MCP 组织。",
+      description: "共 " + items.length + " 项公开能力，按 7709、7615 和 Helpers 组织。",
       count: items.length
     };
     layers.forEach(function (layer) {
@@ -321,7 +323,7 @@
       return scopeAliases[raw];
     }
     if (raw.indexOf("binary/") === 0) {
-      return "7709/commands";
+      return "7709";
     }
     return "all";
   }

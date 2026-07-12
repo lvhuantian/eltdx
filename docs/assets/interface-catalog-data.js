@@ -1,54 +1,30 @@
 window.ELTDX_CATALOG = {
-  "schema_version": 4,
+  "schema_version": 5,
   "taxonomy": {
     "layers": [
       {
         "id": "7709",
-        "label": "7709 行情接口",
+        "label": "7709",
         "tag_label": "7709",
-        "stat_label": "7709 行情",
-        "description": "28 项 7709 行情能力，包括 21 个二进制命令和 7 个便捷调用。",
-        "groups": [
-          {
-            "id": "commands",
-            "label": "二进制命令",
-            "item_ids": [
-              "7709-handshake", "7709-heartbeat", "7709-code-count", "7709-code-list",
-              "7709-quote-snapshots", "7709-legacy-quotes", "7709-category-quotes", "7709-quote-refresh",
-              "7709-kline", "7709-minute-today", "7709-minute-history", "7709-minute-recent",
-              "7709-minute-aux", "7709-sparkline", "7709-trades-today", "7709-trades-history",
-              "7709-auction-series", "7709-gbbq", "7709-finance", "7709-special-limits", "7709-file-content"
-            ]
-          },
-          {"id": "convenience", "label": "便捷调用", "source": "7709"}
-        ]
+        "stat_label": "7709",
+        "description": "21 个 7709 二进制命令，每项对应一个实际命令号。",
+        "source": "7709"
       },
       {
         "id": "7615",
-        "label": "7615 / F10 接口",
-        "tag_label": "7615 / F10",
-        "stat_label": "7615 / F10",
-        "description": "21 项 7615 / F10 能力，包括 1 个通用 Entry 和 20 个功能调用。",
-        "groups": [
-          {"id": "entry", "label": "通用 Entry", "item_ids": ["f10-generic-entry"]},
-          {"id": "features", "label": "功能调用", "source": "F10"}
-        ]
+        "label": "7615",
+        "tag_label": "7615",
+        "stat_label": "7615",
+        "description": "21 项 7615 / F10 调用，通用 Entry 与功能调用在同一目录平铺展示。",
+        "source": "F10"
       },
       {
         "id": "helpers",
-        "label": "Helpers 功能接口",
+        "label": "Helpers",
         "tag_label": "Helpers",
         "stat_label": "Helpers",
-        "description": "6 项面向使用场景的功能接口，组合公开 API 并整理或计算新的结果。",
+        "description": "14 项协议封装与功能接口，包括分页、组合、整理和本地计算。",
         "source": "Helper"
-      },
-      {
-        "id": "mcp",
-        "label": "MCP 工具",
-        "tag_label": "MCP",
-        "stat_label": "MCP",
-        "description": "9 项 MCP 工具，向 Agent 暴露现有的行情、F10、Helper 和文档能力。",
-        "source": "MCP"
       }
     ]
   },
@@ -59,11 +35,11 @@ window.ELTDX_CATALOG = {
     {"id": "7709-code-list", "title": "代码表", "source": "7709", "category": "证券代码", "api": "client.codes.list() / client.codes.all() / client.get_codes_all()", "aliases": ["list", "all", "get_codes_all", "ETF", "指数"], "protocol": "0x044d", "kind": "底层协议", "summary": "返回代码、名称、市场、价格精度、昨收，以及 A 股、ETF、指数等本地分类。", "return_model": "list[SecurityCode]", "doc": "methods/7709-代码表.md"},
     {"id": "7709-quote-snapshots", "title": "批量行情快照", "source": "7709", "category": "行情", "api": "client.quotes.get_snapshots(codes)", "aliases": ["get_snapshots", "quote", "ETF", "指数"], "protocol": "0x054c", "kind": "底层协议", "summary": "无游标的一次性基础快照，返回现价、成交量额和已确认的一档盘口；完整五档由 0x0547 补齐。", "return_model": "list[QuoteSnapshot]", "doc": "methods/7709-批量快照.md"},
     {"id": "7709-legacy-quotes", "title": "旧版批量行情", "source": "7709", "category": "行情", "api": "client.quotes.legacy(codes) / client.get_legacy_quotes(codes)", "aliases": ["legacy_quotes", "legacy", "旧版行情", "五档盘口"], "protocol": "0x053e", "kind": "底层协议", "summary": "无游标的旧版完整快照，一次返回五档、交易状态和旧版尾部字段；不支持增量刷新或推送。", "return_model": "list[LegacyQuote]", "doc": "methods/7709-旧版批量行情.md"},
-    {"id": "7709-quote-depth", "title": "完整行情 / 五档盘口", "source": "7709", "category": "行情封装", "api": "client.get_quote(codes) / client.get_quote_depth(codes) / client.quotes.get_depth(codes)", "aliases": ["get_quote", "get_depth", "get_quote_depth", "level2", "买五", "卖五", "ETF", "指数"], "protocol": "0x054c + 0x0547", "kind": "便捷封装", "summary": "组合快照与首次刷新，补齐完整五档行情；也可只读取五档盘口。", "return_model": "list[QuoteSnapshot] / QuoteRefreshPage", "doc": "methods/7709-批量快照.md"},
+    {"id": "7709-quote-depth", "title": "完整行情 / 五档盘口", "source": "Helper", "category": "行情封装", "api": "client.get_quote(codes) / client.get_quote_depth(codes) / client.quotes.get_depth(codes)", "aliases": ["get_quote", "get_depth", "get_quote_depth", "level2", "买五", "卖五", "ETF", "指数"], "protocol": "0x054c + 0x0547", "kind": "协议封装", "summary": "组合快照与首次刷新，补齐完整五档行情；也可只读取五档盘口。", "return_model": "list[QuoteSnapshot] / QuoteRefreshPage", "doc": "methods/7709-批量快照.md"},
     {"id": "7709-category-quotes", "title": "分类行情", "source": "7709", "category": "行情", "api": "client.quotes.list_by_category(...)", "aliases": ["list_by_category", "sort", "板块行情"], "protocol": "0x054b", "kind": "底层协议", "summary": "按市场或板块分页返回行情列表，并支持按涨幅、价格、成交额等服务端排序。", "return_model": "CategoryQuotePage", "doc": "methods/7709-分类行情.md"},
     {"id": "7709-quote-refresh", "title": "增量刷新 / 推送队列", "source": "7709", "category": "行情", "api": "client.quotes.refresh() / poll_push() / drain_pushes()", "aliases": ["refresh", "poll_push", "drain_pushes", "push queue"], "protocol": "0x0547", "kind": "底层协议", "summary": "按代码和游标刷新行情；首次游标 0 可返回完整五档，后续用于增量更新并配合推送队列。", "return_model": "QuoteRefreshPage", "doc": "methods/7709-增量刷新推送队列.md"},
     {"id": "7709-kline", "title": "K 线 / 周期线", "source": "7709", "category": "K 线", "api": "client.bars.get() / client.get_kline()", "aliases": ["bars.get", "get_kline", "OHLC", "前复权", "后复权", "ETF", "指数"], "protocol": "0x052d", "kind": "底层协议", "summary": "返回分钟、日、周、月、季、年 K 线，支持服务端复权和不复权参数。", "return_model": "KlineSeries", "doc": "methods/7709-K线周期线.md"},
-    {"id": "7709-kline-all", "title": "全量 K 线分页", "source": "7709", "category": "K 线", "api": "client.bars.all() / client.get_kline_all()", "aliases": ["bars.all", "get_kline_all", "历史 K 线"], "protocol": "0x052d", "kind": "分页封装", "summary": "自动连续分页并合并 K 线，适合补充历史日线或分钟线数据。", "return_model": "KlineSeries", "doc": "methods/7709-全量K线分页.md"},
+    {"id": "7709-kline-all", "title": "全量 K 线分页", "source": "Helper", "category": "K 线", "api": "client.bars.all() / client.get_kline_all()", "aliases": ["bars.all", "get_kline_all", "历史 K 线"], "protocol": "0x052d", "kind": "协议封装", "summary": "自动连续分页并合并 K 线，适合补充历史日线或分钟线数据。", "return_model": "KlineSeries", "doc": "methods/7709-全量K线分页.md"},
     {"id": "7709-minute-today", "title": "当日分时", "source": "7709", "category": "分时", "api": "client.minutes.today() / client.get_minute(code)", "aliases": ["minutes.today", "get_minute", "分时图", "ETF", "指数"], "protocol": "0x0537", "kind": "底层协议", "summary": "返回当前交易日每分钟价格、成交量和均价等分时序列。", "return_model": "MinuteSeries", "doc": "methods/7709-当日分时.md"},
     {"id": "7709-minute-history", "title": "指定日期历史分时", "source": "7709", "category": "分时", "api": "client.minutes.history() / client.get_history_minute()", "aliases": ["minutes.history", "get_history_minute", "历史分时"], "protocol": "0x0fb4", "kind": "底层协议", "summary": "按指定日期返回某个交易日的分时价格和分钟成交量。", "return_model": "MinuteSeries", "doc": "methods/7709-指定日期历史分时.md"},
     {"id": "7709-minute-recent", "title": "近期历史分时", "source": "7709", "category": "分时", "api": "client.minutes.recent()", "aliases": ["minutes.recent", "近期分时"], "protocol": "0x0feb", "kind": "底层协议", "summary": "返回服务端近期窗口内的历史分时，适合查询较近交易日的分钟走势。", "return_model": "MinuteSeries", "doc": "methods/7709-近期历史分时.md"},
@@ -72,15 +48,15 @@ window.ELTDX_CATALOG = {
     {"id": "7709-trades-today", "title": "当日成交明细", "source": "7709", "category": "逐笔成交", "api": "client.trades.today() / client.get_trades(code)", "aliases": ["trades.today", "get_trades", "ticks", "逐笔"], "protocol": "0x0fc5", "kind": "底层协议", "summary": "返回当前交易日逐条成交的时间、价格、成交量、方向和状态。", "return_model": "TradePage", "doc": "methods/7709-当日成交明细.md"},
     {"id": "7709-trades-history", "title": "历史成交明细", "source": "7709", "category": "逐笔成交", "api": "client.trades.history() / client.get_history_trade_day()", "aliases": ["trades.history", "get_history_trade_day", "历史逐笔"], "protocol": "0x0fc6", "kind": "底层协议", "summary": "返回指定日期的逐条成交记录，支持分页拉全和委托笔数等扩展字段。", "return_model": "TradePage", "doc": "methods/7709-历史成交明细.md"},
     {"id": "7709-auction-series", "title": "集合竞价明细", "source": "7709", "category": "集合竞价", "api": "client.auctions.series() / client.get_call_auction()", "aliases": ["auctions.series", "get_call_auction", "竞价序列"], "protocol": "0x056a", "kind": "底层协议", "summary": "返回集合竞价阶段的价格、虚拟成交量、买卖盘和未匹配量变化。", "return_model": "AuctionSeries", "doc": "methods/7709-集合竞价明细.md"},
-    {"id": "7709-auction-0925", "title": "09:25 竞价成交快照", "source": "7709", "category": "集合竞价", "api": "client.get_auction_0925(code, date)", "aliases": ["get_auction_0925", "开盘竞价", "925"], "protocol": "基于 0x0fc6", "kind": "本地整理", "summary": "从历史成交明细中扫描 09:25 最终成交，整理价格、成交量、成交额和方向。", "return_model": "Auction0925Result", "doc": "methods/7709-0925竞价成交快照.md"},
+    {"id": "7709-auction-0925", "title": "09:25 竞价成交快照", "source": "Helper", "category": "集合竞价", "api": "client.get_auction_0925(code, date)", "aliases": ["get_auction_0925", "开盘竞价", "925"], "protocol": "基于 0x0fc6", "kind": "功能接口", "summary": "从历史成交明细中扫描 09:25 最终成交，整理价格、成交量、成交额和方向。", "return_model": "Auction0925Result", "doc": "methods/7709-0925竞价成交快照.md"},
     {"id": "7709-gbbq", "title": "股本变迁 / GBBQ", "source": "7709", "category": "公司基础", "api": "client.corporate.capital_changes() / client.get_gbbq()", "aliases": ["capital_changes", "get_gbbq", "股本事件"], "protocol": "0x000f", "kind": "底层协议", "summary": "返回除权除息、股本变化、增发和回购等股本事件记录。", "return_model": "CapitalChangeBlock", "doc": "methods/7709-股本变迁GBBQ.md"},
-    {"id": "7709-xdxr", "title": "除权除息整理", "source": "7709", "category": "公司基础", "api": "client.get_xdxr(code)", "aliases": ["get_xdxr", "分红", "送转", "配股"], "protocol": "基于 0x000f", "kind": "本地整理", "summary": "从股本变迁记录中筛出除权除息事件，并整理分红、送转和配股字段。", "return_model": "list[XdxrRecord]", "doc": "methods/7709-除权除息整理.md"},
-    {"id": "7709-equity", "title": "指定日期股本", "source": "7709", "category": "公司基础", "api": "client.get_equity_changes() / client.get_equity()", "aliases": ["get_equity_changes", "get_equity", "流通股本", "总股本"], "protocol": "基于 0x000f", "kind": "本地整理", "summary": "整理历次股本变化，并取得指定日期之前最近一次流通股本和总股本。", "return_model": "EquityResponse / EquityRecord", "doc": "methods/7709-指定日期股本.md"},
-    {"id": "7709-turnover", "title": "换手率", "source": "7709", "category": "公司基础", "api": "client.get_turnover(code, volume, on=None, unit=\"hand\")", "aliases": ["get_turnover", "turnover rate"], "protocol": "基于 0x000f", "kind": "本地计算", "summary": "使用成交量和指定日期的流通股本计算换手率。", "return_model": "float", "doc": "methods/7709-换手率.md"},
-    {"id": "7709-local-factors", "title": "本地复权因子", "source": "7709", "category": "公司基础", "api": "client.get_factors() / client.get_local_adjusted_kline_all()", "aliases": ["get_factors", "get_local_adjusted_kline_all", "qfq", "hfq"], "protocol": "0x052d + 0x000f", "kind": "本地计算", "summary": "根据不复权日 K 和除权除息记录计算本地前复权、后复权因子及 K 线。", "return_model": "FactorResponse / KlineSeries", "doc": "methods/7709-本地复权因子.md"},
+    {"id": "7709-xdxr", "title": "除权除息整理", "source": "Helper", "category": "公司基础", "api": "client.get_xdxr(code)", "aliases": ["get_xdxr", "分红", "送转", "配股"], "protocol": "基于 0x000f", "kind": "功能接口", "summary": "从股本变迁记录中筛出除权除息事件，并整理分红、送转和配股字段。", "return_model": "list[XdxrRecord]", "doc": "methods/7709-除权除息整理.md"},
+    {"id": "7709-equity", "title": "指定日期股本", "source": "Helper", "category": "公司基础", "api": "client.get_equity_changes() / client.get_equity()", "aliases": ["get_equity_changes", "get_equity", "流通股本", "总股本"], "protocol": "基于 0x000f", "kind": "功能接口", "summary": "整理历次股本变化，并取得指定日期之前最近一次流通股本和总股本。", "return_model": "EquityResponse / EquityRecord", "doc": "methods/7709-指定日期股本.md"},
+    {"id": "7709-turnover", "title": "换手率", "source": "Helper", "category": "公司基础", "api": "client.get_turnover(code, volume, on=None, unit=\"hand\")", "aliases": ["get_turnover", "turnover rate"], "protocol": "基于 0x000f", "kind": "功能接口", "summary": "使用成交量和指定日期的流通股本计算换手率。", "return_model": "float", "doc": "methods/7709-换手率.md"},
+    {"id": "7709-local-factors", "title": "本地复权因子", "source": "Helper", "category": "公司基础", "api": "client.get_factors() / client.get_local_adjusted_kline_all()", "aliases": ["get_factors", "get_local_adjusted_kline_all", "qfq", "hfq"], "protocol": "0x052d + 0x000f", "kind": "功能接口", "summary": "根据不复权日 K 和除权除息记录计算本地前复权、后复权因子及 K 线。", "return_model": "FactorResponse / KlineSeries", "doc": "methods/7709-本地复权因子.md"},
     {"id": "7709-finance", "title": "财务基础信息", "source": "7709", "category": "公司基础", "api": "client.corporate.finance_batch() / client.get_finance_batch()", "aliases": ["finance_batch", "get_finance_batch", "EPS", "资产", "利润"], "protocol": "0x0010", "kind": "底层协议", "summary": "批量返回流通股本、总股本、EPS、资产、负债、收入和利润等基础字段。", "return_model": "FinanceBatch", "doc": "methods/7709-财务基础信息.md"},
     {"id": "7709-special-limits", "title": "特殊品种涨跌停限制", "source": "7709", "category": "交易限制", "api": "client.limits.special() / client.limits.scan_special()", "aliases": ["limits.special", "scan_special", "涨停", "跌停"], "protocol": "0x0452", "kind": "底层协议", "summary": "分页或连续扫描特殊品种涨跌停限制表，并按代码建立索引。", "return_model": "SpecialLimitPage", "doc": "methods/7709-特殊品种涨跌停限制.md"},
-    {"id": "7709-file-content", "title": "服务器文件读取", "source": "7709", "category": "服务器资源", "api": "client.resources.read() / download_file() / read_stats()", "aliases": ["file_content", "read_server_file", "download_file", "read_stats", "zhb.zip", "tdxstat", "服务器文件", "文件块"], "protocol": "0x06b9", "kind": "底层协议 + 上层解析", "summary": "读取单个文件块或下载整文件，并可解压解析 zhb.zip 中的 tdxstat.cfg 与 tdxstat2.cfg。", "return_model": "FileContentChunk / bytes / TdxStatsResource", "doc": "methods/7709-服务器文件读取.md"},
+    {"id": "7709-file-content", "title": "服务器文件分块读取", "source": "7709", "category": "服务器资源", "api": "client.resources.read() / client.read_server_file()", "aliases": ["file_content", "read_server_file", "服务器文件", "文件块"], "protocol": "0x06b9", "kind": "底层协议", "summary": "按路径、偏移和长度读取一个服务器文件块，返回长度头与原始内容。", "return_model": "FileContentChunk", "doc": "methods/7709-服务器文件读取.md"},
 
     {"id": "f10-generic-entry", "title": "通用 Entry 调用", "source": "F10", "category": "网关", "api": "client.f10.call(...) / client.f10.params(...)", "aliases": ["call", "params", "TQLEX"], "protocol": "7615 / TQLEX", "kind": "通用调用", "summary": "直接调用任意 TQLEX Entry，用于验证资料函数或补充调用特殊 Entry。", "return_model": "F10Response", "doc": "methods/F10-通用Entry调用.md"},
     {"id": "f10-stock-info", "title": "股票基础信息", "source": "F10", "category": "公司资料", "api": "client.f10.stock_info() / business_periods() / topic_ids()", "aliases": ["stock_info", "business_periods", "topic_ids"], "protocol": "CWServ.tdxf10_gg_comreq", "kind": "Entry 封装", "summary": "查询股票名称、代码、市场，以及主营报告期和题材 ID 等辅助信息。", "return_model": "F10Response", "doc": "methods/F10-股票基础信息.md"},
@@ -110,15 +86,6 @@ window.ELTDX_CATALOG = {
     {"id": "helper-stock-topics", "title": "个股概念板块", "source": "Helper", "category": "题材与概念", "api": "client.helpers.stock_topics(code)", "aliases": ["stock_topics", "个股题材"], "protocol": "F10 多 Entry", "kind": "组合能力", "summary": "合并股票基础信息和热点题材结果，整理某只股票的全部题材与概念。", "return_model": "StockTopics", "doc": "helpers/个股概念板块.md"},
     {"id": "helper-topic-stocks", "title": "概念板块成分股", "source": "Helper", "category": "题材与概念", "api": "client.helpers.topic_stocks(seed_code, ...)", "aliases": ["topic_stocks", "题材成分股"], "protocol": "F10 多 Entry", "kind": "组合能力", "summary": "按题材 ID 或名称查询概念板块成分股，并整理排名和区间涨跌幅。", "return_model": "TopicStockTable", "doc": "helpers/概念板块成分股.md"},
     {"id": "helper-auction-data", "title": "竞价数据", "source": "Helper", "category": "集合竞价", "api": "client.helpers.auction_data(code, date)", "aliases": ["auction_data", "开盘涨幅", "开盘金额"], "protocol": "0x056a + 0x0fc6 + 0x054c", "kind": "组合能力", "summary": "合并竞价序列、09:25 成交快照和昨收，计算开盘价、开盘金额及涨幅。", "return_model": "AuctionData", "doc": "helpers/竞价数据.md"},
-
-    {"id": "mcp-quote", "title": "行情快照", "source": "MCP", "category": "行情工具", "api": "eltdx_quote", "aliases": ["quote", "MCP tool"], "protocol": "MCP stdio", "kind": "工具", "summary": "通过 MCP 查询一个或多个股票的行情快照。", "return_model": "JSON", "doc": "MCP.md", "doc_anchor": "mcp-tools"},
-    {"id": "mcp-kline", "title": "K 线 / 周期线", "source": "MCP", "category": "行情工具", "api": "eltdx_kline", "aliases": ["kline", "bars", "MCP tool"], "protocol": "MCP stdio", "kind": "工具", "summary": "通过 MCP 查询 K 线和周期线，并支持复权参数。", "return_model": "JSON", "doc": "MCP.md", "doc_anchor": "mcp-tools"},
-    {"id": "mcp-stock-profile", "title": "股票信息汇总", "source": "MCP", "category": "组合工具", "api": "eltdx_stock_profile", "aliases": ["stock_profile", "MCP tool"], "protocol": "MCP stdio", "kind": "工具", "summary": "通过 MCP 合并行情、代码表和财务基础信息。", "return_model": "JSON", "doc": "MCP.md", "doc_anchor": "mcp-tools"},
-    {"id": "mcp-stock-topics", "title": "个股题材 / 概念板块", "source": "MCP", "category": "题材工具", "api": "eltdx_stock_topics", "aliases": ["stock_topics", "MCP tool"], "protocol": "MCP stdio", "kind": "工具", "summary": "通过 MCP 查询某只股票的全部题材与概念板块。", "return_model": "JSON", "doc": "MCP.md", "doc_anchor": "mcp-tools"},
-    {"id": "mcp-topic-stocks", "title": "题材 / 概念成分股", "source": "MCP", "category": "题材工具", "api": "eltdx_topic_stocks", "aliases": ["topic_stocks", "MCP tool"], "protocol": "MCP stdio", "kind": "工具", "summary": "通过 MCP 查询指定题材或概念板块中的股票。", "return_model": "JSON", "doc": "MCP.md", "doc_anchor": "mcp-tools"},
-    {"id": "mcp-company-profile", "title": "F10 公司概况", "source": "MCP", "category": "F10 工具", "api": "eltdx_company_profile", "aliases": ["company_profile", "MCP tool"], "protocol": "MCP stdio", "kind": "工具", "summary": "通过 MCP 查询 F10 公司概况和发行上市信息。", "return_model": "JSON", "doc": "MCP.md", "doc_anchor": "mcp-tools"},
-    {"id": "mcp-hot-topics", "title": "F10 热点题材", "source": "MCP", "category": "F10 工具", "api": "eltdx_hot_topics", "aliases": ["hot_topics", "MCP tool"], "protocol": "MCP stdio", "kind": "工具", "summary": "通过 MCP 查询 F10 热点题材明细。", "return_model": "JSON", "doc": "MCP.md", "doc_anchor": "mcp-tools"},
-    {"id": "mcp-auction-0925", "title": "09:25 竞价成交快照", "source": "MCP", "category": "竞价工具", "api": "eltdx_auction_0925", "aliases": ["auction_0925", "MCP tool"], "protocol": "MCP stdio", "kind": "工具", "summary": "通过 MCP 查询指定日期的 09:25 竞价最终成交快照。", "return_model": "JSON", "doc": "MCP.md", "doc_anchor": "mcp-tools"},
-    {"id": "mcp-docs-index", "title": "文档入口索引", "source": "MCP", "category": "文档工具", "api": "eltdx_docs_index", "aliases": ["docs_index", "MCP tool"], "protocol": "MCP stdio", "kind": "工具", "summary": "通过 MCP 返回项目的主要本地文档入口。", "return_model": "dict[str, str]", "doc": "MCP.md", "doc_anchor": "mcp-tools"}
+    {"id": "helper-server-stats", "title": "服务器文件下载与统计解析", "source": "Helper", "category": "服务器资源", "api": "client.resources.download_file() / client.resources.read_stats()", "aliases": ["download_file", "read_stats", "zhb.zip", "tdxstat", "服务器文件"], "protocol": "基于 0x06b9", "kind": "协议封装", "summary": "循环下载完整服务器文件，并可解析 zhb.zip 中的 tdxstat.cfg 与 tdxstat2.cfg。", "return_model": "bytes / TdxStatsResource", "doc": "methods/7709-服务器文件读取.md", "doc_anchor": "stats-resource"}
   ]
 };

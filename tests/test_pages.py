@@ -59,53 +59,44 @@ def test_pages_catalog_has_expected_public_interfaces() -> None:
     catalog = _catalog()
     items = catalog["items"]
 
-    assert catalog["schema_version"] == 4
-    assert len(items) == 64
+    assert catalog["schema_version"] == 5
+    assert len(items) == 56
     assert Counter(item["source"] for item in items) == {
-        "7709": 28,
+        "7709": 21,
         "F10": 21,
-        "Helper": 6,
-        "MCP": 9,
+        "Helper": 14,
     }
     assert len({item["id"] for item in items}) == len(items)
 
 
-def test_pages_catalog_is_organized_by_source_and_call_level() -> None:
+def test_pages_catalog_has_three_flat_source_menus() -> None:
     catalog = _catalog()
     ordered_layers = catalog["taxonomy"]["layers"]
-    layers = {layer["id"]: layer for layer in ordered_layers}
     assignments = _taxonomy_assignments(catalog)
 
     assert [(layer["id"], layer["label"]) for layer in ordered_layers] == [
-        ("7709", "7709 行情接口"),
-        ("7615", "7615 / F10 接口"),
-        ("helpers", "Helpers 功能接口"),
-        ("mcp", "MCP 工具"),
+        ("7709", "7709"),
+        ("7615", "7615"),
+        ("helpers", "Helpers"),
     ]
     assert Counter(layer_id for layer_id, _ in assignments.values()) == {
-        "7709": 28,
+        "7709": 21,
         "7615": 21,
-        "helpers": 6,
-        "mcp": 9,
+        "helpers": 14,
     }
-    assert Counter(group_id for layer_id, group_id in assignments.values() if layer_id == "7709") == {
-        "commands": 21,
-        "convenience": 7,
-    }
-    assert Counter(group_id for layer_id, group_id in assignments.values() if layer_id == "7615") == {
-        "entry": 1,
-        "features": 20,
-    }
-    assert layers["helpers"]["source"] == "Helper" and "groups" not in layers["helpers"]
-    assert layers["mcp"]["source"] == "MCP" and "groups" not in layers["mcp"]
-    assert assignments["f10-generic-entry"] == ("7615", "entry")
+    assert all("groups" not in layer for layer in ordered_layers)
+    assert {layer["source"] for layer in ordered_layers} == {"7709", "F10", "Helper"}
+    assert assignments["f10-generic-entry"] == ("7615", None)
+    assert assignments["7709-turnover"] == ("helpers", None)
+    assert assignments["helper-server-stats"] == ("helpers", None)
+    assert all(item["source"] != "MCP" for item in catalog["items"])
+    assert (REPO_ROOT / "docs" / "MCP.md").is_file()
 
 
 def test_pages_catalog_covers_every_registered_7709_command() -> None:
     catalog = _catalog()
-    tdx_layer = next(layer for layer in catalog["taxonomy"]["layers"] if layer["id"] == "7709")
-    commands_group = next(group for group in tdx_layer["groups"] if group["id"] == "commands")
-    binary_ids = set(commands_group["item_ids"])
+    assignments = _taxonomy_assignments(catalog)
+    binary_ids = {item_id for item_id, (layer_id, _) in assignments.items() if layer_id == "7709"}
     binary_protocols = [item["protocol"].lower() for item in catalog["items"] if item["id"] in binary_ids]
 
     assert len(COMMANDS) == len(binary_ids) == 21
@@ -147,11 +138,16 @@ def test_quote_command_docs_explain_the_three_distinct_roles() -> None:
 def test_file_resource_catalog_documents_download_and_stats_parsing() -> None:
     items = {item["id"]: item for item in _catalog()["items"]}
     resource = items["7709-file-content"]
+    helper = items["helper-server-stats"]
     method_doc = (REPO_ROOT / "docs" / resource["doc"]).read_text(encoding="utf-8")
 
     assert resource["protocol"].lower() == "0x06b9"
-    assert all(name in resource["api"] for name in ("read()", "download_file()", "read_stats()"))
-    assert "TdxStatsResource" in resource["return_model"]
+    assert "read()" in resource["api"] and "download_file()" not in resource["api"]
+    assert resource["return_model"] == "FileContentChunk"
+    assert helper["source"] == "Helper"
+    assert all(name in helper["api"] for name in ("download_file()", "read_stats()"))
+    assert "TdxStatsResource" in helper["return_model"]
+    assert helper["doc_anchor"] == "stats-resource"
     assert "不是新的二进制命令" in method_doc
     assert all(name in method_doc for name in ("tdxstat.cfg", "tdxstat2.cfg", "free_float_shares_10k", "open_amount_10k"))
 
@@ -175,9 +171,12 @@ def test_pages_catalog_ui_exposes_taxonomy_navigation() -> None:
     assert "data-interface-tree" in page
     assert "data-interface-scope-select" in page
     assert "window.location.hash" in app
-    assert 'layer.id + "/" + group.id' in app
     assert '"wrapper/helpers": "helpers"' in app
+    assert '"7709/commands": "7709"' in app
+    assert '"7615/features": "7615"' in app
+    assert 'return "7709";' in app
     assert "catalog-tree-leaf" in app
+    assert "按 7709、7615 和 Helpers 组织" in app
 
 
 def test_readme_promotes_the_static_pages_catalog() -> None:
