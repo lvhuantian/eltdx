@@ -1,9 +1,28 @@
-# eltdx
+<h1 align="center">eltdx</h1>
 
-[![PyPI](https://img.shields.io/pypi/v/eltdx?label=pypi&logo=pypi)](https://pypi.org/project/eltdx/)
-[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue)](https://pypi.org/project/eltdx/)
-[![Build](https://img.shields.io/github/actions/workflow/status/electkismet/eltdx/ci.yml?branch=main&label=build)](https://github.com/electkismet/eltdx/actions/workflows/ci.yml)
-[![Docs](https://img.shields.io/github/actions/workflow/status/electkismet/eltdx/pages.yml?branch=main&label=docs)](https://electkismet.github.io/eltdx/)
+<p align="center">
+  <strong>极简的通达信在线行情协议 Python 客户端</strong>
+</p>
+
+<p align="center">
+  <a href="https://electkismet.github.io/eltdx/"><strong>在线文档</strong></a>
+  ·
+  <a href="https://electkismet.github.io/eltdx/">接口一览</a>
+  ·
+  <a href="https://pypi.org/project/eltdx/">PyPI</a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/electkismet/eltdx/actions/workflows/ci.yml"><img alt="构建状态" src="https://img.shields.io/github/actions/workflow/status/electkismet/eltdx/ci.yml?branch=main&amp;label=检查"></a>
+  <a href="https://pypi.org/project/eltdx/"><img alt="PyPI eltdx" src="https://img.shields.io/pypi/v/eltdx?label=PyPI&amp;color=0969da"></a>
+  <a href="https://electkismet.github.io/eltdx/"><img alt="文档站" src="https://img.shields.io/github/actions/workflow/status/electkismet/eltdx/pages.yml?branch=main&amp;label=文档"></a>
+  <img alt="Python 3.10+" src="https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&amp;logoColor=white">
+  <a href="./LICENSE"><img alt="Research-Only License" src="https://img.shields.io/badge/协议-Research--Only-6f42c1"></a>
+</p>
+
+<a href="https://electkismet.github.io/eltdx/">
+  <img alt="eltdx 接口目录预览" src=".github/assets/eltdx-readme-banner.png">
+</a>
 
 > 推荐关注新项目 [AxData](https://github.com/electkismet/AxData)：AxData 基于 eltdx 迭代开发，是后续主要维护的开源量化数据库框架。除通达信体系外，AxData 还通过插件机制整理接入交易所、巨潮、腾讯财经、新浪财经、东方财富、财联社、开盘红等公开源接口，并扩展了自由流通市值、开盘换手、开盘量比、开盘抢筹、竞价昨比、连板天梯、题材强度等更适合本地量化研究和短线数据分析的指标能力。
 
