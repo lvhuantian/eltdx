@@ -117,7 +117,7 @@
     scopes.all = {
       id: "all",
       label: "接口文档",
-      description: "共 " + items.length + " 项公开能力，按二进制接口解析与封装接口两层组织。",
+      description: "共 " + items.length + " 项公开能力，按二进制接口解析与上层接口两层组织。",
       count: items.length
     };
     layers.forEach(function (layer) {

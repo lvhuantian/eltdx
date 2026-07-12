@@ -44,7 +44,7 @@ def test_pages_catalog_has_two_exclusive_interface_layers() -> None:
 
     assert set(layers) == {"binary", "wrapper"}
     assert layers["binary"]["label"] == "二进制接口解析"
-    assert layers["wrapper"]["label"] == "封装接口"
+    assert layers["wrapper"]["label"] == "上层接口"
 
     binary_groups = layers["binary"]["groups"]
     binary_ids = [item_id for group in binary_groups for item_id in group["item_ids"]]
@@ -59,7 +59,12 @@ def test_pages_catalog_has_two_exclusive_interface_layers() -> None:
         "Helper": 6,
         "MCP": 9,
     }
-    assert {group["source"] for group in layers["wrapper"]["groups"]} == {"7709", "F10", "Helper", "MCP"}
+    assert [(group["id"], group["label"], group["source"]) for group in layers["wrapper"]["groups"]] == [
+        ("tdx-wrappers", "7709 协议封装", "7709"),
+        ("f10", "7615 / F10 协议封装", "F10"),
+        ("helpers", "Helpers 功能封装", "Helper"),
+        ("mcp", "MCP 工具", "MCP"),
+    ]
 
 
 def test_pages_catalog_covers_every_registered_7709_command() -> None:

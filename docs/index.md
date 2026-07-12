@@ -24,7 +24,7 @@ hide:
     <header class="catalog-heading">
       <p class="catalog-kicker">接口目录</p>
       <h1 data-interface-heading>接口文档</h1>
-      <p data-interface-lead>当前公开的 7709 二进制解析与封装调用能力。每项均链接到参数、返回字段和示例说明。</p>
+      <p data-interface-lead>当前公开的二进制协议解析与上层调用能力。每项均链接到参数、返回字段和示例说明。</p>
     </header>
 
     <div class="interface-stats" data-interface-stats aria-label="接口层级统计"></div>
@@ -61,7 +61,7 @@ hide:
     <section class="catalog-scope" aria-labelledby="catalog-scope-title">
       <h2 id="catalog-scope-title">统计口径</h2>
       <p><code>二进制接口解析</code> 按 21 个已注册的 7709 命令组织；同一命令的编码、解码和对应方法只保留一份底层说明。</p>
-      <p><code>封装接口</code> 收录 43 个分页、组合、本地计算、7615 F10、Helper 与 MCP 调用能力。</p>
+      <p><code>上层接口</code> 收录 43 个面向调用者的能力：协议封装围绕协议处理分页、拆批和字段整理；Helpers 功能封装围绕实际场景组合接口并计算结果；MCP 工具负责向 Agent 暴露已有能力。</p>
       <p>目录数据随静态页面发布，打开后不会连接行情主站、F10 网关或任何 eltdx 后台服务。</p>
     </section>
   </div>

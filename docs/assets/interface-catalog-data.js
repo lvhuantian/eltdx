@@ -19,13 +19,13 @@ window.ELTDX_CATALOG = {
       },
       {
         "id": "wrapper",
-        "label": "封装接口",
-        "description": "43 个面向调用者的分页、组合、本地计算、F10、Helper 与 MCP 能力。",
+        "label": "上层接口",
+        "description": "43 个面向调用者的协议封装、功能封装与 MCP 工具。",
         "groups": [
-          {"id": "tdx-wrappers", "label": "7709 便捷封装", "source": "7709"},
-          {"id": "f10", "label": "7615 / F10", "source": "F10"},
-          {"id": "helpers", "label": "Helpers", "source": "Helper"},
-          {"id": "mcp", "label": "MCP", "source": "MCP"}
+          {"id": "tdx-wrappers", "label": "7709 协议封装", "source": "7709"},
+          {"id": "f10", "label": "7615 / F10 协议封装", "source": "F10"},
+          {"id": "helpers", "label": "Helpers 功能封装", "source": "Helper"},
+          {"id": "mcp", "label": "MCP 工具", "source": "MCP"}
         ]
       }
     ]
