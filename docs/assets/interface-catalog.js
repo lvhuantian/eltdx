@@ -5,27 +5,34 @@
   if (!root) {
     return;
   }
+
   var catalog = window.ELTDX_CATALOG;
-  if (!catalog || !Array.isArray(catalog.items)) {
+  if (!catalog || !Array.isArray(catalog.items) || !catalog.taxonomy || !Array.isArray(catalog.taxonomy.layers)) {
     root.textContent = "接口目录数据加载失败。";
     return;
   }
 
   var items = catalog.items;
+  var layers = catalog.taxonomy.layers;
   var sourceLabels = {
     "7709": "7709",
     "F10": "7615 / F10",
     "Helper": "Helper",
     "MCP": "MCP"
   };
-  var sourceOrder = ["7709", "F10", "Helper", "MCP"];
   var searchInput = root.querySelector("[data-interface-search]");
+  var scopeSelect = root.querySelector("[data-interface-scope-select]");
+  var tree = root.querySelector("[data-interface-tree]");
   var stats = root.querySelector("[data-interface-stats]");
-  var filters = root.querySelector("[data-interface-filters]");
   var rows = root.querySelector("[data-interface-rows]");
   var resultCount = root.querySelector("[data-interface-result-count]");
   var empty = root.querySelector("[data-interface-empty]");
-  var activeSource = "all";
+  var heading = root.querySelector("[data-interface-heading]");
+  var lead = root.querySelector("[data-interface-lead]");
+  var itemById = Object.create(null);
+  var itemMeta = Object.create(null);
+  var scopes = Object.create(null);
+  var taxonomyErrors = [];
 
   function createElement(tag, className, text) {
     var element = document.createElement(tag);
@@ -38,12 +45,6 @@
     return element;
   }
 
-  function countSource(source) {
-    return items.filter(function (item) {
-      return item.source === source;
-    }).length;
-  }
-
   function normalize(value) {
     return String(value || "")
       .normalize("NFKC")
@@ -52,59 +53,188 @@
       .trim();
   }
 
-  function searchText(item) {
+  function localDocUrl(item) {
+    var relative = item.doc.replace(/\\/g, "/").replace(/\.md$/i, "/");
+    return new URL(relative, window.location.href).href + (item.doc_anchor ? "#" + encodeURIComponent(item.doc_anchor) : "");
+  }
+
+  function registerItem(itemId, layer, group) {
+    if (!itemById[itemId]) {
+      taxonomyErrors.push("目录引用了不存在的接口：" + itemId);
+      return;
+    }
+    if (itemMeta[itemId]) {
+      taxonomyErrors.push("接口被重复归类：" + itemId);
+      return;
+    }
+    itemMeta[itemId] = {layer: layer, group: group};
+  }
+
+  items.forEach(function (item) {
+    itemById[item.id] = item;
+  });
+
+  layers.forEach(function (layer) {
+    (layer.groups || []).forEach(function (group) {
+      (group.item_ids || []).forEach(function (itemId) {
+        registerItem(itemId, layer, group);
+      });
+    });
+  });
+
+  layers.forEach(function (layer) {
+    (layer.groups || []).forEach(function (group) {
+      if (!group.source) {
+        return;
+      }
+      items.forEach(function (item) {
+        if (!itemMeta[item.id] && item.source === group.source) {
+          registerItem(item.id, layer, group);
+        }
+      });
+    });
+  });
+
+  items.forEach(function (item) {
+    if (!itemMeta[item.id]) {
+      taxonomyErrors.push("接口尚未归类：" + item.id);
+    }
+  });
+
+  if (taxonomyErrors.length) {
+    root.textContent = "接口目录分类失败：" + taxonomyErrors.join("；");
+    return;
+  }
+
+  function countScope(layerId, groupId) {
+    return items.filter(function (item) {
+      var meta = itemMeta[item.id];
+      return meta.layer.id === layerId && (!groupId || meta.group.id === groupId);
+    }).length;
+  }
+
+  function buildScopes() {
+    scopes.all = {
+      id: "all",
+      label: "接口文档",
+      description: "共 " + items.length + " 项公开能力，按二进制接口解析与封装接口两层组织。",
+      count: items.length
+    };
+    layers.forEach(function (layer) {
+      var layerCount = countScope(layer.id);
+      scopes[layer.id] = {
+        id: layer.id,
+        layerId: layer.id,
+        label: layer.label,
+        description: layer.description,
+        count: layerCount
+      };
+      (layer.groups || []).forEach(function (group) {
+        var scopeId = layer.id + "/" + group.id;
+        var groupCount = countScope(layer.id, group.id);
+        scopes[scopeId] = {
+          id: scopeId,
+          layerId: layer.id,
+          groupId: group.id,
+          label: group.label,
+          description: layer.label + " / " + group.label + "，共 " + groupCount + " 项。",
+          count: groupCount
+        };
+      });
+    });
+  }
+
+  function scopeLink(scopeId, label, count, className) {
+    var link = createElement("a", className || "catalog-tree-link");
+    link.href = "#" + scopeId;
+    link.dataset.scopeLink = scopeId;
+    link.appendChild(createElement("span", "", label));
+    link.appendChild(createElement("em", "", String(count)));
+    return link;
+  }
+
+  function renderTree() {
+    tree.appendChild(scopeLink("all", "全部接口", items.length, "catalog-tree-all"));
+    layers.forEach(function (layer) {
+      var details = createElement("details", "catalog-tree-layer");
+      details.open = true;
+      var summary = createElement("summary", "catalog-tree-summary");
+      summary.appendChild(createElement("span", "catalog-tree-chevron"));
+      summary.appendChild(createElement("span", "", layer.label));
+      summary.appendChild(createElement("em", "", String(scopes[layer.id].count)));
+      details.appendChild(summary);
+
+      var children = createElement("div", "catalog-tree-children");
+      children.appendChild(scopeLink(layer.id, "全部", scopes[layer.id].count));
+      (layer.groups || []).forEach(function (group) {
+        var scopeId = layer.id + "/" + group.id;
+        children.appendChild(scopeLink(scopeId, group.label, scopes[scopeId].count));
+      });
+      details.appendChild(children);
+      tree.appendChild(details);
+    });
+  }
+
+  function renderScopeSelect() {
+    var allOption = createElement("option", "", "全部接口 (" + items.length + ")");
+    allOption.value = "all";
+    scopeSelect.appendChild(allOption);
+
+    layers.forEach(function (layer) {
+      var optionGroup = createElement("optgroup");
+      optionGroup.label = layer.label;
+      var layerOption = createElement("option", "", "全部 " + layer.label + " (" + scopes[layer.id].count + ")");
+      layerOption.value = layer.id;
+      optionGroup.appendChild(layerOption);
+      (layer.groups || []).forEach(function (group) {
+        var scopeId = layer.id + "/" + group.id;
+        var option = createElement("option", "", group.label + " (" + scopes[scopeId].count + ")");
+        option.value = scopeId;
+        optionGroup.appendChild(option);
+      });
+      scopeSelect.appendChild(optionGroup);
+    });
+  }
+
+  function renderStats() {
+    layers.forEach(function (layer) {
+      var stat = scopeLink(layer.id, layer.label, scopes[layer.id].count, "interface-stat");
+      var count = stat.querySelector("em");
+      var label = stat.querySelector("span");
+      stat.textContent = "";
+      stat.appendChild(createElement("strong", "", count.textContent));
+      stat.appendChild(createElement("span", "", label.textContent));
+      stats.appendChild(stat);
+    });
+  }
+
+  function searchText(item, meta) {
     return normalize([
       item.title,
       item.source,
+      sourceLabels[item.source],
       item.category,
       item.api,
       (item.aliases || []).join(" "),
       item.protocol,
       item.kind,
       item.summary,
-      item.return_model
+      item.return_model,
+      meta.layer.label,
+      meta.group.label
     ].join(" "));
-  }
-
-  function localDocUrl(item) {
-    var relative = item.doc.replace(/\\/g, "/").replace(/\.md$/i, "/");
-    return new URL(relative, window.location.href).href + (item.doc_anchor ? "#" + encodeURIComponent(item.doc_anchor) : "");
-  }
-
-  function renderStats() {
-    sourceOrder.forEach(function (source) {
-      var stat = createElement("div", "interface-stat");
-      stat.appendChild(createElement("strong", "", String(countSource(source))));
-      stat.appendChild(createElement("span", "", sourceLabels[source]));
-      stats.appendChild(stat);
-    });
-  }
-
-  function renderFilters() {
-    [["all", "全部", items.length]].concat(sourceOrder.map(function (source) {
-      return [source, sourceLabels[source], countSource(source)];
-    })).forEach(function (definition) {
-      var button = createElement("button", "interface-filter");
-      button.type = "button";
-      button.dataset.sourceFilter = definition[0];
-      button.setAttribute("aria-pressed", String(definition[0] === activeSource));
-      button.appendChild(createElement("span", "", definition[1]));
-      button.appendChild(createElement("span", "interface-filter-count", String(definition[2])));
-      button.addEventListener("click", function () {
-        activeSource = definition[0];
-        applyFilters();
-      });
-      filters.appendChild(button);
-    });
   }
 
   function renderRows() {
     items.forEach(function (item) {
+      var meta = itemMeta[item.id];
       var row = createElement("article", "interface-row");
       row.setAttribute("role", "row");
       row.dataset.interfaceItem = "";
+      row.dataset.layer = meta.layer.id;
+      row.dataset.group = meta.group.id;
       row.dataset.source = item.source;
-      row.dataset.search = searchText(item);
+      row.dataset.search = searchText(item, meta);
 
       var name = createElement("div", "interface-cell interface-name");
       name.setAttribute("role", "cell");
@@ -113,12 +243,13 @@
       name.appendChild(titleLink);
       name.appendChild(createElement("code", "", item.api));
 
-      var source = createElement("div", "interface-cell interface-source");
-      source.setAttribute("role", "cell");
-      var sourceTag = createElement("span", "interface-source-tag", sourceLabels[item.source]);
-      sourceTag.dataset.source = item.source;
-      source.appendChild(sourceTag);
-      source.appendChild(createElement("small", "", item.category));
+      var directory = createElement("div", "interface-cell interface-source");
+      directory.setAttribute("role", "cell");
+      var layerTag = createElement("span", "interface-layer-tag", meta.layer.label);
+      layerTag.dataset.layer = meta.layer.id;
+      directory.appendChild(layerTag);
+      var directoryDetail = meta.group.label + (meta.layer.id === "binary" ? " · 7709" : "");
+      directory.appendChild(createElement("small", "", directoryDetail));
 
       var protocol = createElement("div", "interface-cell interface-protocol");
       protocol.setAttribute("role", "cell");
@@ -137,7 +268,7 @@
       returned.appendChild(docLink);
 
       row.appendChild(name);
-      row.appendChild(source);
+      row.appendChild(directory);
       row.appendChild(protocol);
       row.appendChild(description);
       row.appendChild(returned);
@@ -145,29 +276,76 @@
     });
   }
 
+  function currentScopeId() {
+    var raw = window.location.hash.replace(/^#/, "");
+    try {
+      raw = decodeURIComponent(raw);
+    } catch (error) {
+      raw = "";
+    }
+    return scopes[raw] ? raw : "all";
+  }
+
+  function rowMatchesScope(row, scope) {
+    if (!scope.layerId) {
+      return true;
+    }
+    if (row.dataset.layer !== scope.layerId) {
+      return false;
+    }
+    return !scope.groupId || row.dataset.group === scope.groupId;
+  }
+
+  function updateNavigation(activeScopeId) {
+    Array.prototype.forEach.call(root.querySelectorAll("[data-scope-link]"), function (link) {
+      if (link.dataset.scopeLink === activeScopeId) {
+        link.setAttribute("aria-current", "page");
+        var details = link.closest("details");
+        if (details) {
+          details.open = true;
+        }
+      } else {
+        link.removeAttribute("aria-current");
+      }
+    });
+    scopeSelect.value = activeScopeId;
+  }
+
   function applyFilters() {
+    var activeScopeId = currentScopeId();
+    var activeScope = scopes[activeScopeId];
     var terms = normalize(searchInput.value).split(" ").filter(Boolean);
     var visible = 0;
+
     Array.prototype.forEach.call(rows.children, function (row) {
-      var matchesSource = activeSource === "all" || row.dataset.source === activeSource;
+      var matchesScope = rowMatchesScope(row, activeScope);
       var matchesQuery = terms.every(function (term) {
         return row.dataset.search.indexOf(term) >= 0;
       });
-      row.hidden = !(matchesSource && matchesQuery);
+      row.hidden = !(matchesScope && matchesQuery);
       if (!row.hidden) {
         visible += 1;
       }
     });
-    Array.prototype.forEach.call(filters.children, function (button) {
-      button.setAttribute("aria-pressed", String(button.dataset.sourceFilter === activeSource));
-    });
+
     resultCount.textContent = String(visible);
     empty.hidden = visible !== 0;
+    heading.textContent = activeScope.label;
+    lead.textContent = activeScope.description;
+    updateNavigation(activeScopeId);
+    root.dataset.catalogReady = "true";
   }
 
+  buildScopes();
+  renderTree();
+  renderScopeSelect();
   renderStats();
-  renderFilters();
   renderRows();
+
   searchInput.addEventListener("input", applyFilters);
+  scopeSelect.addEventListener("change", function () {
+    window.location.hash = scopeSelect.value;
+  });
+  window.addEventListener("hashchange", applyFilters);
   applyFilters();
 })();

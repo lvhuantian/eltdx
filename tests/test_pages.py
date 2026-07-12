@@ -25,7 +25,7 @@ def test_pages_catalog_has_expected_public_interfaces() -> None:
     catalog = _catalog()
     items = catalog["items"]
 
-    assert catalog["schema_version"] == 2
+    assert catalog["schema_version"] == 3
     assert len(items) == 64
     assert Counter(item["source"] for item in items) == {
         "7709": 28,
@@ -36,11 +36,43 @@ def test_pages_catalog_has_expected_public_interfaces() -> None:
     assert len({item["id"] for item in items}) == len(items)
 
 
-def test_pages_catalog_covers_every_registered_7709_command() -> None:
-    protocol_text = " ".join(item["protocol"].lower() for item in _catalog()["items"] if item["source"] == "7709")
+def test_pages_catalog_has_two_exclusive_interface_layers() -> None:
+    catalog = _catalog()
+    items = catalog["items"]
+    item_ids = {item["id"] for item in items}
+    layers = {layer["id"]: layer for layer in catalog["taxonomy"]["layers"]}
 
-    for command in COMMANDS.values():
-        assert command.hex in protocol_text
+    assert set(layers) == {"binary", "wrapper"}
+    assert layers["binary"]["label"] == "二进制接口解析"
+    assert layers["wrapper"]["label"] == "封装接口"
+
+    binary_groups = layers["binary"]["groups"]
+    binary_ids = [item_id for group in binary_groups for item_id in group["item_ids"]]
+    wrapper_ids = item_ids - set(binary_ids)
+
+    assert len(binary_ids) == len(set(binary_ids)) == 21
+    assert set(binary_ids) <= item_ids
+    assert len(wrapper_ids) == 43
+    assert Counter(item["source"] for item in items if item["id"] in wrapper_ids) == {
+        "7709": 7,
+        "F10": 21,
+        "Helper": 6,
+        "MCP": 9,
+    }
+    assert {group["source"] for group in layers["wrapper"]["groups"]} == {"7709", "F10", "Helper", "MCP"}
+
+
+def test_pages_catalog_covers_every_registered_7709_command() -> None:
+    catalog = _catalog()
+    binary_ids = {
+        item_id
+        for group in catalog["taxonomy"]["layers"][0]["groups"]
+        for item_id in group["item_ids"]
+    }
+    binary_protocols = [item["protocol"].lower() for item in catalog["items"] if item["id"] in binary_ids]
+
+    assert len(COMMANDS) == len(binary_ids) == 21
+    assert Counter(binary_protocols) == Counter(command.hex for command in COMMANDS.values())
 
 
 def test_pages_catalog_links_to_existing_docs() -> None:
@@ -61,6 +93,16 @@ def test_pages_remains_static_and_outside_runtime_dependencies() -> None:
     assert "WebSocket" not in app
     assert "dependencies = []" in pyproject
     assert "site/" in gitignore.splitlines()
+
+
+def test_pages_catalog_ui_exposes_taxonomy_navigation() -> None:
+    page = (REPO_ROOT / "docs" / "index.md").read_text(encoding="utf-8")
+    app = (REPO_ROOT / "docs" / "assets" / "interface-catalog.js").read_text(encoding="utf-8")
+
+    assert "data-interface-tree" in page
+    assert "data-interface-scope-select" in page
+    assert "window.location.hash" in app
+    assert 'layer.id + "/" + group.id' in app
 
 
 def test_readme_promotes_the_static_pages_catalog() -> None:

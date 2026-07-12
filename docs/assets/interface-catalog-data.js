@@ -1,13 +1,43 @@
 window.ELTDX_CATALOG = {
-  "schema_version": 2,
+  "schema_version": 3,
+  "taxonomy": {
+    "layers": [
+      {
+        "id": "binary",
+        "label": "二进制接口解析",
+        "description": "21 个 7709 二进制命令，按请求编码、响应解析和业务领域组织。",
+        "groups": [
+          {"id": "session", "label": "会话", "item_ids": ["7709-handshake", "7709-heartbeat"]},
+          {"id": "codes", "label": "证券代码", "item_ids": ["7709-code-count", "7709-code-list"]},
+          {"id": "quotes", "label": "行情", "item_ids": ["7709-quote-snapshots", "7709-legacy-quotes", "7709-category-quotes", "7709-quote-refresh"]},
+          {"id": "klines", "label": "K 线", "item_ids": ["7709-kline"]},
+          {"id": "minutes", "label": "分时", "item_ids": ["7709-minute-today", "7709-minute-history", "7709-minute-recent", "7709-minute-aux", "7709-sparkline"]},
+          {"id": "trades-auctions", "label": "逐笔与竞价", "item_ids": ["7709-trades-today", "7709-trades-history", "7709-auction-series"]},
+          {"id": "corporate", "label": "公司与交易基础", "item_ids": ["7709-gbbq", "7709-finance", "7709-special-limits"]},
+          {"id": "resources", "label": "服务器资源", "item_ids": ["7709-file-content"]}
+        ]
+      },
+      {
+        "id": "wrapper",
+        "label": "封装接口",
+        "description": "43 个面向调用者的分页、组合、本地计算、F10、Helper 与 MCP 能力。",
+        "groups": [
+          {"id": "tdx-wrappers", "label": "7709 便捷封装", "source": "7709"},
+          {"id": "f10", "label": "7615 / F10", "source": "F10"},
+          {"id": "helpers", "label": "Helpers", "source": "Helper"},
+          {"id": "mcp", "label": "MCP", "source": "MCP"}
+        ]
+      }
+    ]
+  },
   "items": [
     {"id": "7709-handshake", "title": "握手", "source": "7709", "category": "会话", "api": "client.session.handshake()", "aliases": ["handshake"], "protocol": "0x000d", "kind": "底层协议", "summary": "读取服务端时间、交易时段、主站名和产品标识；连接后通常自动执行。", "return_model": "HandshakeInfo", "doc": "methods/7709-握手.md"},
     {"id": "7709-heartbeat", "title": "心跳", "source": "7709", "category": "会话", "api": "client.session.heartbeat()", "aliases": ["heartbeat", "keepalive"], "protocol": "0x0004", "kind": "底层协议", "summary": "读取服务端心跳响应；长连接默认由后台定时保活。", "return_model": "HeartbeatAck", "doc": "methods/7709-心跳.md"},
     {"id": "7709-code-count", "title": "代码数量", "source": "7709", "category": "证券代码", "api": "client.codes.count(market) / client.get_count(market)", "aliases": ["count", "get_count"], "protocol": "0x044e", "kind": "底层协议", "summary": "返回沪、深、北某个市场的证券数量，常用于拉取全量代码表前确定规模。", "return_model": "int", "doc": "methods/7709-代码数量.md"},
     {"id": "7709-code-list", "title": "代码表", "source": "7709", "category": "证券代码", "api": "client.codes.list() / client.codes.all() / client.get_codes_all()", "aliases": ["list", "all", "get_codes_all", "ETF", "指数"], "protocol": "0x044d", "kind": "底层协议", "summary": "返回代码、名称、市场、价格精度、昨收，以及 A 股、ETF、指数等本地分类。", "return_model": "list[SecurityCode]", "doc": "methods/7709-代码表.md"},
-    {"id": "7709-quote-snapshots", "title": "批量快照", "source": "7709", "category": "行情", "api": "client.quotes.get_snapshots(codes) / client.get_quote(codes)", "aliases": ["get_snapshots", "get_quote", "quote", "ETF", "指数"], "protocol": "0x054c + 0x0547", "kind": "协议组合", "summary": "按代码列表返回现价、涨跌幅、成交量额、内外盘和盘口；便捷方法会补齐五档。", "return_model": "list[QuoteSnapshot]", "doc": "methods/7709-批量快照.md"},
+    {"id": "7709-quote-snapshots", "title": "批量行情快照", "source": "7709", "category": "行情", "api": "client.quotes.get_snapshots(codes)", "aliases": ["get_snapshots", "quote", "ETF", "指数"], "protocol": "0x054c", "kind": "底层协议", "summary": "按代码列表直接读取现价、涨跌幅、成交量额、内外盘和已确认的一档盘口。", "return_model": "list[QuoteSnapshot]", "doc": "methods/7709-批量快照.md"},
     {"id": "7709-legacy-quotes", "title": "旧版批量行情", "source": "7709", "category": "行情", "api": "client.quotes.legacy(codes) / client.get_legacy_quotes(codes)", "aliases": ["legacy_quotes", "legacy", "旧版行情", "五档盘口"], "protocol": "0x053e", "kind": "底层协议", "summary": "按代码列表返回旧版行情、五档盘口和交易状态原始字段；便捷入口自动拆批。", "return_model": "list[LegacyQuote]", "doc": "methods/7709-旧版批量行情.md"},
-    {"id": "7709-quote-depth", "title": "五档盘口", "source": "7709", "category": "行情", "api": "client.quotes.get_depth(codes) / client.get_quote_depth(codes)", "aliases": ["get_depth", "get_quote_depth", "level2", "买五", "卖五"], "protocol": "0x0547", "kind": "底层协议", "summary": "按代码列表直接返回买一到买五和卖一到卖五的价格与挂单量。", "return_model": "QuoteRefreshPage", "doc": "methods/7709-增量刷新推送队列.md"},
+    {"id": "7709-quote-depth", "title": "完整行情 / 五档盘口", "source": "7709", "category": "行情封装", "api": "client.get_quote(codes) / client.get_quote_depth(codes) / client.quotes.get_depth(codes)", "aliases": ["get_quote", "get_depth", "get_quote_depth", "level2", "买五", "卖五", "ETF", "指数"], "protocol": "0x054c + 0x0547", "kind": "便捷封装", "summary": "组合快照与首次刷新，补齐完整五档行情；也可只读取五档盘口。", "return_model": "list[QuoteSnapshot] / QuoteRefreshPage", "doc": "methods/7709-批量快照.md"},
     {"id": "7709-category-quotes", "title": "分类行情", "source": "7709", "category": "行情", "api": "client.quotes.list_by_category(...)", "aliases": ["list_by_category", "sort", "板块行情"], "protocol": "0x054b", "kind": "底层协议", "summary": "按市场或板块分页返回行情列表，并支持按涨幅、价格、成交额等服务端排序。", "return_model": "CategoryQuotePage", "doc": "methods/7709-分类行情.md"},
     {"id": "7709-quote-refresh", "title": "增量刷新 / 推送队列", "source": "7709", "category": "行情", "api": "client.quotes.refresh() / poll_push() / drain_pushes()", "aliases": ["refresh", "poll_push", "drain_pushes", "push queue"], "protocol": "0x0547", "kind": "底层协议", "summary": "刷新关注代码的增量行情，并读取连接中收到的未配对推送帧。", "return_model": "QuoteRefreshPage", "doc": "methods/7709-增量刷新推送队列.md"},
     {"id": "7709-kline", "title": "K 线 / 周期线", "source": "7709", "category": "K 线", "api": "client.bars.get() / client.get_kline()", "aliases": ["bars.get", "get_kline", "OHLC", "前复权", "后复权", "ETF", "指数"], "protocol": "0x052d", "kind": "底层协议", "summary": "返回分钟、日、周、月、季、年 K 线，支持服务端复权和不复权参数。", "return_model": "KlineSeries", "doc": "methods/7709-K线周期线.md"},
