@@ -899,7 +899,7 @@ records = client.limits.scan_special()
 
 ### `client.resources.read(path, offset=0, size=30000)` / `client.read_server_file(...)`
 
-通过 `0x06b9` 读取一个服务器文件块。`path` 必须为最长 300 字节的 ASCII 路径；返回内容不做格式解析。
+通过 `0x06b9` 读取一个服务器文件块。`path` 必须为最长 300 字节的 ASCII 路径。
 
 ```python
 chunk = client.read_server_file("zhb.zip", offset=0, size=30000)
@@ -908,6 +908,22 @@ chunk = client.read_server_file("zhb.zip", offset=0, size=30000)
 | 返回模型 | 说明 |
 | --- | --- |
 | `FileContentChunk` | 包含 `path`、`offset`、`request_size`、`chunk_len`、`content`、`raw_payload` 和 `is_last` |
+
+### `client.resources.download_file(path, chunk_size=30000, max_bytes=None)`
+
+循环读取并拼接完整服务器文件，返回 `bytes`。不猜测文件格式。
+
+### `client.resources.read_stats(path="zhb.zip", chunk_size=30000)`
+
+下载 `zhb.zip`，解压并以 GBK 解析其中的 `tdxstat.cfg` 和 `tdxstat2.cfg`。
+
+| 返回模型 | 说明 |
+| --- | --- |
+| `TdxStatsResource` | `stat`、`stat2` 分别按 `(market_id, code)` 建立索引，并提供 `row()`、`stats_date`、`stat_count` 和 `stat2_count` |
+| `TdxStatRow` | 60 日 Beta、PE TTM、自由流通股本、年内涨停数和连板统计字段 |
+| `TdxStat2Row` | 当日/前一日/前两日成交额、封单额，以及当日/前一日开盘量额 |
+
+完整列号、单位和校验边界见[服务器文件读取](methods/7709-服务器文件读取.md)。
 
 ## F10 / 资料接口
 

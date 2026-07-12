@@ -17,14 +17,14 @@
 | <a id="cmd-0x054b"></a>`0x054b` | `0x054b-分类行情列表分页接口.md`    | 分类行情列表      | `client.quotes.list_by_category()`                      | 核心           |
 | <a id="cmd-0x054c"></a>`0x054c` | `0x054c-显式代码批量行情快照接口.md`  | 批量行情快照      | `client.quotes.get_snapshots()`                         | 核心           |
 | <a id="cmd-0x056a"></a>`0x056a` | `0x056a-集合竞价明细接口.md`      | 集合竞价明细      | `client.auctions.series()`                              | 已接入          |
-| <a id="cmd-0x06b9"></a>`0x06b9` | `0x06b9-服务器文件读取接口.md`     | 服务器文件读取     | `client.resources.read()` / `client.read_server_file()` | 已接入          |
+| <a id="cmd-0x06b9"></a>`0x06b9` | `0x06b9-服务器文件读取接口.md`     | 服务器文件读取     | `client.resources.read()` / `download_file()` / `read_stats()` | 已接入          |
 | <a id="cmd-0x0fb4"></a>`0x0fb4` | `0x0fb4-历史分时数据接口.md`      | 指定日期历史分时    | `client.minutes.history()`                              | 核心           |
 | <a id="cmd-0x0fc5"></a>`0x0fc5` | `0x0fc5-当日成交明细分页接口.md`    | 当日成交明细      | `client.trades.today()`                                 | 核心           |
 | <a id="cmd-0x0fc6"></a>`0x0fc6` | `0x0fc6-历史成交明细增强分页接口.md`  | 历史成交明细增强    | `client.trades.history()`                               | 已接入          |
 | <a id="cmd-0x0fd1"></a>`0x0fd1` | `0x0fd1-单标的价格小走势图接口.md`   | 小走势图        | `client.minutes.sparkline()`                            | 已接入          |
 | <a id="cmd-0x0feb"></a>`0x0feb` | `0x0feb-近期历史分时图接口.md`     | 近期历史分时      | `client.minutes.recent()`                               | 已接入          |
 
-说明：`0x0547` 已完成请求构造、响应解析、单次刷新和未配对推送队列。
+说明：`0x0547` 已完成请求构造、响应解析、单次刷新和未配对推送队列。`0x06b9` 的协议层返回单个 `FileContentChunk`；整文件下载和 `zhb.zip` 内容解析位于上层封装。
 
 ## 三个行情命令的边界
 

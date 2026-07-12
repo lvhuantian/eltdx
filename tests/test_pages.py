@@ -144,6 +144,18 @@ def test_quote_command_docs_explain_the_three_distinct_roles() -> None:
     assert "代码和游标" in items["7709-quote-refresh"]["summary"]
 
 
+def test_file_resource_catalog_documents_download_and_stats_parsing() -> None:
+    items = {item["id"]: item for item in _catalog()["items"]}
+    resource = items["7709-file-content"]
+    method_doc = (REPO_ROOT / "docs" / resource["doc"]).read_text(encoding="utf-8")
+
+    assert resource["protocol"].lower() == "0x06b9"
+    assert all(name in resource["api"] for name in ("read()", "download_file()", "read_stats()"))
+    assert "TdxStatsResource" in resource["return_model"]
+    assert "不是新的二进制命令" in method_doc
+    assert all(name in method_doc for name in ("tdxstat.cfg", "tdxstat2.cfg", "free_float_shares_10k", "open_amount_10k"))
+
+
 def test_pages_remains_static_and_outside_runtime_dependencies() -> None:
     app = (REPO_ROOT / "docs" / "assets" / "interface-catalog.js").read_text(encoding="utf-8")
     pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")

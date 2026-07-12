@@ -87,7 +87,7 @@ client.get_legacy_quotes(["sz000001", "sh600000"])
 
 ### `read_server_file(path, offset=0, size=30000)`
 
-通过 `0x06b9` 读取一个服务器文件块。
+通过 `0x06b9` 读取一个服务器文件块。完整文件下载和 `zhb.zip` 解析见 `client.resources`。
 
 ```python
 client.read_server_file("zhb.zip", offset=0, size=30000)
@@ -371,11 +371,30 @@ frames = client.quotes.drain_pushes()
 
 ### `read(path, offset=0, size=30000)`
 
-通过 `0x06b9` 读取一个服务器文件块，返回 `FileContentChunk`。这个入口不循环下载整文件，也不解析文件内容。
+通过 `0x06b9` 读取一个服务器文件块，返回 `FileContentChunk`。这个入口不循环下载整文件。
 
 ```python
 chunk = client.resources.read("zhb.zip", offset=0, size=30000)
 ```
+
+### `download_file(path, chunk_size=30000, max_bytes=None)`
+
+循环调用 `0x06b9` 并按实际返回长度拼接完整文件，返回 `bytes`。`chunk_size` 范围为 `1..60000`；`max_bytes` 可限制最多下载的字节数。
+
+```python
+payload = client.resources.download_file("zhb.zip")
+```
+
+### `read_stats(path="zhb.zip", chunk_size=30000)`
+
+下载并解析 `zhb.zip` 中的 `tdxstat.cfg` 和 `tdxstat2.cfg`，返回 `TdxStatsResource`。两个 CFG 使用 GBK 解码，结构化字段可通过 `stats.row(market_id, code)` 查询。
+
+```python
+stats = client.resources.read_stats()
+stat, stat2 = stats.row(0, "000001")
+```
+
+该解析只针对已知的 `zhb.zip` 格式；其他服务器文件由 `download_file()` 返回原始 bytes。
 
 ## `client.bars`
 

@@ -25,7 +25,7 @@ from .quote import (
     QuoteRefreshRecord,
     QuoteSnapshot,
 )
-from .resource import FileContentChunk
+from .resource import FileContentChunk, TdxStat2Row, TdxStatRow, TdxStatsResource
 from .security import SecurityCode
 from .session import HandshakeInfo, HeartbeatAck
 from .trade import TradePage, TradeTick
@@ -65,5 +65,8 @@ __all__ = [
     "SparklineSeries",
     "TradePage",
     "TradeTick",
+    "TdxStat2Row",
+    "TdxStatRow",
+    "TdxStatsResource",
     "XdxrRecord",
 ]

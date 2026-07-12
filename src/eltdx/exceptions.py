@@ -9,6 +9,10 @@ class ProtocolError(EltdxError):
     """Raised when protocol encoding or decoding fails."""
 
 
+class ResourceFormatError(EltdxError):
+    """Raised when a downloaded TDX resource has an invalid format."""
+
+
 class TransportError(EltdxError):
     """Raised when the transport cannot complete a request."""
 

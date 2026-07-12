@@ -25,3 +25,16 @@ def test_pooled_socket_transport_round_robins_execute(monkeypatch) -> None:
 
     assert [transport.execute(0x0004), transport.execute(0x0004), transport.execute(0x0004)] == [0, 1, 0]
     assert calls == [0, 1, 0]
+
+
+def test_pooled_socket_transport_pin_keeps_one_connection(monkeypatch) -> None:
+    transport = PooledSocketTransport(hosts=["127.0.0.1:1"], timeout=0.1, pool_size=2, heartbeat_interval=None)
+    calls: list[int] = []
+
+    for index, item in enumerate(transport._transports):
+        monkeypatch.setattr(item, "execute", lambda command, payload=None, index=index: calls.append(index) or index)
+
+    with transport.pin() as pinned:
+        assert [pinned.execute(0x0004), pinned.execute(0x0004)] == [0, 0]
+    assert transport.execute(0x0004) == 1
+    assert calls == [0, 0, 1]

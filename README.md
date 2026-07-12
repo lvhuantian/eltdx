@@ -164,7 +164,7 @@ print(f10.company_profile("000034").rows[0])
 | 本地复权因子       | `client.get_factors()`                                     | [`0x052d`](docs/COMMANDS_7709.md#cmd-0x052d) + [`0x000f`](docs/COMMANDS_7709.md#cmd-0x000f) | 用不复权日 K 和除权除息记录计算本地前复权 / 后复权因子                                 | [文档](docs/methods/7709-本地复权因子.md)     |
 | 财务基础信息       | `client.corporate.finance_batch()` / `get_finance_batch()` | [`0x0010`](docs/COMMANDS_7709.md#cmd-0x0010)                                                | 批量返回流通股本、总股本、EPS、资产、负债、收入、利润等基础财务字段                            | [文档](docs/methods/7709-财务基础信息.md)     |
 | 特殊品种涨跌停限制    | `client.limits.special()`                                  | [`0x0452`](docs/COMMANDS_7709.md#cmd-0x0452)                                                | 返回特殊品种涨跌停限制表；需要按表扫描后本地索引到具体代码                                  | [文档](docs/methods/7709-特殊品种涨跌停限制.md)  |
-| 服务器文件读取      | `client.resources.read()` / `read_server_file()`            | [`0x06b9`](docs/COMMANDS_7709.md#cmd-0x06b9)                                                | 按路径、偏移和长度读取一个服务器文件块；返回单块模型，`content` 为原始 bytes                     | [文档](docs/methods/7709-服务器文件读取.md)    |
+| 服务器文件读取      | `client.resources.read()` / `download_file()` / `read_stats()` | [`0x06b9`](docs/COMMANDS_7709.md#cmd-0x06b9)                                              | 读取文件块或下载整文件，并可解析 `zhb.zip` 中的 `tdxstat.cfg` / `tdxstat2.cfg`              | [文档](docs/methods/7709-服务器文件读取.md)    |
 
 `7709` 命令和 API 对照见 [COMMANDS_7709.md](docs/COMMANDS_7709.md)，完整调用参数见 [API_REFERENCE.md](docs/API_REFERENCE.md)。
 

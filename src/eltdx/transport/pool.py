@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import itertools
 import threading
+from contextlib import contextmanager
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, Iterator
 
 from eltdx.hosts import DEFAULT_HOSTS, DEFAULT_PROBE_TIMEOUT, DEFAULT_PROBE_WORKERS, sort_hosts_by_latency, unique_hosts
 
@@ -86,6 +87,12 @@ class PooledSocketTransport:
 
     def execute(self, command: int, payload: dict[str, Any] | None = None) -> Any:
         return self._pick_transport().execute(command, payload)
+
+    @contextmanager
+    def pin(self) -> Iterator[SocketTransport]:
+        """Keep a multi-request operation on one underlying connection."""
+
+        yield self._pick_transport()
 
     def request(self, command: str) -> str:
         if command == "ping":
