@@ -59,7 +59,7 @@ def test_pages_catalog_has_expected_public_interfaces() -> None:
     catalog = _catalog()
     items = catalog["items"]
 
-    assert catalog["schema_version"] == 5
+    assert catalog["schema_version"] == 6
     assert len(items) == 56
     assert Counter(item["source"] for item in items) == {
         "7709": 21,
@@ -67,6 +67,23 @@ def test_pages_catalog_has_expected_public_interfaces() -> None:
         "Helper": 14,
     }
     assert len({item["id"] for item in items}) == len(items)
+
+
+def test_catalog_labels_every_multi_call_entry() -> None:
+    catalog = _catalog()
+    multi_call_items = [item for item in catalog["items"] if " / " in item["api"]]
+
+    assert multi_call_items
+    assert all(item.get("calls") for item in multi_call_items)
+    for item in multi_call_items:
+        assert all(set(call) == {"label", "api"} for call in item["calls"])
+
+    items = {item["id"]: item for item in catalog["items"]}
+    assert items["7709-code-count"]["calls"] == [
+        {"label": "主要调用", "api": "client.codes.count(market)"},
+        {"label": "旧版兼容", "api": "client.get_count(market, refresh=False)"},
+    ]
+    assert [call["label"] for call in items["7709-special-limits"]["calls"]] == ["单页读取", "连续扫描"]
 
 
 def test_pages_catalog_has_three_flat_source_menus() -> None:

@@ -242,12 +242,16 @@
   }
 
   function searchText(item, meta) {
+    var calls = (item.calls || []).map(function (call) {
+      return call.label + " " + call.api;
+    }).join(" ");
     return normalize([
       item.title,
       item.source,
       sourceLabels[item.source],
       item.category,
       item.api,
+      calls,
       (item.aliases || []).join(" "),
       item.protocol,
       item.kind,
@@ -274,7 +278,18 @@
       var titleLink = createElement("a", "", item.title);
       titleLink.href = localDocUrl(item);
       name.appendChild(titleLink);
-      name.appendChild(createElement("code", "", item.api));
+      if (Array.isArray(item.calls) && item.calls.length) {
+        var callList = createElement("div", "interface-call-list");
+        item.calls.forEach(function (call) {
+          var callRow = createElement("div", "interface-call");
+          callRow.appendChild(createElement("span", "interface-call-label", call.label));
+          callRow.appendChild(createElement("code", "", call.api));
+          callList.appendChild(callRow);
+        });
+        name.appendChild(callList);
+      } else {
+        name.appendChild(createElement("code", "", item.api));
+      }
 
       var directory = createElement("div", "interface-cell interface-source");
       directory.setAttribute("role", "cell");

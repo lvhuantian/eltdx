@@ -474,6 +474,29 @@
   color: var(--catalog-blue);
 }
 
+.interface-call-list {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  gap: 0.24rem;
+}
+
+.interface-call {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  min-width: 0;
+  align-items: start;
+  gap: 0.35rem;
+}
+
+.interface-call-label {
+  color: var(--catalog-text-muted);
+  font-size: 0.56rem;
+  font-weight: 700;
+  line-height: 1.45;
+  white-space: nowrap;
+}
+
 .interface-cell code {
   max-width: 100%;
   padding: 0;
@@ -655,5 +678,10 @@
   .interface-stat span {
     font-size: 0.64rem;
     line-height: 1.35;
+  }
+
+  .interface-call {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.05rem;
   }
 }
