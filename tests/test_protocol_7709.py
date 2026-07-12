@@ -13,12 +13,14 @@ from eltdx.protocol.constants import (
     TYPE_CAPITAL_CHANGES,
     TYPE_CATEGORY_QUOTES,
     TYPE_FINANCE_BATCH,
+    TYPE_FILE_CONTENT,
     TYPE_HANDSHAKE,
     TYPE_HEARTBEAT,
     TYPE_HISTORICAL_INTRADAY,
     TYPE_HISTORICAL_TICKS,
     TYPE_INTRADAY_AUX,
     TYPE_KLINES,
+    TYPE_LEGACY_QUOTES,
     TYPE_REFRESH_STREAM,
     TYPE_RECENT_INTRADAY,
     TYPE_SECURITY_COUNT,
@@ -65,6 +67,39 @@ def test_build_snapshots_frame() -> None:
         "01363030303030"
         "02383939303530"
     )
+
+
+def test_build_legacy_quotes_and_file_content_frames() -> None:
+    legacy = build_command_frame(TYPE_LEGACY_QUOTES, {"codes": ["sz000001", "sh600000"]}, 10)
+    resource = build_command_frame(
+        TYPE_FILE_CONTENT,
+        {"path": "T0002\\hq_cache.dat", "offset": 30000, "size": 12000},
+        11,
+    )
+
+    assert legacy.msg_type == 0x053E
+    assert legacy.data.hex() == "050000000000000002000030303030303101363030303030"
+    assert resource.msg_type == 0x06B9
+    assert len(resource.data) == 308
+    assert resource.data[:8] == (30000).to_bytes(4, "little") + (12000).to_bytes(4, "little")
+    assert resource.data[8:].rstrip(b"\x00") == b"T0002/hq_cache.dat"
+
+
+def test_file_content_frame_validates_path_and_size() -> None:
+    with pytest.raises(ProtocolError, match="ASCII"):
+        build_command_frame(TYPE_FILE_CONTENT, {"path": "统计.zip"}, 1)
+    with pytest.raises(ProtocolError, match="must be > 0"):
+        build_command_frame(TYPE_FILE_CONTENT, {"path": "zhb.zip", "size": 0}, 1)
+    with pytest.raises(ProtocolError, match="exceeds 300"):
+        build_command_frame(TYPE_FILE_CONTENT, {"path": "a" * 301}, 1)
+    maximum = build_command_frame(TYPE_FILE_CONTENT, {"path": "zhb.zip", "size": 60000}, 1)
+    assert maximum.data[:8] == b"\x00\x00\x00\x00" + (60000).to_bytes(4, "little")
+    with pytest.raises(ProtocolError, match="<= 60000"):
+        build_command_frame(TYPE_FILE_CONTENT, {"path": "zhb.zip", "size": 60001}, 1)
+    with pytest.raises(ProtocolError, match="must be an integer"):
+        build_command_frame(TYPE_FILE_CONTENT, {"path": "zhb.zip", "offset": 1.5}, 1)
+    with pytest.raises(ProtocolError, match="must be an integer"):
+        build_command_frame(TYPE_FILE_CONTENT, {"path": "zhb.zip", "offset": True}, 1)
 
 
 def test_build_klines_frame_uses_7709_period_mapping() -> None:
@@ -358,6 +393,80 @@ def test_parse_snapshot_keeps_only_confirmed_top_level_depth() -> None:
     assert snapshot.tail_raw.startswith(bytes.fromhex("1614120010004091fc4c"))
 
 
+def test_parse_legacy_quotes_decodes_five_levels_and_status() -> None:
+    record = _legacy_quote_record(0, "000001")
+    payload = (0x0701).to_bytes(2, "little") + (1).to_bytes(2, "little") + record
+    quote = parse_command_response(
+        TYPE_LEGACY_QUOTES,
+        ResponseFrame(0, 1, TYPE_LEGACY_QUOTES, len(payload), len(payload), bytes(payload), b""),
+        {"codes": ["sz000001"]},
+    )[0]
+
+    assert quote.full_code == "sz000001"
+    assert quote.last_price == pytest.approx(10.14)
+    assert quote.pre_close_price == pytest.approx(10.0)
+    assert [level.price for level in quote.buy_levels] == pytest.approx([10.13, 10.12, 10.11, 10.10, 10.09])
+    assert [level.volume for level in quote.sell_levels] == [428, 260, 136, 92, 71]
+    assert quote.sum_buy_vol == 685
+    assert quote.sum_sell_vol == 987
+    assert quote.trading_status_raw == 0x20
+    assert quote.trading_status_hex == "0x0020"
+    assert quote.tail_metrics_raw == (1, -2, 3, -4)
+    assert quote.rise_speed_raw == 21
+    assert quote.active2 == 8
+
+
+def test_parse_legacy_quotes_supports_short_tail_and_etf_precision() -> None:
+    stock = _legacy_quote_record(0, "000001", include_optional_tail=False)
+    etf = _legacy_quote_record(1, "510300", close_raw=1014)
+    payload = (0x0701).to_bytes(2, "little") + (2).to_bytes(2, "little") + stock + etf
+    quotes = parse_command_response(
+        TYPE_LEGACY_QUOTES,
+        ResponseFrame(0, 1, TYPE_LEGACY_QUOTES, len(payload), len(payload), payload, b""),
+        {"codes": ["sz000001", "sh510300"]},
+    )
+
+    assert [quote.full_code for quote in quotes] == ["sz000001", "sh510300"]
+    assert quotes[0].rise_speed_raw is None
+    assert quotes[0].active2 is None
+    assert quotes[1].last_price == pytest.approx(1.014)
+    assert quotes[1].buy_levels[0].price == pytest.approx(1.013)
+
+
+def test_parse_file_content_returns_exact_chunk() -> None:
+    content = b"abc123"
+    payload = len(content).to_bytes(4, "little") + content + b"\xaa\xbb"
+    chunk = parse_command_response(
+        TYPE_FILE_CONTENT,
+        ResponseFrame(0, 1, TYPE_FILE_CONTENT, len(payload), len(payload), payload, b""),
+        {"path": "zhb.zip", "offset": 10, "size": 30000},
+    )
+
+    assert chunk.path == "zhb.zip"
+    assert chunk.offset == 10
+    assert chunk.request_size == 30000
+    assert chunk.chunk_len == 6
+    assert chunk.content == content
+    assert chunk.is_last is True
+    assert chunk.raw_payload == payload
+
+
+def test_parse_file_content_rejects_invalid_lengths() -> None:
+    with pytest.raises(ProtocolError, match="expected 10, got 5"):
+        parse_command_response(
+            TYPE_FILE_CONTENT,
+            ResponseFrame(0, 1, TYPE_FILE_CONTENT, 5, 5, b"\x06\x00\x00\x00a", b""),
+            {"path": "zhb.zip", "size": 30000},
+        )
+    with pytest.raises(ProtocolError, match="exceeds requested size"):
+        payload = (2).to_bytes(4, "little") + b"ab"
+        parse_command_response(
+            TYPE_FILE_CONTENT,
+            ResponseFrame(0, 1, TYPE_FILE_CONTENT, len(payload), len(payload), payload, b""),
+            {"path": "zhb.zip", "size": 1},
+        )
+
+
 def test_parse_corporate_finance_and_limits_payloads() -> None:
     capital_record = (
         bytes([0])
@@ -433,3 +542,52 @@ def test_parse_corporate_finance_and_limits_payloads() -> None:
 def test_unmigrated_7709_command_is_explicit() -> None:
     with pytest.raises(UnsupportedCommandError, match="0x9999"):
         build_command_frame(0x9999, {"code": "sz000001"}, 1)
+
+
+def _signed_varint(value: int) -> bytes:
+    sign = 0x40 if value < 0 else 0
+    remaining = abs(value)
+    first = (remaining & 0x3F) | sign
+    remaining >>= 6
+    if remaining:
+        first |= 0x80
+    output = [first]
+    while remaining:
+        byte = remaining & 0x7F
+        remaining >>= 7
+        if remaining:
+            byte |= 0x80
+        output.append(byte)
+    return bytes(output)
+
+
+def _legacy_quote_record(
+    market_id: int,
+    code: str,
+    *,
+    close_raw: int = 1014,
+    include_optional_tail: bool = True,
+) -> bytes:
+    levels = [
+        (-1, 0, 320, 428),
+        (-2, 1, 118, 260),
+        (-3, 2, 94, 136),
+        (-4, 3, 87, 92),
+        (-5, 4, 66, 71),
+    ]
+    record = bytearray(bytes([market_id]) + code.encode("ascii") + (7).to_bytes(2, "little"))
+    for value in (close_raw, -14, -1, 6, -10, 103000, -close_raw, 1000, 15):
+        record.extend(_signed_varint(value))
+    record.extend((12345678).to_bytes(4, "little"))
+    for value in (400, 600, 0, 100):
+        record.extend(_signed_varint(value))
+    for values in levels:
+        for value in values:
+            record.extend(_signed_varint(value))
+    record.extend((0x20).to_bytes(2, "little"))
+    for value in (1, -2, 3, -4):
+        record.extend(_signed_varint(value))
+    if include_optional_tail:
+        record.extend((21).to_bytes(2, "little", signed=True))
+        record.extend((8).to_bytes(2, "little"))
+    return bytes(record)

@@ -19,11 +19,13 @@ from .minute import MinuteAuxPoint, MinuteAuxSeries, MinutePoint, MinuteSeries, 
 from .quote import (
     CategoryQuotePage,
     CategoryQuoteRecord,
+    LegacyQuote,
     QuoteLevel,
     QuoteRefreshPage,
     QuoteRefreshRecord,
     QuoteSnapshot,
 )
+from .resource import FileContentChunk
 from .security import SecurityCode
 from .session import HandshakeInfo, HeartbeatAck
 from .trade import TradePage, TradeTick
@@ -40,10 +42,12 @@ __all__ = [
     "FactorResponse",
     "FinanceBatch",
     "FinanceRecord",
+    "FileContentChunk",
     "HandshakeInfo",
     "HeartbeatAck",
     "KlineBar",
     "KlineSeries",
+    "LegacyQuote",
     "MinuteAuxPoint",
     "MinuteAuxSeries",
     "MinutePoint",

@@ -3,6 +3,7 @@
 [![PyPI](https://img.shields.io/pypi/v/eltdx?label=pypi&logo=pypi)](https://pypi.org/project/eltdx/)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue)](https://pypi.org/project/eltdx/)
 [![Build](https://img.shields.io/github/actions/workflow/status/electkismet/eltdx/ci.yml?branch=main&label=build)](https://github.com/electkismet/eltdx/actions/workflows/ci.yml)
+[![Docs](https://img.shields.io/github/actions/workflow/status/electkismet/eltdx/pages.yml?branch=main&label=docs)](https://electkismet.github.io/eltdx/)
 
 > 推荐关注新项目 [AxData](https://github.com/electkismet/AxData)：AxData 基于 eltdx 迭代开发，是后续主要维护的开源量化数据库框架。除通达信体系外，AxData 还通过插件机制整理接入交易所、巨潮、腾讯财经、新浪财经、东方财富、财联社、开盘红等公开源接口，并扩展了自由流通市值、开盘换手、开盘量比、开盘抢筹、竞价昨比、连板天梯、题材强度等更适合本地量化研究和短线数据分析的指标能力。
 
@@ -28,7 +29,7 @@
 | 常用场景   | 股票信息汇总、个股概念板块、概念板块成分股、竞价数据、批量行情表、复权/不复权 K 线 | `client.helpers`                   |
 | 工具能力   | 连接池、主站测速、自动心跳、低频数据缓存、JSON 序列化、交易日工具、MCP 工具服务 | `TdxClient`、`WorkdayService`、`eltdx-mcp` |
 
-调用方法和返回字段看 [METHOD_REFERENCE.md](docs/METHOD_REFERENCE.md)，常用问题入口看 [docs/helpers/README.md](docs/helpers/README.md)，完整 API 看 [API_REFERENCE.md](docs/API_REFERENCE.md)，字段总表看 [FIELD_REFERENCE.md](docs/FIELD_REFERENCE.md)，F10 资料看 [F10_7615.md](docs/F10_7615.md)，MCP 工具看 [MCP.md](docs/MCP.md)。
+完整接口目录见 [GitHub Pages](https://electkismet.github.io/eltdx/)。调用方法和返回字段看 [METHOD_REFERENCE.md](docs/METHOD_REFERENCE.md)，常用问题入口看 [docs/helpers/README.md](docs/helpers/README.md)，完整 API 看 [API_REFERENCE.md](docs/API_REFERENCE.md)，字段总表看 [FIELD_REFERENCE.md](docs/FIELD_REFERENCE.md)，F10 资料看 [F10_7615.md](docs/F10_7615.md)，MCP 工具看 [MCP.md](docs/MCP.md)。
 
 ## 安装
 
@@ -124,6 +125,7 @@ print(f10.company_profile("000034").rows[0])
 | 代码数量         | `client.codes.count("sz")` / `get_count()`                 | [`0x044e`](docs/COMMANDS_7709.md#cmd-0x044e)                                                | 返回沪、深、北某个市场的证券数量；常用于全量拉代码表前确定规模                                | [文档](docs/methods/7709-代码数量.md)       |
 | 代码表          | `client.codes.list()` / `get_codes_all()`                  | [`0x044d`](docs/COMMANDS_7709.md#cmd-0x044d)                                                | 返回代码、名称、市场、价格精度、昨收、A 股 / ETF / 指数等本地分类                         | [文档](docs/methods/7709-代码表.md)        |
 | 批量快照         | `client.quotes.get_snapshots()` / `get_quote()`            | [`0x054c`](docs/COMMANDS_7709.md#cmd-0x054c) + [`0x0547`](docs/COMMANDS_7709.md#cmd-0x0547) | 按代码列表返回现价、涨跌幅、成交量额、内外盘和盘口；`get_quote()` 补齐五档盘口                   | [文档](docs/methods/7709-批量快照.md)       |
+| 旧版批量行情       | `client.quotes.legacy()` / `get_legacy_quotes()`            | [`0x053e`](docs/COMMANDS_7709.md#cmd-0x053e)                                                | 按代码列表返回旧版行情、五档盘口和协议状态原始字段；便捷入口自动按 80 个代码拆批                    | [文档](docs/methods/7709-旧版批量行情.md)     |
 | 五档盘口         | `client.get_quote_depth()` / `client.quotes.get_depth()`   | [`0x0547`](docs/COMMANDS_7709.md#cmd-0x0547)                                                | 用刷新接口按代码列表直接返回买一到买五 / 卖一到卖五                                         | [文档](docs/methods/7709-增量刷新推送队列.md) |
 | 分类行情         | `client.quotes.list_by_category()`                         | [`0x054b`](docs/COMMANDS_7709.md#cmd-0x054b)                                                | 按市场或板块分页返回行情列表；可按涨幅、价格、成交额等服务端排序                               | [文档](docs/methods/7709-分类行情.md)       |
 | 增量刷新 / 推送队列  | `client.quotes.refresh()` / `poll_push()`                  | [`0x0547`](docs/COMMANDS_7709.md#cmd-0x0547)                                                | 返回关注代码的增量行情；未配对推送帧进入 push queue 供调用方读取                         | [文档](docs/methods/7709-增量刷新推送队列.md)   |
@@ -145,6 +147,7 @@ print(f10.company_profile("000034").rows[0])
 | 本地复权因子       | `client.get_factors()`                                     | [`0x052d`](docs/COMMANDS_7709.md#cmd-0x052d) + [`0x000f`](docs/COMMANDS_7709.md#cmd-0x000f) | 用不复权日 K 和除权除息记录计算本地前复权 / 后复权因子                                 | [文档](docs/methods/7709-本地复权因子.md)     |
 | 财务基础信息       | `client.corporate.finance_batch()` / `get_finance_batch()` | [`0x0010`](docs/COMMANDS_7709.md#cmd-0x0010)                                                | 批量返回流通股本、总股本、EPS、资产、负债、收入、利润等基础财务字段                            | [文档](docs/methods/7709-财务基础信息.md)     |
 | 特殊品种涨跌停限制    | `client.limits.special()`                                  | [`0x0452`](docs/COMMANDS_7709.md#cmd-0x0452)                                                | 返回特殊品种涨跌停限制表；需要按表扫描后本地索引到具体代码                                  | [文档](docs/methods/7709-特殊品种涨跌停限制.md)  |
+| 服务器文件读取      | `client.resources.read()` / `read_server_file()`            | [`0x06b9`](docs/COMMANDS_7709.md#cmd-0x06b9)                                                | 按路径、偏移和长度读取一个服务器文件块；返回单块模型，`content` 为原始 bytes                     | [文档](docs/methods/7709-服务器文件读取.md)    |
 
 `7709` 命令和 API 对照见 [COMMANDS_7709.md](docs/COMMANDS_7709.md)，完整调用参数见 [API_REFERENCE.md](docs/API_REFERENCE.md)。
 
@@ -271,7 +274,7 @@ python scripts/smoke/export_auction_925_daily.py --code sz000001 --start 2026-04
 | 版本更新         | [docs/UPDATE_FROM_0_5_1.md](docs/UPDATE_FROM_0_5_1.md) | 从 `v0.5.1` 到 `v1.0.0` 的更新说明 |
 | 方法字段手册       | [docs/METHOD_REFERENCE.md](docs/METHOD_REFERENCE.md) | 每个调用方法怎么传参、返回哪些解析字段        |
 | 具体调用         | [docs/API_REFERENCE.md](docs/API_REFERENCE.md)       | 每组 API 怎么传参数、返回什么、有哪些注意点   |
-| 7709 接口对照    | [docs/COMMANDS_7709.md](docs/COMMANDS_7709.md)       | 19 个二进制命令分别对应哪个业务 API      |
+| 7709 接口对照    | [docs/COMMANDS_7709.md](docs/COMMANDS_7709.md)       | 21 个二进制命令分别对应哪个业务 API      |
 | F10 Entry 对照 | [docs/F10_7615.md](docs/F10_7615.md)                 | 7615/TQLEX 每个资料 Entry 怎么调用 |
 | 字段说明         | [docs/FIELD_REFERENCE.md](docs/FIELD_REFERENCE.md)   | 返回模型里的字段中文含义               |
 
@@ -288,7 +291,7 @@ python scripts/smoke/export_auction_925_daily.py --code sz000001 --start 2026-04
 | [docs/FIELD_REFERENCE.md](docs/FIELD_REFERENCE.md)       | 返回字段中文含义               |
 | [docs/F10_7615.md](docs/F10_7615.md)                     | 7615 F10 / TQLEX 调用说明  |
 | [docs/MCP.md](docs/MCP.md)                               | MCP 工具说明               |
-| [docs/COMMANDS_7709.md](docs/COMMANDS_7709.md)           | 19 个 `7709` 命令和 API 映射 |
+| [docs/COMMANDS_7709.md](docs/COMMANDS_7709.md)           | 21 个 `7709` 命令和 API 映射 |
 | [docs/DEBUG_GUIDE.md](docs/DEBUG_GUIDE.md)               | 连接、主站和协议排查             |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)             | 项目分层和实现结构              |
 | [docs/FIELD_MIGRATION.md](docs/FIELD_MIGRATION.md)       | 历史字段到当前字段的对照           |

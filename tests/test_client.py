@@ -41,8 +41,11 @@ def test_protocol_round_trip() -> None:
 
 
 def test_command_registry_contains_7709_documents() -> None:
-    assert len(COMMANDS) == 19
+    assert len(COMMANDS) == 21
     assert COMMANDS["snapshots"].hex == "0x054c"
+    assert COMMANDS["legacy_quotes"].hex == "0x053e"
+    assert COMMANDS["file_content"].hex == "0x06b9"
+    assert COMMANDS["file_content"].method == "read"
     assert COMMANDS["security_list"].document == "0x044d-代码表分页接口.md"
     assert {item.name for item in required_commands()} >= {"handshake", "heartbeat", "snapshots", "klines"}
 
@@ -50,12 +53,26 @@ def test_command_registry_contains_7709_documents() -> None:
 def test_business_api_uses_command_numbers() -> None:
     client = TdxClient.in_memory()
     assert client.quotes.get_snapshots(["sz000001"])["command"] == "0x054c"
+    assert client.quotes.legacy(["sz000001"])["command"] == "0x053e"
     assert client.quotes.get_depth(["sz000001"])["command"] == "0x0547"
     assert client.quotes.list_by_category("沪深A股", sort_by="涨幅")["command"] == "0x054b"
     assert client.quotes.poll_push() is None
     assert client.quotes.drain_pushes() == []
     assert client.bars.get("sz000001", period="day")["payload"]["period"] == "day"
     assert client.minutes.today("sz000001")["command"] == "0x0537"
+    assert client.resources.read("zhb.zip", offset=10, size=20)["command"] == "0x06b9"
+
+
+def test_new_binary_client_entrypoints_keep_exact_payloads() -> None:
+    client = TdxClient.in_memory()
+
+    legacy = client.get_legacy_quotes(["sz000001", "sh600000"])
+    resource = client.read_server_file("zhb.zip", offset=30000, size=12000)
+
+    assert legacy["command"] == "0x053e"
+    assert legacy["payload"] == {"codes": ["sz000001", "sh600000"]}
+    assert resource["command"] == "0x06b9"
+    assert resource["payload"] == {"path": "zhb.zip", "offset": 30000, "size": 12000}
 
 
 def test_compat_constructor_accepts_single_host() -> None:

@@ -77,6 +77,22 @@ client.get_quote(["sz000001", "sh600000"])
 client.get_quote_depth(["sz000001", "sh600000"])
 ```
 
+### `get_legacy_quotes(codes)`
+
+查询 `0x053e` 旧版批量行情，并自动按 80 个代码拆批。
+
+```python
+client.get_legacy_quotes(["sz000001", "sh600000"])
+```
+
+### `read_server_file(path, offset=0, size=30000)`
+
+通过 `0x06b9` 读取一个服务器文件块。
+
+```python
+client.read_server_file("zhb.zip", offset=0, size=30000)
+```
+
 ### 代码表便捷方法
 
 ```python
@@ -300,6 +316,14 @@ client.quotes.get_snapshots(["sz000001", "sh600000"])
 client.quotes.get(["sz000001", "sh600000"])
 ```
 
+### `legacy(codes)`
+
+直接调用一次 `0x053e` 旧版批量行情接口，返回 `list[LegacyQuote]`。
+
+```python
+client.quotes.legacy(["sz000001", "sh600000"])
+```
+
 ### `list_by_category(category, sort_by=None, start=0, count=80, ascending=False)`
 
 查询分类行情列表，对应 `0x054b`。
@@ -341,6 +365,16 @@ event = client.quotes.poll_push(timeout=0.5, parse=True)
 
 ```python
 frames = client.quotes.drain_pushes()
+```
+
+## `client.resources`
+
+### `read(path, offset=0, size=30000)`
+
+通过 `0x06b9` 读取一个服务器文件块，返回 `FileContentChunk`。这个入口不循环下载整文件，也不解析文件内容。
+
+```python
+chunk = client.resources.read("zhb.zip", offset=0, size=30000)
 ```
 
 ## `client.bars`

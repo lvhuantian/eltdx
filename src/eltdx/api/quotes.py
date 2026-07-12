@@ -15,6 +15,12 @@ class QuoteApi(ApiBase):
         code_list = [codes] if isinstance(codes, str) else list(codes)
         return self._execute("snapshots", codes=code_list)
 
+    def legacy(self, codes: str | Sequence[str]):
+        """Query the old-style batch quote interface (0x053E)."""
+
+        code_list = [codes] if isinstance(codes, str) else list(codes)
+        return self._execute("legacy_quotes", codes=code_list)
+
     def get_depth(self, codes: str | Sequence[str]):
         """Query five-level quote depth via the 0x0547 refresh interface."""
 

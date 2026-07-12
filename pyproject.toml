@@ -27,7 +27,7 @@ classifiers = [
 dependencies = []
 
 [project.urls]
-Documentation = "https://github.com/electkismet/eltdx/tree/main/docs"
+Documentation = "https://electkismet.github.io/eltdx/"
 Source = "https://github.com/electkismet/eltdx"
 Issues = "https://github.com/electkismet/eltdx/issues"
 

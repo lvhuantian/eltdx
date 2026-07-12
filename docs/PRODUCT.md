@@ -27,7 +27,8 @@
 | --- | --- | --- |
 | 连接握手、心跳 | `client.session` | `0x000d`, `0x0004` |
 | 代码数量、代码表 | `client.codes` | `0x044e`, `0x044d` |
-| 批量快照、分类行情、行情刷新协议 | `client.quotes` | `0x054c`, `0x054b`, `0x0547` |
+| 批量快照、旧版批量行情、分类行情、行情刷新协议 | `client.quotes` | `0x054c`, `0x053e`, `0x054b`, `0x0547` |
+| 服务器文件读取 | `client.resources` | `0x06b9` |
 | K 线 / 周期线 | `client.bars` | `0x052d` |
 | 当日分时、历史分时、近期分时 | `client.minutes` | `0x0537`, `0x0fb4`, `0x0feb` |
 | 分时副图、小走势图 | `client.minutes` | `0x051b`, `0x0fd1` |
@@ -104,7 +105,7 @@ eltdx-mcp
 
 ## 1.0 能力状态
 
-当前项目已经完成 `TdxClient`、业务 API 分层、19 个 `7709` 命令注册表、中文文档、同步 `SocketTransport`、连接池包装、主站 TCP 测速和 MCP 工具服务。
+当前项目已经完成 `TdxClient`、业务 API 分层、21 个 `7709` 命令注册表、中文文档、同步 `SocketTransport`、连接池包装、主站 TCP 测速和 MCP 工具服务。
 
 已经真实接入并验证的命令：
 

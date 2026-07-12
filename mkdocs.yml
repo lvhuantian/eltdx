@@ -1,0 +1,84 @@
+site_name: eltdx
+site_url: https://electkismet.github.io/eltdx/
+site_description: 通达信 7709 行情与 7615 F10 资料 Python 客户端
+repo_url: https://github.com/electkismet/eltdx
+repo_name: electkismet/eltdx
+edit_uri: edit/main/docs/
+copyright: 仅用于个人学习、协议研究和非商业研究
+exclude_docs: /README.md
+
+theme:
+  name: material
+  language: zh
+  font: false
+  icon:
+    logo: material/chart-line
+    repo: fontawesome/brands/github
+  palette:
+    scheme: default
+    primary: teal
+    accent: amber
+  features:
+    - navigation.sections
+    - navigation.indexes
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - toc.follow
+
+plugins:
+  - search:
+      lang:
+        - zh
+        - en
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+
+extra_css:
+  - assets/interface-catalog.css
+
+extra_javascript:
+  - assets/interface-catalog-data.js
+  - assets/interface-catalog.js
+
+nav:
+  - 接口目录: index.md
+  - 使用指南:
+      - 产品与能力: PRODUCT.md
+      - 调用方法: METHOD_REFERENCE.md
+      - API 参考: API_REFERENCE.md
+      - 调用示例: EXAMPLES.md
+      - 字段手册: FIELD_REFERENCE.md
+  - 7709 行情:
+      - 命令映射: COMMANDS_7709.md
+      - 接口单页: methods/README.md
+  - 7615 F10: F10_7615.md
+  - Helpers: helpers/README.md
+  - MCP: MCP.md
+  - 工程参考:
+      - 架构: ARCHITECTURE.md
+      - 调试: DEBUG_GUIDE.md
+      - 字段迁移: FIELD_MIGRATION.md
+      - 历史迁移: MIGRATION_FROM_OLD.md
+      - 版本升级: UPDATE_FROM_0_5_1.md
+      - 路线图: ROADMAP.md
+      - GitHub Pages: GITHUB_PAGES.md
+
+not_in_nav: |
+  methods/*.md
+  helpers/*.md
+  releases/*.md

@@ -13,6 +13,7 @@ from .api.corporate import CorporateApi
 from .api.limits import LimitApi
 from .api.minutes import MinuteApi
 from .api.quotes import QuoteApi
+from .api.resources import ResourceApi
 from .api.session import SessionApi
 from .api.trades import TradeApi
 from .equity import (
@@ -28,7 +29,7 @@ from .helpers import HelperApi
 from .models import Auction0925Result, QuoteRefreshRecord, QuoteSnapshot, SecurityCode
 from .hosts import DEFAULT_PROBE_TIMEOUT, DEFAULT_PROBE_WORKERS
 from .protocol.commands.klines import normalize_period
-from .protocol.constants import DEFAULT_CODE_PAGE_SIZE
+from .protocol.constants import DEFAULT_CODE_PAGE_SIZE, DEFAULT_FILE_CHUNK_SIZE
 from .protocol.unit import normalize_code, normalize_market
 from .transport import InMemoryTransport, PooledSocketTransport, SocketTransport, Transport
 from .workday import WorkdayService
@@ -61,6 +62,7 @@ class TdxClient:
     session: SessionApi = field(init=False)
     codes: CodeApi = field(init=False)
     quotes: QuoteApi = field(init=False)
+    resources: ResourceApi = field(init=False)
     bars: BarApi = field(init=False)
     minutes: MinuteApi = field(init=False)
     trades: TradeApi = field(init=False)
@@ -132,6 +134,7 @@ class TdxClient:
         self.session = SessionApi(self.transport)
         self.codes = CodeApi(self.transport)
         self.quotes = QuoteApi(self.transport)
+        self.resources = ResourceApi(self.transport)
         self.bars = BarApi(self.transport)
         self.minutes = MinuteApi(self.transport)
         self.trades = TradeApi(self.transport)
@@ -202,6 +205,35 @@ class TdxClient:
         """按代码列表查询五档盘口，直接使用 0x0547 首次刷新接口。"""
 
         return self.quotes.get_depth(codes)
+
+    def get_legacy_quotes(self, codes: str | Sequence[str]):
+        """按代码列表查询 0x053E 旧版批量行情，自动按 80 个一批拆分。"""
+
+        code_list = _as_code_list(codes)
+        if not code_list:
+            return []
+
+        results: list[Any] = []
+        for batch in _chunks(code_list, self.batch_size):
+            page = self.quotes.legacy(batch)
+            if isinstance(page, list):
+                results.extend(page)
+            elif isinstance(page, tuple):
+                results.extend(page)
+            else:
+                return page
+        return results
+
+    def read_server_file(
+        self,
+        path: str,
+        *,
+        offset: int = 0,
+        size: int = DEFAULT_FILE_CHUNK_SIZE,
+    ):
+        """通过 0x06B9 读取一个服务器文件块。"""
+
+        return self.resources.read(path, offset=offset, size=size)
 
     def _merge_quote_depths(self, snapshots: list[Any], codes: Sequence[str]) -> list[Any]:
         if not snapshots or not all(isinstance(item, QuoteSnapshot) for item in snapshots):

@@ -5,8 +5,16 @@ from __future__ import annotations
 import struct
 
 from eltdx.exceptions import ProtocolError
-from eltdx.models import CategoryQuotePage, CategoryQuoteRecord, QuoteLevel, QuoteRefreshPage, QuoteRefreshRecord, QuoteSnapshot
-from eltdx.protocol.constants import TYPE_CATEGORY_QUOTES, TYPE_REFRESH_STREAM, TYPE_SNAPSHOTS
+from eltdx.models import (
+    CategoryQuotePage,
+    CategoryQuoteRecord,
+    LegacyQuote,
+    QuoteLevel,
+    QuoteRefreshPage,
+    QuoteRefreshRecord,
+    QuoteSnapshot,
+)
+from eltdx.protocol.constants import TYPE_CATEGORY_QUOTES, TYPE_LEGACY_QUOTES, TYPE_REFRESH_STREAM, TYPE_SNAPSHOTS
 from eltdx.protocol.frame import RequestFrame, ResponseFrame
 from eltdx.protocol.unit import (
     consume_price,
@@ -64,6 +72,22 @@ def build_snapshots_frame(payload: dict, msg_id: int) -> RequestFrame:
     return RequestFrame(msg_id=msg_id, msg_type=TYPE_SNAPSHOTS, data=bytes(data))
 
 
+def build_legacy_quotes_frame(payload: dict, msg_id: int) -> RequestFrame:
+    codes = _normalize_codes(payload.get("codes", []))
+    if not codes:
+        raise ValueError("codes must not be empty")
+    if len(codes) > 0xFFFF:
+        raise ValueError("too many codes")
+
+    data = bytearray(bytes.fromhex("0500000000000000"))
+    data.extend(len(codes).to_bytes(2, "little", signed=False))
+    for code in codes:
+        market_id, _, number = split_code(code)
+        data.append(market_id)
+        data.extend(number.encode("ascii"))
+    return RequestFrame(msg_id=msg_id, msg_type=TYPE_LEGACY_QUOTES, data=bytes(data))
+
+
 def build_refresh_stream_frame(payload: dict, msg_id: int) -> RequestFrame:
     codes = _normalize_codes(payload.get("codes", []))
     cursors = payload.get("cursors", {}) or {}
@@ -87,6 +111,29 @@ def parse_snapshots_payload(response: ResponseFrame, request_payload: dict | Non
 
     records = _split_records(payload[4:], expected_codes, count)
     return [_parse_snapshot_record(record, expected_codes[index] if index < len(expected_codes) else None) for index, record in enumerate(records)]
+
+
+def parse_legacy_quotes_payload(response: ResponseFrame, request_payload: dict | None = None) -> list[LegacyQuote]:
+    payload = response.data
+    if len(payload) < 4:
+        raise ProtocolError("invalid legacy quotes payload")
+
+    count = little_u16(payload[2:4])
+    offset = 4
+    requested_codes = _normalize_codes((request_payload or {}).get("codes", []))
+    records: list[LegacyQuote] = []
+    for index in range(count):
+        next_marker = _legacy_marker(requested_codes[index + 1]) if index + 1 < len(requested_codes) else None
+        record, offset = _parse_legacy_quote_record(
+            payload,
+            offset,
+            remaining_records=count - index - 1,
+            next_marker=next_marker,
+        )
+        records.append(record)
+    if offset != len(payload):
+        raise ProtocolError(f"unexpected trailing legacy quotes payload bytes: {len(payload) - offset}")
+    return records
 
 
 def build_category_quotes_frame(payload: dict, msg_id: int) -> RequestFrame:
@@ -256,6 +303,139 @@ def _parse_snapshot_record(record: bytes, expected_code: str | None) -> QuoteSna
         sell_levels=tuple(sell_levels),
         tail_raw=tail_raw,
     )
+
+
+def _parse_legacy_quote_record(
+    payload: bytes,
+    offset: int,
+    *,
+    remaining_records: int,
+    next_marker: bytes | None,
+) -> tuple[LegacyQuote, int]:
+    start = offset
+    if len(payload) < offset + 9:
+        raise ProtocolError("truncated legacy quote record header")
+
+    market_id = payload[offset]
+    exchange = {0: "sz", 1: "sh", 2: "bj"}.get(market_id)
+    if exchange is None:
+        raise ProtocolError(f"invalid legacy quote market id: {market_id!r}")
+    try:
+        code = payload[offset + 1 : offset + 7].decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise ProtocolError("invalid legacy quote code") from exc
+    if len(code) != 6 or not code.isdigit():
+        raise ProtocolError(f"invalid legacy quote code: {code!r}")
+    active1 = little_u16(payload[offset + 7 : offset + 9])
+    offset += 9
+    price_scale = 100.0 * price_divisor(f"{exchange}{code}")
+
+    close_raw, offset = consume_varint(payload, offset)
+    pre_close_diff_raw, offset = consume_varint(payload, offset)
+    open_diff_raw, offset = consume_varint(payload, offset)
+    high_diff_raw, offset = consume_varint(payload, offset)
+    low_diff_raw, offset = consume_varint(payload, offset)
+    server_time_raw, offset = consume_varint(payload, offset)
+    unknown_after_time_raw, offset = consume_varint(payload, offset)
+    total_hand, offset = consume_varint(payload, offset)
+    current_hand, offset = consume_varint(payload, offset)
+
+    if len(payload) < offset + 4:
+        raise ProtocolError("truncated legacy quote amount")
+    amount_raw = little_u32(payload[offset : offset + 4])
+    amount = get_volume(amount_raw)
+    offset += 4
+
+    inside_dish, offset = consume_varint(payload, offset)
+    outer_disc, offset = consume_varint(payload, offset)
+    unknown_after_outer_raw, offset = consume_varint(payload, offset)
+    open_amount_raw, offset = consume_varint(payload, offset)
+
+    buy_levels: list[QuoteLevel] = []
+    sell_levels: list[QuoteLevel] = []
+    for _ in range(5):
+        bid_delta_raw, offset = consume_varint(payload, offset)
+        ask_delta_raw, offset = consume_varint(payload, offset)
+        bid_volume, offset = consume_varint(payload, offset)
+        ask_volume, offset = consume_varint(payload, offset)
+        buy_levels.append(
+            QuoteLevel(price=(close_raw + bid_delta_raw) / price_scale, volume=bid_volume, price_delta_raw=bid_delta_raw)
+        )
+        sell_levels.append(
+            QuoteLevel(price=(close_raw + ask_delta_raw) / price_scale, volume=ask_volume, price_delta_raw=ask_delta_raw)
+        )
+
+    if len(payload) < offset + 2:
+        raise ProtocolError("truncated legacy quote trading status")
+    trading_status_raw = little_u16(payload[offset : offset + 2])
+    offset += 2
+
+    tail_metrics: list[int] = []
+    for _ in range(4):
+        value, offset = consume_varint(payload, offset)
+        tail_metrics.append(value)
+
+    rise_speed_raw = None
+    active2 = None
+    if remaining_records:
+        has_short_tail = next_marker is not None and payload.startswith(next_marker, offset)
+        has_long_tail = next_marker is not None and payload.startswith(next_marker, offset + 4)
+        if has_long_tail or (not has_short_tail and not _is_legacy_record_marker(payload, offset)):
+            if len(payload) < offset + 4:
+                raise ProtocolError("truncated legacy quote tail")
+            rise_speed_raw = int.from_bytes(payload[offset : offset + 2], "little", signed=True)
+            active2 = little_u16(payload[offset + 2 : offset + 4])
+            offset += 4
+    elif offset < len(payload):
+        if len(payload) != offset + 4:
+            raise ProtocolError("truncated legacy quote tail")
+        rise_speed_raw = int.from_bytes(payload[offset : offset + 2], "little", signed=True)
+        active2 = little_u16(payload[offset + 2 : offset + 4])
+        offset += 4
+
+    return (
+        LegacyQuote(
+            exchange=exchange,
+            market_id=market_id,
+            code=code,
+            active1=active1,
+            last_price=close_raw / price_scale,
+            pre_close_price=(close_raw + pre_close_diff_raw) / price_scale,
+            open_price=(close_raw + open_diff_raw) / price_scale,
+            high_price=(close_raw + high_diff_raw) / price_scale,
+            low_price=(close_raw + low_diff_raw) / price_scale,
+            server_time_raw=server_time_raw,
+            unknown_after_time_raw=unknown_after_time_raw,
+            total_hand=total_hand,
+            current_hand=current_hand,
+            amount=amount,
+            amount_raw=amount_raw,
+            inside_dish=inside_dish,
+            outer_disc=outer_disc,
+            unknown_after_outer_raw=unknown_after_outer_raw,
+            open_amount_raw=open_amount_raw,
+            open_amount_yuan=float(open_amount_raw) * 100.0,
+            buy_levels=tuple(buy_levels),
+            sell_levels=tuple(sell_levels),
+            trading_status_raw=trading_status_raw,
+            tail_metrics_raw=tuple(tail_metrics),
+            rise_speed_raw=rise_speed_raw,
+            active2=active2,
+            record_hex=payload[start:offset].hex(),
+        ),
+        offset,
+    )
+
+
+def _is_legacy_record_marker(payload: bytes, offset: int) -> bool:
+    if len(payload) < offset + 9 or payload[offset] not in {0, 1, 2}:
+        return False
+    return payload[offset + 1 : offset + 7].isdigit()
+
+
+def _legacy_marker(code: str) -> bytes:
+    market_id, _, number = split_code(code)
+    return bytes([market_id]) + number.encode("ascii")
 
 
 def _parse_category_quote_record(payload: bytes, offset: int) -> tuple[CategoryQuoteRecord, int]:

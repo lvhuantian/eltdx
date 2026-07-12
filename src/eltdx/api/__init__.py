@@ -8,6 +8,7 @@ from .health import ping
 from .limits import LimitApi
 from .minutes import MinuteApi
 from .quotes import QuoteApi
+from .resources import ResourceApi
 from .session import SessionApi
 from .trades import TradeApi
 
@@ -19,6 +20,7 @@ __all__ = [
     "LimitApi",
     "MinuteApi",
     "QuoteApi",
+    "ResourceApi",
     "SessionApi",
     "TradeApi",
     "ping",

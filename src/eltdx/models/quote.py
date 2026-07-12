@@ -62,6 +62,63 @@ class QuoteSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class LegacyQuote:
+    exchange: str
+    market_id: int
+    code: str
+    active1: int
+    last_price: float
+    pre_close_price: float
+    open_price: float
+    high_price: float
+    low_price: float
+    server_time_raw: int
+    unknown_after_time_raw: int
+    total_hand: int
+    current_hand: int
+    amount: float
+    amount_raw: int
+    inside_dish: int
+    outer_disc: int
+    unknown_after_outer_raw: int
+    open_amount_raw: int
+    open_amount_yuan: float
+    buy_levels: tuple[QuoteLevel, ...]
+    sell_levels: tuple[QuoteLevel, ...]
+    trading_status_raw: int
+    tail_metrics_raw: tuple[int, int, int, int]
+    rise_speed_raw: int | None
+    active2: int | None
+    record_hex: str = ""
+
+    @property
+    def full_code(self) -> str:
+        return f"{self.exchange}{self.code}"
+
+    @property
+    def change(self) -> float:
+        return self.last_price - self.pre_close_price
+
+    @property
+    def change_pct(self) -> float | None:
+        if self.pre_close_price == 0:
+            return None
+        return self.change / self.pre_close_price * 100.0
+
+    @property
+    def sum_buy_vol(self) -> int:
+        return sum(level.volume for level in self.buy_levels)
+
+    @property
+    def sum_sell_vol(self) -> int:
+        return sum(level.volume for level in self.sell_levels)
+
+    @property
+    def trading_status_hex(self) -> str:
+        return f"0x{self.trading_status_raw:04x}"
+
+
+@dataclass(frozen=True, slots=True)
 class CategoryQuoteRecord:
     exchange: str
     market_id: int

@@ -256,6 +256,21 @@ quote = client.get_quote("sz000001")[0]
 | `volume`          | 档位委托量     |
 | `price_delta_raw` | 协议价格差分原始值 |
 
+### `client.quotes.legacy(codes)` / `client.get_legacy_quotes(codes)`
+
+查询 `0x053e` 旧版批量行情。直接入口发送一次请求；客户端便捷入口自动按 80 个代码拆批。接口返回五档盘口和交易状态原始字段，不做股票筛选或状态分类。
+
+```python
+quotes = client.quotes.legacy(["sz000001", "sh600000"])
+quotes = client.get_legacy_quotes(["sz000001", "sh600000"])
+```
+
+| 返回模型 | 说明 |
+| --- | --- |
+| `list[LegacyQuote]` | 每个代码一条旧版行情记录 |
+
+`LegacyQuote` 包含行情价、成交量额、内外盘、五档盘口、`trading_status_raw`、四个尾部原始指标以及可选的旧版尾部字段。
+
 ### `client.quotes.get_depth(codes)` / `client.get_quote_depth(codes)`
 
 按代码列表直接查询五档盘口，对应 `0x0547` 首次刷新。这个入口不经过 `0x054c` 快照，适合只关心买一到买五 / 卖一到卖五的场景。
@@ -879,6 +894,20 @@ records = client.limits.scan_special()
 | -------------------- | ----------------------------------------------------------------------------- |
 | `SpecialLimitPage`   | `start_index`、`records`、`count`                                               |
 | `SpecialLimitRecord` | `exchange`、`market_id`、`code`、`full_code`、`limit_up_price`、`limit_down_price` |
+
+## 服务器文件
+
+### `client.resources.read(path, offset=0, size=30000)` / `client.read_server_file(...)`
+
+通过 `0x06b9` 读取一个服务器文件块。`path` 必须为最长 300 字节的 ASCII 路径；返回内容不做格式解析。
+
+```python
+chunk = client.read_server_file("zhb.zip", offset=0, size=30000)
+```
+
+| 返回模型 | 说明 |
+| --- | --- |
+| `FileContentChunk` | 包含 `path`、`offset`、`request_size`、`chunk_len`、`content`、`raw_payload` 和 `is_last` |
 
 ## F10 / 资料接口
 

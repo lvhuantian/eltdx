@@ -58,6 +58,23 @@
 | `sum_buy_vol`      | 五档买量合计，派生字段 |
 | `sum_sell_vol`     | 五档卖量合计，派生字段 |
 
+## LegacyQuote
+
+`0x053e` 旧版批量行情返回记录。
+
+| 字段 | 含义 |
+| --- | --- |
+| `last_price` / `pre_close_price` | 最新价 / 昨收价 |
+| `open_price` / `high_price` / `low_price` | 今开 / 最高 / 最低 |
+| `total_hand` / `current_hand` | 总成交量 / 现手 |
+| `amount` / `amount_raw` | 成交额解析值 / 原始值 |
+| `inside_dish` / `outer_disc` | 内盘 / 外盘 |
+| `buy_levels` / `sell_levels` | 五档买盘 / 五档卖盘 |
+| `trading_status_raw` / `trading_status_hex` | 交易状态原始值 / 十六进制文本 |
+| `tail_metrics_raw` | 四个尾部指标原始值 |
+| `rise_speed_raw` / `active2` | 可选旧版尾部字段 |
+| `record_hex` | 单条记录原始十六进制 |
+
 ## CategoryQuoteRecord
 
 分类行情列表记录，对应按板块/类别排序拉取。
@@ -98,6 +115,20 @@ K 线响应和单根 K 线。
 | `up_count` / `down_count`         | 上涨/下跌家数，指数类样本可能有          |
 | `raw_payload`                     | 响应 payload                |
 | `record_hex`                      | 单条 K 线记录原文                |
+
+## FileContentChunk
+
+`0x06b9` 服务器文件读取结果。
+
+| 字段 | 含义 |
+| --- | --- |
+| `path` | 服务器文件路径 |
+| `offset` | 本次读取偏移 |
+| `request_size` | 请求字节数 |
+| `chunk_len` | 实际返回字节数 |
+| `content` | 文件块原始 bytes |
+| `raw_payload` | 原始响应 payload |
+| `is_last` | 返回长度小于请求长度时为 `True` |
 
 ## MinuteSeries / MinutePoint
 

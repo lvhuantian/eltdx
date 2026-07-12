@@ -35,7 +35,7 @@ PYTHONPATH=src python -m eltdx.mcp
 
 MCP 服务默认走 stdio，不额外开启 HTTP 端口。
 
-## 工具列表
+## 工具列表 {#mcp-tools}
 
 | 工具 | 作用 |
 | --- | --- |
