@@ -6,7 +6,8 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 调用方法 | `client.f10.call(entry, body=None, params=None)` / `client.f10.params(entry, *params)` |
+| 请求体调用 | `client.f10.call(entry, body=...)` |
+| 参数调用 | `client.f10.params(entry, ...)` |
 | 底层入口 | [`7615/TQLEX`](../F10_7615.md#tqlex-gateway) |
 | 返回模型 | `F10Response` |
 

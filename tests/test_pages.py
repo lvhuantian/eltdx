@@ -87,6 +87,17 @@ def test_catalog_labels_every_multi_call_entry() -> None:
     assert [call["label"] for call in items["7709-special-limits"]["calls"]] == ["单页读取", "连续扫描"]
 
 
+def test_multi_call_detail_docs_mirror_catalog_roles() -> None:
+    for item in _catalog()["items"]:
+        calls = item.get("calls")
+        if not calls:
+            continue
+        detail = (REPO_ROOT / "docs" / item["doc"]).read_text(encoding="utf-8")
+        for call in calls:
+            assert f"| {call['label']} |" in detail, item["id"]
+            assert call["api"].split("(", 1)[0] in detail, item["id"]
+
+
 def test_pages_catalog_has_three_flat_source_menus() -> None:
     catalog = _catalog()
     ordered_layers = catalog["taxonomy"]["layers"]
@@ -185,6 +196,7 @@ def test_pages_remains_static_and_outside_runtime_dependencies() -> None:
 def test_pages_catalog_ui_exposes_taxonomy_navigation() -> None:
     page = (REPO_ROOT / "docs" / "index.md").read_text(encoding="utf-8")
     app = (REPO_ROOT / "docs" / "assets" / "interface-catalog.js").read_text(encoding="utf-8")
+    styles = (REPO_ROOT / "docs" / "assets" / "interface-catalog.css").read_text(encoding="utf-8")
 
     assert "data-interface-tree" in page
     assert "data-interface-scope-select" in page
@@ -195,6 +207,9 @@ def test_pages_catalog_ui_exposes_taxonomy_navigation() -> None:
     assert 'return "7709";' in app
     assert "catalog-tree-leaf" in app
     assert "按 7709、7615 和 Helpers 组织" in app
+    assert 'classList.toggle("interface-catalog-page"' in app
+    assert ".interface-catalog-page .md-grid" in styles
+    assert "\n.md-grid {\n" not in styles
 
 
 def test_readme_promotes_the_static_pages_catalog() -> None:

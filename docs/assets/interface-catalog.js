@@ -2,6 +2,7 @@
   "use strict";
 
   var root = document.querySelector("[data-interface-catalog]");
+  document.documentElement.classList.toggle("interface-catalog-page", Boolean(root));
   if (!root) {
     return;
   }
