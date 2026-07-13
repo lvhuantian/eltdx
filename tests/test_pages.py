@@ -247,11 +247,14 @@ def test_interface_details_promote_back_link_to_header() -> None:
 
 def test_readme_promotes_the_static_pages_catalog() -> None:
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    banner = README_BANNER_PATH.read_bytes()
 
     assert '<a href="https://electkismet.github.io/eltdx/"><strong>接口一览</strong></a>' in readme
     assert "<strong>在线文档</strong>" not in readme
     assert 'src=".github/assets/eltdx-readme-banner.png"' in readme
     assert README_BANNER_PATH.is_file()
+    assert banner.startswith(b"\x89PNG\r\n\x1a\n")
+    assert (int.from_bytes(banner[16:20], "big"), int.from_bytes(banner[20:24], "big")) == (1250, 696)
 
 
 def test_readme_shows_the_astlane_sponsor_banner() -> None:
