@@ -1,3 +1,10 @@
+---
+hide:
+  - navigation
+---
+
+[← 返回接口目录](../index.md){ .interface-detail-back }
+
 # F10-通用Entry调用
 
 ## 作用

@@ -1,3 +1,10 @@
+---
+hide:
+  - navigation
+---
+
+[← 返回接口目录](../index.md){ .interface-detail-back }
+
 # 复权 K 线
 
 ## 作用

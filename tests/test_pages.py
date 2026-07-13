@@ -98,6 +98,23 @@ def test_multi_call_detail_docs_mirror_catalog_roles() -> None:
             assert call["api"].split("(", 1)[0] in detail, item["id"]
 
 
+def test_catalog_detail_pages_hide_global_navigation() -> None:
+    detail_docs = {item["doc"] for item in _catalog()["items"]}
+    expected_header = """---
+hide:
+  - navigation
+---
+
+[← 返回接口目录](../index.md){ .interface-detail-back }
+"""
+
+    assert len(detail_docs) == 54
+    for relative_path in detail_docs:
+        detail = (REPO_ROOT / "docs" / relative_path).read_text(encoding="utf-8")
+        assert detail.startswith(expected_header), relative_path
+        assert "  - toc" not in detail.split("---", 2)[1], relative_path
+
+
 def test_pages_catalog_has_three_flat_source_menus() -> None:
     catalog = _catalog()
     ordered_layers = catalog["taxonomy"]["layers"]
