@@ -229,6 +229,22 @@ def test_pages_catalog_ui_exposes_taxonomy_navigation() -> None:
     assert "\n.md-grid {\n" not in styles
 
 
+def test_interface_details_promote_back_link_to_header() -> None:
+    app = (REPO_ROOT / "docs" / "assets" / "interface-catalog.js").read_text(encoding="utf-8")
+    styles = (REPO_ROOT / "docs" / "assets" / "interface-catalog.css").read_text(encoding="utf-8")
+    config = (REPO_ROOT / "mkdocs.yml").read_text(encoding="utf-8")
+
+    assert app.index("promoteDetailBackLink();") < app.index('if (!root)')
+    assert 'header.insertBefore(link, logo)' in app
+    assert 'window.history.back()' in app
+    assert 'document.referrer && window.history.length > 1' in app
+    assert 'link.setAttribute("aria-label", "返回上一页")' in app
+    assert ".md-header .interface-header-back" in styles
+    assert "primary: red" in config
+    assert "primary: teal" not in config
+    assert "#087f72" not in styles
+
+
 def test_readme_promotes_the_static_pages_catalog() -> None:
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
 

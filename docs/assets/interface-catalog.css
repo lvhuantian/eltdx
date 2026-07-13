@@ -8,8 +8,8 @@
   --catalog-blue-soft: #edf3ff;
   --catalog-7709: #1d4ed8;
   --catalog-7709-soft: #eaf1ff;
-  --catalog-7615: #087f72;
-  --catalog-7615-soft: #e5f4f1;
+  --catalog-7615: #6d4aa2;
+  --catalog-7615-soft: #f1ecf8;
   --catalog-helper: #9a5b08;
   --catalog-helper-soft: #fff4dc;
 }
@@ -44,6 +44,35 @@
   margin-top: 0;
   color: var(--md-typeset-color);
   font-weight: 700;
+}
+
+.interface-detail-page .md-typeset h1:first-of-type {
+  margin-top: 0;
+  color: var(--md-typeset-color);
+  font-weight: 700;
+}
+
+.md-header .interface-header-back {
+  display: inline-flex;
+  width: 2rem;
+  height: 2rem;
+  flex: 0 0 2rem;
+  align-items: center;
+  justify-content: center;
+  margin: 0 0.15rem 0 0;
+  border-radius: 50%;
+  color: var(--md-primary-bg-color);
+}
+
+.md-header .interface-header-back:hover,
+.md-header .interface-header-back:focus-visible {
+  background: rgb(255 255 255 / 14%);
+}
+
+.md-header .interface-header-back svg {
+  width: 1.2rem;
+  height: 1.2rem;
+  fill: currentcolor;
 }
 
 .catalog-app {

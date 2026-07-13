@@ -1,6 +1,46 @@
 (function () {
   "use strict";
 
+  function promoteDetailBackLink() {
+    var link = document.querySelector(".interface-detail-back");
+    document.documentElement.classList.toggle("interface-detail-page", Boolean(link));
+    if (!link) {
+      return;
+    }
+
+    var header = document.querySelector(".md-header__inner");
+    var logo = header && header.querySelector('[data-md-component="logo"]');
+    if (!header || !logo) {
+      return;
+    }
+
+    var oldParent = link.parentElement;
+    var searchBackIcon = document.querySelector('.md-search__icon[for="__search"] svg:last-of-type');
+    link.classList.add("md-header__button", "md-icon", "interface-header-back");
+    link.setAttribute("aria-label", "返回上一页");
+    link.setAttribute("title", "返回上一页");
+    if (searchBackIcon) {
+      var icon = searchBackIcon.cloneNode(true);
+      icon.setAttribute("aria-hidden", "true");
+      link.replaceChildren(icon);
+    } else {
+      link.textContent = "←";
+    }
+
+    link.addEventListener("click", function (event) {
+      if (document.referrer && window.history.length > 1) {
+        event.preventDefault();
+        window.history.back();
+      }
+    });
+    header.insertBefore(link, logo);
+    if (oldParent && !oldParent.textContent.trim()) {
+      oldParent.remove();
+    }
+  }
+
+  promoteDetailBackLink();
+
   var root = document.querySelector("[data-interface-catalog]");
   document.documentElement.classList.toggle("interface-catalog-page", Boolean(root));
   if (!root) {

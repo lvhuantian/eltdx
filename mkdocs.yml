@@ -16,7 +16,7 @@ theme:
     repo: fontawesome/brands/github
   palette:
     scheme: default
-    primary: teal
+    primary: red
     accent: amber
   features:
     - navigation.sections
