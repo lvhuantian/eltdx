@@ -22,6 +22,12 @@
   <img alt="eltdx 接口目录预览" src=".github/assets/eltdx-readme-banner.png">
 </a>
 
+<p align="center">
+  <a href="https://api.astlane.com/">
+    <img alt="Astlane token 赞助方" src="docs/assets/astlane-sponsor.svg" width="860">
+  </a>
+</p>
+
 > 推荐关注新项目 [AxData](https://github.com/electkismet/AxData)：AxData 基于 eltdx 迭代开发，是后续主要维护的开源量化数据库框架。除通达信体系外，AxData 还通过插件机制整理接入交易所、巨潮、腾讯财经、新浪财经、东方财富、财联社、开盘红等公开源接口，并扩展了自由流通市值、开盘换手、开盘量比、开盘抢筹、竞价昨比、连板天梯、题材强度等更适合本地量化研究和短线数据分析的指标能力。
 
 通达信在线行情协议 Python 库。可以拿 A 股的行情、分时、成交明细、K 线、竞价、公司信息、题材信息等信息，支持 MCP 工具。

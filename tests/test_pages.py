@@ -10,6 +10,7 @@ from eltdx.protocol import COMMANDS
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CATALOG_PATH = REPO_ROOT / "docs" / "assets" / "interface-catalog-data.js"
 README_BANNER_PATH = REPO_ROOT / ".github" / "assets" / "eltdx-readme-banner.png"
+SPONSOR_BANNER_PATH = REPO_ROOT / "docs" / "assets" / "astlane-sponsor.svg"
 
 
 def _catalog() -> dict:
@@ -203,3 +204,14 @@ def test_readme_promotes_the_static_pages_catalog() -> None:
     assert "<strong>在线文档</strong>" not in readme
     assert 'src=".github/assets/eltdx-readme-banner.png"' in readme
     assert README_BANNER_PATH.is_file()
+
+
+def test_readme_shows_the_astlane_sponsor_banner() -> None:
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    sponsor = SPONSOR_BANNER_PATH.read_text(encoding="utf-8")
+
+    catalog_position = readme.index('src=".github/assets/eltdx-readme-banner.png"')
+    sponsor_position = readme.index('src="docs/assets/astlane-sponsor.svg"')
+    assert catalog_position < sponsor_position
+    assert 'href="https://api.astlane.com/"' in readme
+    assert '<title id="title">Astlane 赞助 eltdx token</title>' in sponsor
