@@ -22,6 +22,7 @@ from eltdx.transport.actor import (
     wait_ticket,
 )
 from eltdx.transport import actor as actor_module
+from eltdx.transport import socket as socket_module
 from eltdx.transport.push import PushBuffer
 from eltdx.transport.socket import SocketTransport
 
@@ -599,6 +600,7 @@ def test_execute_timeout_retains_slot_until_exact_cancel_ack(monkeypatch) -> Non
 
     monkeypatch.setattr(actor_module, "_expire_active_task", controlled_expire)
     monkeypatch.setattr(actor_module, "_apply_cancel", controlled_apply_cancel)
+    monkeypatch.setattr(socket_module, "_retry_safe", lambda _command: False)
 
     with Scripted7709Server([first, second]) as server:
         transport = SocketTransport([server.host], timeout=0.2, heartbeat_interval=None)

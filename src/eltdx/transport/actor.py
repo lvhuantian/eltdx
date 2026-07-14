@@ -89,6 +89,8 @@ class RequestTicket:
     completion: Callable[[RequestTicket | None], None] | None = None
     internal: bool = False
     attempts: int = 0
+    attempt_deadline: float = 0.0
+    next_endpoint_index: int = 0
     state: RequestState = RequestState.ADMITTED
     result: object | None = None
     error: BaseException | None = None
@@ -104,6 +106,9 @@ class TcpGeneration:
     sock: socket.socket
     endpoint: ResolvedEndpoint
     state: TcpState
+    endpoint_index: int = 0
+    connect_deadline: float = 0.0
+    connect_recheck_at: float = 0.0
     decoder: ResponseFrameDecoder = field(default_factory=ResponseFrameDecoder)
     tx_bytes: bytes = b""
     tx_offset: int = 0
@@ -204,6 +209,7 @@ class ActorRuntime:
     generation: TcpGeneration | None = None
     active_task: ConnectTicket | RequestTicket | None = None
     endpoint_index: int = 0
+    endpoints_remaining: int = 0
     generation_counter: int = 0
     reconnect_count: int = 0
     connected_host: str | None = None
@@ -225,13 +231,24 @@ _IN_PROGRESS_CONNECT_CODES = frozenset(
         getattr(errno, "EWOULDBLOCK", None),
         getattr(errno, "EALREADY", None),
         getattr(errno, "EINTR", None),
+        getattr(errno, "WSAEINPROGRESS", None),
+        getattr(errno, "WSAEWOULDBLOCK", None),
+        getattr(errno, "WSAEALREADY", None),
+        getattr(errno, "WSAEINTR", None),
         getattr(socket, "EINPROGRESS", None),
         getattr(socket, "EWOULDBLOCK", None),
         getattr(socket, "EALREADY", None),
         getattr(socket, "EINTR", None),
+        getattr(socket, "WSAEINPROGRESS", None),
+        getattr(socket, "WSAEWOULDBLOCK", None),
+        getattr(socket, "WSAEALREADY", None),
+        getattr(socket, "WSAEINTR", None),
     )
     if value is not None
 )
+
+_MAX_REQUEST_ATTEMPTS = 2
+_CONNECT_RECHECK_INTERVAL = 0.01
 
 
 def start_actor(
@@ -503,6 +520,7 @@ def _advance_active_task(runtime: ActorRuntime) -> None:
             runtime.active_task = None
         elif generation is None:
             runtime.endpoint_index = 0
+            runtime.endpoints_remaining = len(runtime.endpoints)
             _start_next_endpoint(runtime)
         return
     if not isinstance(task, RequestTicket):
@@ -573,9 +591,13 @@ def _start_request_attempt(runtime: ActorRuntime) -> None:
         runtime.active_task = None
         return
     ticket.attempts += 1
+    attempts_remaining = 1 if ticket.internal else max(1, _MAX_REQUEST_ATTEMPTS - ticket.attempts + 1)
+    now = time.monotonic()
+    ticket.attempt_deadline = now + max(0.0, ticket.deadline - now) / attempts_remaining
     generation = runtime.generation
     if generation is None:
-        runtime.endpoint_index = 0
+        runtime.endpoint_index = ticket.next_endpoint_index % max(1, len(runtime.endpoints))
+        runtime.endpoints_remaining = len(runtime.endpoints)
         _start_next_endpoint(runtime)
         return
     if generation.state is TcpState.CONNECTED_UNHANDSHAKEN and ticket.command != TYPE_HANDSHAKE:
@@ -627,20 +649,39 @@ def _start_next_endpoint(runtime: ActorRuntime) -> None:
     ticket = runtime.active_task
     if not isinstance(ticket, (ConnectTicket, RequestTicket)):
         return
-    while runtime.endpoint_index < len(runtime.endpoints):
-        if time.monotonic() >= ticket.deadline:
-            _fail_active_task(runtime, ResponseTimeoutError("7709 response timed out during connect"), retryable=False)
+    while runtime.endpoints and runtime.endpoints_remaining > 0:
+        now = time.monotonic()
+        budget_deadline = _attempt_budget_deadline(ticket)
+        if now >= budget_deadline:
+            _fail_active_task(
+                runtime,
+                ResponseTimeoutError("7709 response timed out during connect"),
+                retryable=isinstance(ticket, RequestTicket) and budget_deadline < ticket.deadline,
+            )
             return
-        endpoint = runtime.endpoints[runtime.endpoint_index]
-        runtime.endpoint_index += 1
+        candidate_count = runtime.endpoints_remaining
+        endpoint_index = runtime.endpoint_index % len(runtime.endpoints)
+        endpoint = runtime.endpoints[endpoint_index]
+        runtime.endpoint_index = (endpoint_index + 1) % len(runtime.endpoints)
+        runtime.endpoints_remaining -= 1
+        connect_deadline = now + max(0.0, budget_deadline - now) / candidate_count
+        sock: socket.socket | None = None
+        try:
+            sock = runtime.socket_factory(endpoint.family, endpoint.socktype, endpoint.proto)
+            sock.setblocking(False)
+        except OSError as exc:
+            if sock is not None:
+                sock.close()
+            runtime.last_error = exc
+            continue
         runtime.generation_counter += 1
-        sock = runtime.socket_factory(endpoint.family, endpoint.socktype, endpoint.proto)
-        sock.setblocking(False)
         generation = TcpGeneration(
             generation_id=runtime.generation_counter,
             sock=sock,
             endpoint=endpoint,
             state=TcpState.CONNECTING,
+            endpoint_index=endpoint_index,
+            connect_deadline=connect_deadline,
             last_activity_at=time.monotonic(),
         )
         runtime.generation = generation
@@ -664,6 +705,12 @@ def _start_next_endpoint(runtime: ActorRuntime) -> None:
     if runtime.last_error is not None:
         error.__cause__ = runtime.last_error
     _fail_active_task(runtime, error, retryable=True)
+
+
+def _attempt_budget_deadline(ticket: ConnectTicket | RequestTicket) -> float:
+    if isinstance(ticket, RequestTicket) and ticket.attempt_deadline > 0:
+        return min(ticket.deadline, ticket.attempt_deadline)
+    return ticket.deadline
 
 
 def _register_connecting(runtime: ActorRuntime, generation: TcpGeneration) -> None:
@@ -717,14 +764,38 @@ def _handle_tcp_event(runtime: ActorRuntime, token: SelectorToken, mask: int) ->
         _start_next_endpoint(runtime)
         return
     if error_code == 0:
+        getpeername = getattr(generation.sock, "getpeername", None)
+        if getpeername is not None:
+            try:
+                getpeername()
+            except OSError as exc:
+                runtime.last_error = exc
+                _drop_generation(runtime, exc)
+                _start_next_endpoint(runtime)
+                return
         _finish_connect(runtime, generation)
         return
     if error_code in _IN_PROGRESS_CONNECT_CODES:
+        _defer_connect_probe(runtime, generation)
         return
     error = OSError(error_code, f"connect failed for {generation.endpoint.host}")
     runtime.last_error = error
     _drop_generation(runtime, error)
     _start_next_endpoint(runtime)
+
+
+def _defer_connect_probe(runtime: ActorRuntime, generation: TcpGeneration) -> None:
+    selector = runtime.selector
+    if selector is None:
+        raise RuntimeError("Actor selector is unavailable")
+    try:
+        selector.unregister(generation.sock)
+    except (KeyError, ValueError):
+        pass
+    generation.connect_recheck_at = min(
+        generation.connect_deadline,
+        time.monotonic() + _CONNECT_RECHECK_INTERVAL,
+    )
 
 
 def _send_generation(runtime: ActorRuntime, generation: TcpGeneration) -> None:
@@ -738,6 +809,8 @@ def _send_generation(runtime: ActorRuntime, generation: TcpGeneration) -> None:
     if sent == 0:
         raise ConnectionClosedError("7709 socket closed during send")
     exchange.sent_any = True
+    if not exchange.handshake and not exchange.ticket.retry_safe:
+        exchange.ticket.attempt_deadline = exchange.ticket.deadline
     generation.tx_offset += sent
     generation.last_activity_at = time.monotonic()
     if generation.tx_offset < len(generation.tx_bytes):
@@ -793,7 +866,7 @@ def _route_frame(runtime: ActorRuntime, generation: TcpGeneration, received: Rec
     response = received.response
     exchange = generation.active_exchange
     active = runtime.active_task
-    if active is not None and time.monotonic() >= active.deadline:
+    if active is not None and time.monotonic() >= _attempt_budget_deadline(active):
         _expire_active_task(runtime)
         return
     if (
@@ -854,6 +927,9 @@ def _handle_wire_failure(runtime: ActorRuntime, error: BaseException, *, retryab
     generation = runtime.generation
     exchange = generation.active_exchange if generation is not None else None
     sent_business = bool(exchange is not None and not exchange.handshake and exchange.sent_any)
+    ticket = runtime.active_task
+    if isinstance(ticket, RequestTicket) and generation is not None and runtime.endpoints:
+        ticket.next_endpoint_index = (generation.endpoint_index + 1) % len(runtime.endpoints)
     _drop_generation(runtime, error)
     _fail_active_task(runtime, error, retryable=retryable, sent_business=sent_business)
 
@@ -881,9 +957,36 @@ def _finish_connect(runtime: ActorRuntime, generation: TcpGeneration) -> None:
 
 def _expire_active_task(runtime: ActorRuntime) -> None:
     ticket = runtime.active_task
-    if ticket is None or time.monotonic() < ticket.deadline:
+    if ticket is None:
         return
+    now = time.monotonic()
     generation = runtime.generation
+    if (
+        generation is not None
+        and generation.state is TcpState.CONNECTING
+        and generation.connect_deadline > 0
+        and now >= generation.connect_deadline
+    ):
+        error = ResponseTimeoutError("7709 response timed out during connect")
+        _drop_generation(runtime, error)
+        if now < ticket.deadline:
+            _start_next_endpoint(runtime)
+        else:
+            _fail_active_task(runtime, error, retryable=False)
+        return
+    if (
+        generation is not None
+        and generation.state is TcpState.CONNECTING
+        and generation.connect_recheck_at > 0
+        and now >= generation.connect_recheck_at
+    ):
+        generation.connect_recheck_at = 0.0
+        _register_connecting(runtime, generation)
+        return
+
+    expiry_deadline = _attempt_budget_deadline(ticket)
+    if now < expiry_deadline:
+        return
     exchange = generation.active_exchange if generation is not None else None
     if generation is None or generation.state is TcpState.CONNECTING:
         stage = "connect"
@@ -895,15 +998,28 @@ def _expire_active_task(runtime: ActorRuntime) -> None:
         stage = "response"
     error = ResponseTimeoutError(f"7709 response timed out during {stage}")
     sent_business = bool(exchange is not None and not exchange.handshake and exchange.sent_any)
+    if isinstance(ticket, RequestTicket) and generation is not None and runtime.endpoints:
+        ticket.next_endpoint_index = (generation.endpoint_index + 1) % len(runtime.endpoints)
     _drop_generation(runtime, error)
-    _fail_active_task(runtime, error, retryable=True, sent_business=sent_business)
+    _fail_active_task(
+        runtime,
+        error,
+        retryable=isinstance(ticket, RequestTicket) and expiry_deadline < ticket.deadline,
+        sent_business=sent_business,
+    )
 
 
 def _selector_timeout(runtime: ActorRuntime) -> float | None:
     ticket = runtime.active_task
     now = time.monotonic()
     if ticket is not None:
-        return max(0.0, ticket.deadline - now)
+        deadlines = [ticket.deadline, _attempt_budget_deadline(ticket)]
+        generation = runtime.generation
+        if generation is not None and generation.state is TcpState.CONNECTING and generation.connect_deadline > 0:
+            deadlines.append(generation.connect_deadline)
+            if generation.connect_recheck_at > 0:
+                deadlines.append(generation.connect_recheck_at)
+        return max(0.0, min(deadlines) - now)
     generation = runtime.generation
     interval = runtime.heartbeat_interval
     if generation is not None and interval is not None and interval > 0:
@@ -964,7 +1080,7 @@ def _fail_active_task(
         can_retry = (
             retryable
             and not ticket.internal
-            and ticket.attempts < 2
+            and ticket.attempts < _MAX_REQUEST_ATTEMPTS
             and time.monotonic() < ticket.deadline
             and (ticket.retry_safe or not sent_business)
         )

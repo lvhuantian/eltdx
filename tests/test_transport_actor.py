@@ -95,6 +95,7 @@ class StalledSocket:
     def __init__(self, family: int, socktype: int, proto: int) -> None:
         self._socket, self._peer = socket.socketpair()
         self.closed_by: str | None = None
+        self.so_error_calls = 0
 
     def setblocking(self, value: bool) -> None:
         self._socket.setblocking(value)
@@ -103,6 +104,7 @@ class StalledSocket:
         return errno.EINPROGRESS
 
     def getsockopt(self, level: int, option: int) -> int:
+        self.so_error_calls += 1
         return errno.EINPROGRESS
 
     def fileno(self) -> int:
@@ -145,13 +147,22 @@ def test_connect_ex_immediate_success_and_immediate_refusal() -> None:
 
 
 def test_connect_deadline_retires_generation() -> None:
-    runtime = start_actor(8, resolve_hosts(["127.0.0.1:9"]), socket_factory=StalledSocket)
+    created: list[StalledSocket] = []
+
+    def factory(family: int, socktype: int, proto: int) -> StalledSocket:
+        sock = StalledSocket(family, socktype, proto)
+        created.append(sock)
+        return sock
+
+    runtime = start_actor(8, resolve_hosts(["127.0.0.1:9"]), socket_factory=factory)
     try:
         ticket = submit_connect(runtime, time.monotonic() + 0.02)
         with pytest.raises(Exception, match="timed out during connect"):
             wait_ticket(ticket)
         assert ticket.completed.wait(timeout=1)
         assert runtime.generation is None
+        assert runtime.generation_counter == 1
+        assert created[0].so_error_calls <= 4
     finally:
         close_actor(runtime)
 

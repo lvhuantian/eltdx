@@ -34,7 +34,7 @@ is the last successful read; it must be refreshed before each pushed checkpoint.
 | F00 baseline, review, regression design | IN PROGRESS | Ledger committed; A-C defects reproduced; D-E regression set remains to be landed before implementation |
 | F01 receive ordering and boundaries | COMPLETE at next checkpoint | Sequence boundary, full-send gate, pre-send drain, heartbeat gate, partial-tail handling, and unified receive failure path |
 | F02 request identity and build isolation | COMPLETE at next checkpoint | Monotonic request ID, exact cancel, request-local build errors, strict deadline, terminal-owned slot, callback isolation |
-| F03 connect and failover | PENDING | Real Windows refusal and two-host failure paths rotate within one deadline |
+| F03 connect and failover | COMPLETE at next checkpoint | Candidate/attempt budgets, next-endpoint retry, Windows peer verification, non-busy rearm, and seven real/fault-injected regressions |
 | F04 Broker and pinned leases | PENDING | No Event ABA; pin close/connect state is monotonic and capacity is preserved |
 | F05 lifecycle and shutdown | PENDING | Late registration, start/close/fatal, and concurrent close are fail-closed and leak-free |
 | F06 stress, performance, resources, compatibility | PENDING | Unique response stress, two servers, warmed resources, performance and heartbeat thresholds |
@@ -121,6 +121,17 @@ is the last successful read; it must be refreshed before each pushed checkpoint.
 | 2026-07-14 | `python -m pytest -q tests/test_transport_failover_regressions.py` before F03 | **5 failed in 5.13s**, as required before implementation |
 | 2026-07-14 | F01/F02 focused Actor/Socket/Pool/Lifecycle set | **65 passed in 3.28s** |
 | 2026-07-14 | `python -m pytest -q --ignore=tests/test_transport_failover_regressions.py` | **200 passed in 28.45s**; F03 red tests intentionally remain outside the F01/F02 checkpoint |
+| 2026-07-14 | F03 regressions repeated five consecutive rounds | Every round **7 passed**; 11.72 s aggregate latest run |
+| 2026-07-14 | Full suite after F03 and two read-only reviews | **207 passed in 32.33s** |
+
+F03 preserves the public absolute deadline and assigns only private candidate
+and first-attempt sub-deadlines. Handshake timeout/EOF, partial business send,
+business EOF, and response timeout all continue at the endpoint after the one
+that failed. The real Windows reserved-but-not-listening first endpoint reaches
+the healthy loopback within the same deadline. An anomalous ready socket whose
+`SO_ERROR` remains in progress is unregistered and rearmed on a 10 ms selector
+timer; the 20 ms regression observes at most four `SO_ERROR` reads instead of
+the reviewed 5,221-call busy loop.
 
 The seven A/B baseline failures were:
 
