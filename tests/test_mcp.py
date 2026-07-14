@@ -39,6 +39,8 @@ def test_mcp_quote_returns_jsonable_snapshot(monkeypatch) -> None:
         tail_raw=b"",
     )
 
+    monkeypatch.setattr(TdxClient, "connect", lambda self: None)
+    monkeypatch.setattr(TdxClient, "close", lambda self: None)
     monkeypatch.setattr(TdxClient, "get_quote", lambda self, codes: [snapshot])
 
     result = quote("sz000001", timeout=1)
@@ -87,6 +89,8 @@ def test_mcp_kline_returns_jsonable_series(monkeypatch) -> None:
         ),
     )
 
+    monkeypatch.setattr(TdxClient, "connect", lambda self: None)
+    monkeypatch.setattr(TdxClient, "close", lambda self: None)
     monkeypatch.setattr(TdxClient, "get_kline", lambda self, *args, **kwargs: series)
 
     result = kline("sz000001", timeout=1)

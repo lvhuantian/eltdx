@@ -37,7 +37,7 @@ again before FINAL evidence is accepted.
 | F03 connect and failover | COMPLETE (`2e48be0`) | Candidate/attempt budgets, next-endpoint retry, Windows peer verification, non-busy rearm, and seven real/fault-injected regressions |
 | F04 Broker and pinned leases | COMPLETE in this checkpoint | Per-waiter Event, exact lease/ticket cancellation, FIFO admission, monotonic pinned close, and capacity preservation |
 | F05 lifecycle and shutdown | COMPLETE in this checkpoint | Candidate ownership, epoch guard, submission/retire gate, single shutdown attempt, rollback ownership, and monotonic failed-close states |
-| F06 stress, performance, resources, compatibility | PENDING | Unique response stress, two servers, warmed resources, performance and heartbeat thresholds |
+| F06 stress, performance, resources, compatibility | IMPLEMENTED; heavy evidence pending | Unique wire nonce/provenance, two servers, warmed exact resource plateau, strict heartbeat gate, full Windows CI scope, and reproducible baseline source root |
 | FINAL independent review and CI | PENDING | Two clean adversarial reviews; local matrix/build/docs and exact-HEAD CI/Pages green |
 
 ## Confirmed Blockers
@@ -97,7 +97,11 @@ again before FINAL evidence is accepted.
 - Pool `connect()` waits for every future before reacting to the first failure,
   so a failed slot does not promptly stop blocked siblings.
 
-## Evidence Gaps to Replace
+## Historical F06 Evidence Gaps
+
+The following gaps describe the superseded pre-F06 evidence. The current F06
+worktree closes the first four in deterministic tests; the final 10k/100k and
+exact-source performance artifacts remain to be generated after checkpointing.
 
 - Stress responses are all the constant `23285`; cross-request and
   cross-generation completion are not measurable.
@@ -132,6 +136,17 @@ again before FINAL evidence is accepted.
 | 2026-07-14 | `python -m compileall -q src tests` | PASS |
 | 2026-07-14 | `python -m pytest -q tests/test_transport_pool_regressions.py tests/test_transport_lifecycle_regressions.py tests/test_transport_pool.py tests/test_resources.py` | **66 passed in 1.77s** |
 | 2026-07-14 | Full suite after heartbeat diagnosis, same worktree | **248 passed in 30.11s** |
+| 2026-07-14 | Exact `117b8c6` PR CI | Windows 3.11/3.13 and Pages build passed; Ubuntu 3.10-3.13 each failed only two MCP serialization tests because their context manager still made a live network connection |
+| 2026-07-14 | Warmed Windows resource probe, 12 rounds x 50 generations | Handle sequence was exactly **168** in every round; Actor threads **0** and process threads **1** after every close/GC |
+| 2026-07-14 | Unique two-server generation stress, three 1,000-generation rounds | Every round used both real listeners, retained the exact Runtime/Thread objects, and reported 1,000 unique responses with **0** cross-request/cross-generation completions |
+| 2026-07-14 | Partial response followed by EOF baseline | Mixed soak raised non-retryable `ProtocolError: truncated response frame at EOF`; fixed by mapping only decoder-finalization truncation at EOF to retryable `ConnectionClosedError`; real two-loopback regression passes |
+| 2026-07-14 | Strict heartbeat diagnostic, 32 balanced phases x 1,000 unique requests | Off/on raw aggregate ratio **1.003240**; four block ratios 1.001236/1.009266/1.001700/1.000797; timed heartbeats **0**; 35,216/35,216 unique completions and both cross counters **0** |
+| 2026-07-14 | Direct FIFO handoff performance experiment | Rejected and fully removed: four current p50 samples 149.89/151.92/150.95/149.91ms versus exact `117b8c6` 153.36/151.32/150.97/150.91ms; gain was not stable enough to justify new lifecycle state |
+| 2026-07-14 | Fresh detached `71089c0` baseline, pool 4/concurrency 100, four 3,000-request 5ms samples | p50 147.62/150.79/150.03/143.45ms; old one-off 129.97ms result is not reproducible, so FINAL will use exact-source counterbalanced evidence |
+| 2026-07-14 | F06 stress/failover/MCP focused matrix | **16 passed in 68.46s** |
+| 2026-07-14 | Full suite after F06 implementation | **250 passed in 72.75s** |
+| 2026-07-14 | `python -m build` | Built `eltdx-1.0.2.tar.gz` and `eltdx-1.0.2-py3-none-any.whl` |
+| 2026-07-14 | `python -m mkdocs build --strict` | PASS in 3.69s |
 
 F03 preserves the public absolute deadline and assigns only private candidate
 and first-attempt sub-deadlines. Handshake timeout/EOF, partial business send,
@@ -161,6 +176,24 @@ admission retirement through cleanup; an old attempt cannot stop a reopened
 broker epoch. Startup cleanup is best-effort per stage and its failure is
 consumed by shutdown instead of publishing a false `STOPPED` state.
 
+F06 stress requests now use the existing retry-safe file-content command. A
+uint32 request nonce is echoed with the real loopback server ID, connection ID,
+and wire-attempt sequence. Two real listeners share a provenance ledger and
+inject same-batch future-ID poison frames, partial-frame EOF, reconnects, push,
+and concurrency. Artifacts explicitly report unique, duplicate, missing,
+unexpected, cross-request, and cross-generation completions. Runtime references
+are retained across close to prove the Actor thread, TCP generation, selector,
+wakeup pair, pending/active tickets, cancel map, Broker waiters/pin waiters/
+leases, and PushBuffer are terminal.
+
+The warmed resource gate runs repeated complete lifecycle rounds after warmup
+and requires an exact stable OS-resource plateau instead of an unexplained
+tolerance. Heartbeat acceptance first proves all four idle connections complete
+automatic heartbeats, then runs paced heartbeat/business rounds and a 5-producer
+against 4-slot balanced throughput matrix. Business and heartbeat responses use
+the same 5ms server delay; every timed enabled sample must send zero heartbeat
+under real Broker pressure and the aggregate throughput ratio must be >0.99.
+
 The seven A/B baseline failures were:
 
 - `test_old_decoded_batch_cannot_complete_next_request_after_64_frame_budget`:
@@ -185,10 +218,9 @@ state of a pushed correction checkpoint.
 
 ## Exact Next Action
 
-Create and push the F04/F05 checkpoint, then perform the F06 evidence audit.
-Replace constant-value stress responses with unique request/generation values,
-exercise failover with two real loopback servers, run 10,000 generations, and
-replace the noisy heartbeat comparison with a counterbalanced measurement whose
-CI gate proves less than one percent impact. Add warmed repeated Windows resource
-evidence, pool-size-one and concurrent-100 p50/p99 comparisons, artifact/docs
-builds, and the required CI matrix before rewriting the formal result.
+Create and push the F06 implementation checkpoint. While its exact-head CI and
+Pages run, execute the heavy 10,000-generation/100,000-request/two-server stress
+artifact and the clean detached `71089c0` versus F06 pool-size-one and
+concurrent-100 performance matrix. Then update the permanent result, run two
+fresh FINAL adversarial reviews, delete this ledger only after all evidence is
+transferred, push FINAL, and wait for exact-FINAL-head CI and Pages success.

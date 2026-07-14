@@ -123,6 +123,33 @@ def test_business_eof_retry_starts_next_real_loopback_host() -> None:
             close_actor(runtime)
 
 
+def test_partial_business_response_eof_retries_next_real_loopback_host() -> None:
+    release = threading.Event()
+
+    def partial_response_eof(conn: socket.socket) -> None:
+        msg_id, msg_type, _ = read_request(conn)
+        conn.sendall(response_bytes(msg_id, msg_type, handshake_payload()))
+        msg_id, msg_type, _ = read_request(conn)
+        assert msg_type == TYPE_SECURITY_COUNT
+        response = response_bytes(msg_id, msg_type, (776).to_bytes(2, "little"))
+        conn.sendall(response[: len(response) // 2])
+
+    with Scripted7709Server([partial_response_eof]) as bad, Scripted7709Server(
+        [_healthy_handler(782, release)]
+    ) as healthy:
+        runtime = start_actor(208, resolve_hosts([bad.host, healthy.host]))
+        actor_thread = runtime.actor_thread
+        try:
+            assert _execute_count(runtime) == 782
+            assert bad.accepted_count == 1
+            assert healthy.accepted_count == 1
+            assert runtime.actor_thread is actor_thread and actor_thread is not None and actor_thread.is_alive()
+            assert (runtime.generation_counter, runtime.reconnect_count) == (2, 1)
+        finally:
+            release.set()
+            close_actor(runtime)
+
+
 class FailBusinessSendSocket:
     def __init__(self, family: int, socktype: int, proto: int) -> None:
         self._socket = socket.socket(family, socktype, proto)

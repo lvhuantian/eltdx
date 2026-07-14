@@ -12,6 +12,8 @@ import os
 import platform
 import socket
 import statistics
+import struct
+import subprocess
 import sys
 import threading
 import time
@@ -23,14 +25,95 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from eltdx.exceptions import PushOverflowError  # noqa: E402
-from eltdx.protocol.constants import TYPE_HANDSHAKE, TYPE_HEARTBEAT, TYPE_REFRESH_STREAM, TYPE_SECURITY_COUNT  # noqa: E402
+from eltdx.models import FileContentChunk  # noqa: E402
+from eltdx.protocol.constants import (  # noqa: E402
+    TYPE_FILE_CONTENT,
+    TYPE_HANDSHAKE,
+    TYPE_HEARTBEAT,
+    TYPE_REFRESH_STREAM,
+    TYPE_SECURITY_COUNT,
+)
 from eltdx.transport import PooledSocketTransport, SocketTransport  # noqa: E402
 
 
+_STRESS_VALUE = struct.Struct("<IHIQ")
+_STRESS_PATH = "actor-stress.bin"
+
+
+class StressLedger:
+    """Wire-side provenance shared by both real loopback servers."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._attempt_sequence = 0
+        self._attempts: dict[int, list[tuple[int, int, int]]] = {}
+        self._active_business = 0
+        self._max_active_business = 0
+
+    def enter_business(self) -> None:
+        with self._lock:
+            self._active_business += 1
+            self._max_active_business = max(self._max_active_business, self._active_business)
+
+    def leave_business(self) -> None:
+        with self._lock:
+            self._active_business -= 1
+
+    def record_attempt(self, token: int, server_id: int, connection_id: int) -> int:
+        with self._lock:
+            self._attempt_sequence += 1
+            sequence = self._attempt_sequence
+            self._attempts.setdefault(token, []).append((sequence, server_id, connection_id))
+            return sequence
+
+    def expected_identity(self, token: int) -> tuple[int, int] | None:
+        with self._lock:
+            attempts = self._attempts.get(token)
+            if not attempts:
+                return None
+            _, server_id, connection_id = attempts[-1]
+            return server_id, connection_id
+
+    def expected_provenance(self, token: int) -> tuple[int, int, int] | None:
+        with self._lock:
+            attempts = self._attempts.get(token)
+            if not attempts:
+                return None
+            sequence, server_id, connection_id = attempts[-1]
+            return server_id, connection_id, sequence
+
+    def attempt_count(self, token: int) -> int:
+        with self._lock:
+            return len(self._attempts.get(token, ()))
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "attempts": self._attempt_sequence,
+                "logical_requests": len(self._attempts),
+                "retried_requests": sum(len(items) > 1 for items in self._attempts.values()),
+                "max_business_active": self._max_active_business,
+            }
+
+
 class StressServer:
-    def __init__(self, *, push_every: int = 0, close_every: int = 0, response_delay: float = 0.0) -> None:
+    def __init__(
+        self,
+        *,
+        server_id: int = 0,
+        ledger: StressLedger | None = None,
+        push_every: int = 0,
+        poison_every: int = 0,
+        close_every: int = 0,
+        fail_before_response_every: int = 0,
+        response_delay: float = 0.0,
+    ) -> None:
+        self.server_id = server_id
+        self.ledger = ledger
         self.push_every = push_every
+        self.poison_every = poison_every
         self.close_every = close_every
+        self.fail_before_response_every = fail_before_response_every
         self.response_delay = response_delay
         self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._stop = threading.Event()
@@ -42,6 +125,10 @@ class StressServer:
         self.business_requests = 0
         self.push_frames = 0
         self.heartbeat_requests = 0
+        self.heartbeat_responses = 0
+        self.heartbeat_during_business = 0
+        self.heartbeat_by_connection: dict[int, int] = {}
+        self.heartbeat_responses_by_connection: dict[int, int] = {}
         self.active_business = 0
         self.max_business_active = 0
         self.errors: list[str] = []
@@ -88,6 +175,35 @@ class StressServer:
         with self._condition:
             return self._condition.wait_for(lambda: self.business_requests >= count, timeout=timeout)
 
+    def wait_for_heartbeat(self, count: int, timeout: float = 2.0) -> bool:
+        with self._condition:
+            return self._condition.wait_for(lambda: self.heartbeat_requests >= count, timeout=timeout)
+
+    def wait_for_heartbeat_connections(self, count: int, timeout: float = 2.0) -> bool:
+        with self._condition:
+            return self._condition.wait_for(lambda: len(self.heartbeat_by_connection) >= count, timeout=timeout)
+
+    def wait_for_heartbeat_response_connections(self, count: int, timeout: float = 2.0) -> bool:
+        with self._condition:
+            return self._condition.wait_for(
+                lambda: len(self.heartbeat_responses_by_connection) >= count,
+                timeout=timeout,
+            )
+
+    def heartbeat_response_snapshot(self) -> dict[int, int]:
+        with self._condition:
+            return dict(self.heartbeat_responses_by_connection)
+
+    def wait_for_heartbeat_response_round(self, baseline: dict[int, int], timeout: float = 2.0) -> bool:
+        with self._condition:
+            return self._condition.wait_for(
+                lambda: baseline and all(
+                    self.heartbeat_responses_by_connection.get(connection_id, 0) > count
+                    for connection_id, count in baseline.items()
+                ),
+                timeout=timeout,
+            )
+
     def _accept(self) -> None:
         while not self._stop.is_set():
             try:
@@ -100,24 +216,43 @@ class StressServer:
                 self._connections.add(conn)
                 index = self.accept_count
                 self._condition.notify_all()
-            worker = threading.Thread(target=self._serve, args=(conn,), name=f"eltdx-stress-conn-{index}", daemon=True)
+            worker = threading.Thread(
+                target=self._serve,
+                args=(conn, index),
+                name=f"eltdx-stress-{self.server_id}-conn-{index}",
+                daemon=True,
+            )
             self._workers.append(worker)
             worker.start()
 
-    def _serve(self, conn: socket.socket) -> None:
+    def _serve(self, conn: socket.socket, connection_id: int) -> None:
         try:
             with conn:
                 while not self._stop.is_set():
-                    msg_id, msg_type, _ = _read_request(conn)
+                    msg_id, msg_type, request = _read_request(conn)
                     if msg_type == TYPE_HANDSHAKE:
                         conn.sendall(_response(msg_id, msg_type, _handshake_payload()))
                         continue
                     if msg_type == TYPE_HEARTBEAT:
                         with self._condition:
                             self.heartbeat_requests += 1
+                            self.heartbeat_by_connection[connection_id] = (
+                                self.heartbeat_by_connection.get(connection_id, 0) + 1
+                            )
+                            if self.active_business:
+                                self.heartbeat_during_business += 1
+                            self._condition.notify_all()
+                        if self.response_delay:
+                            time.sleep(self.response_delay)
                         conn.sendall(_response(msg_id, msg_type, bytes.fromhex("0000000000008f173501")))
+                        with self._condition:
+                            self.heartbeat_responses += 1
+                            self.heartbeat_responses_by_connection[connection_id] = (
+                                self.heartbeat_responses_by_connection.get(connection_id, 0) + 1
+                            )
+                            self._condition.notify_all()
                         continue
-                    if msg_type != TYPE_SECURITY_COUNT:
+                    if msg_type not in (TYPE_FILE_CONTENT, TYPE_SECURITY_COUNT):
                         raise RuntimeError(f"unexpected stress command: {msg_type:#x}")
                     with self._condition:
                         self.business_requests += 1
@@ -125,17 +260,46 @@ class StressServer:
                         self.active_business += 1
                         self.max_business_active = max(self.max_business_active, self.active_business)
                         self._condition.notify_all()
+                    if self.ledger is not None:
+                        self.ledger.enter_business()
                     try:
                         if self.response_delay:
                             time.sleep(self.response_delay)
+                        if msg_type == TYPE_FILE_CONTENT:
+                            if len(request) < 8:
+                                raise RuntimeError("truncated stress file request")
+                            token = int.from_bytes(request[:4], "little")
+                            requested_size = int.from_bytes(request[4:8], "little")
+                            if requested_size < _STRESS_VALUE.size:
+                                raise RuntimeError("stress file request is too small")
+                            attempt_sequence = (
+                                self.ledger.record_attempt(token, self.server_id, connection_id)
+                                if self.ledger is not None
+                                else sequence
+                            )
+                            content = _STRESS_VALUE.pack(token, self.server_id, connection_id, attempt_sequence)
+                            payload = len(content).to_bytes(4, "little") + content
+                            if self.fail_before_response_every and sequence % self.fail_before_response_every == 0:
+                                wire = _response(msg_id, msg_type, payload)
+                                conn.sendall(wire[: max(1, len(wire) // 2)])
+                                return
+                        else:
+                            payload = (23285).to_bytes(2, "little")
                         if self.push_every and sequence % self.push_every == 0:
                             conn.sendall(_response(0xF0000000 | (sequence & 0x0FFFFFFF), TYPE_REFRESH_STREAM, b"\x93\x93"))
                             with self._condition:
                                 self.push_frames += 1
-                        conn.sendall(_response(msg_id, msg_type, (23285).to_bytes(2, "little")))
+                        wire = _response(msg_id, msg_type, payload)
+                        if msg_type == TYPE_FILE_CONTENT and self.poison_every and sequence % self.poison_every == 0:
+                            wire += _response((msg_id + 1) & 0xFFFFFFFF, msg_type, payload)
+                            with self._condition:
+                                self.push_frames += 1
+                        conn.sendall(wire)
                     finally:
                         with self._condition:
                             self.active_business -= 1
+                        if self.ledger is not None:
+                            self.ledger.leave_business()
                     if self.close_every and sequence % self.close_every == 0:
                         return
         except (EOFError, OSError, TimeoutError):
@@ -147,38 +311,168 @@ class StressServer:
                 self._connections.discard(conn)
 
 
+def _execute_unique(transport: Any, token: int) -> dict[str, int]:
+    chunk = transport.execute(
+        TYPE_FILE_CONTENT,
+        {"path": _STRESS_PATH, "offset": token, "size": _STRESS_VALUE.size},
+    )
+    if not isinstance(chunk, FileContentChunk) or len(chunk.content) != _STRESS_VALUE.size:
+        raise AssertionError("stress response is not an exact FileContentChunk")
+    echoed_token, server_id, connection_id, attempt_sequence = _STRESS_VALUE.unpack(chunk.content)
+    return {
+        "requested_token": token,
+        "snapshot_token": chunk.offset,
+        "echoed_token": echoed_token,
+        "server_id": server_id,
+        "connection_id": connection_id,
+        "attempt_sequence": attempt_sequence,
+    }
+
+
+def _unique_completion_summary(values: list[dict[str, int]], ledger: StressLedger) -> dict[str, int]:
+    echoed = [item["echoed_token"] for item in values]
+    response_identities = {
+        (item["echoed_token"], item["server_id"], item["connection_id"], item["attempt_sequence"])
+        for item in values
+    }
+    expected_tokens = {item["requested_token"] for item in values}
+    returned_tokens = set(echoed)
+    cross_request = sum(
+        item["echoed_token"] != item["requested_token"] or item["snapshot_token"] != item["requested_token"]
+        for item in values
+    )
+    cross_generation = 0
+    for item in values:
+        expected = ledger.expected_provenance(item["requested_token"])
+        if expected != (item["server_id"], item["connection_id"], item["attempt_sequence"]):
+            cross_generation += 1
+    return {
+        "unique_responses": len(response_identities),
+        "duplicate_responses": len(values) - len(response_identities),
+        "missing_responses": len(expected_tokens - returned_tokens),
+        "unexpected_responses": len(returned_tokens - expected_tokens),
+        "cross_request_completions": cross_request,
+        "cross_generation_completions": cross_generation,
+    }
+
+
+def _capture_runtime_resources(runtime: Any) -> tuple[Any, Any, Any, Any]:
+    with runtime.control_lock:
+        generation = runtime.generation
+        return (
+            runtime.selector,
+            runtime.wake_reader,
+            runtime.wake_writer,
+            generation.sock if generation is not None else None,
+        )
+
+
+def _socket_closed(sock: Any) -> bool:
+    return sock is None or sock.fileno() == -1
+
+
+def _selector_closed(selector: Any) -> bool:
+    if selector is None:
+        return True
+    try:
+        return selector.get_map() is None
+    except (OSError, RuntimeError, ValueError):
+        return True
+
+
+def _runtime_cleanup_snapshot(runtime: Any, owned: tuple[Any, Any, Any, Any]) -> dict[str, Any]:
+    selector, wake_reader, wake_writer, tcp_socket = owned
+    with runtime.control_lock:
+        thread = runtime.actor_thread
+        snapshot = {
+            "state": runtime.state.name,
+            "actor_alive": thread is not None and thread.is_alive(),
+            "generation_present": runtime.generation is not None,
+            "selector_present": runtime.selector is not None,
+            "wake_reader_present": runtime.wake_reader is not None,
+            "wake_writer_present": runtime.wake_writer is not None,
+            "pending_ticket_present": runtime.pending_task is not None,
+            "active_ticket_present": runtime.active_task is not None,
+            "cancel_count": len(runtime.cancel_requests),
+        }
+    snapshot.update(
+        saved_selector_closed=_selector_closed(selector),
+        saved_wake_reader_closed=_socket_closed(wake_reader),
+        saved_wake_writer_closed=_socket_closed(wake_writer),
+        saved_tcp_closed=_socket_closed(tcp_socket),
+    )
+    snapshot["all_owned_resources_closed"] = (
+        not snapshot["actor_alive"]
+        and not snapshot["generation_present"]
+        and not snapshot["selector_present"]
+        and not snapshot["wake_reader_present"]
+        and not snapshot["wake_writer_present"]
+        and not snapshot["pending_ticket_present"]
+        and not snapshot["active_ticket_present"]
+        and snapshot["cancel_count"] == 0
+        and snapshot["saved_selector_closed"]
+        and snapshot["saved_wake_reader_closed"]
+        and snapshot["saved_wake_writer_closed"]
+        and snapshot["saved_tcp_closed"]
+    )
+    return snapshot
+
+
 def run_generation_stress(count: int) -> dict[str, Any]:
     before_threads = _actor_threads()
     before_resources = _resource_count()
-    with StressServer(close_every=1) as server:
-        transport = SocketTransport(hosts=[server.host], timeout=5, heartbeat_interval=None)
-        started = time.perf_counter()
-        actor_identity = None
-        for _ in range(count):
-            if transport.execute(TYPE_SECURITY_COUNT, {"market": "sz"}) != 23285:
-                raise AssertionError("generation stress response mismatch")
-            runtime = transport._runtime
-            if runtime is None or runtime.actor_thread is None:
-                raise AssertionError("Actor runtime disappeared")
-            if actor_identity is None:
-                actor_identity = runtime.actor_thread.ident
-            elif runtime.actor_thread.ident != actor_identity:
-                raise AssertionError("Actor thread identity changed across generations")
-        elapsed = time.perf_counter() - started
-        diagnostics = transport.diagnostics
-        generation_counter = diagnostics.actor.tcp_generation if diagnostics.actor is not None else 0
-        stale_events = diagnostics.actor.stale_event_count if diagnostics.actor is not None else -1
-        transport.close()
-        result = {
-            "requests": count,
-            "seconds": round(elapsed, 6),
-            "throughput_rps": round(count / elapsed, 3),
-            "actor_identity": actor_identity,
-            "generation_counter": generation_counter,
-            "server_accepts": server.accept_count,
-            "stale_events": stale_events,
-        }
-    del server
+    ledger = StressLedger()
+    with (
+        StressServer(server_id=1, ledger=ledger, close_every=1, poison_every=31) as first,
+        StressServer(server_id=2, ledger=ledger, close_every=1, poison_every=29) as second,
+    ):
+        transport = SocketTransport(hosts=[first.host, second.host], timeout=5, heartbeat_interval=None)
+        runtime_ref = None
+        thread_ref = None
+        closed = False
+        try:
+            started = time.perf_counter()
+            values = []
+            for token in range(count):
+                values.append(_execute_unique(transport, token))
+                runtime = transport._runtime
+                if runtime is None or runtime.actor_thread is None:
+                    raise AssertionError("Actor runtime disappeared")
+                if runtime_ref is None:
+                    runtime_ref = runtime
+                    thread_ref = runtime.actor_thread
+                elif runtime is not runtime_ref or runtime.actor_thread is not thread_ref:
+                    raise AssertionError("Actor object identity changed across generations")
+            elapsed = time.perf_counter() - started
+            diagnostics = transport.diagnostics
+            generation_counter = diagnostics.actor.tcp_generation if diagnostics.actor is not None else 0
+            stale_events = diagnostics.actor.stale_event_count if diagnostics.actor is not None else -1
+            if runtime_ref is None or thread_ref is None:
+                raise AssertionError("generation stress did not create an Actor")
+            owned = _capture_runtime_resources(runtime_ref)
+            transport.close()
+            closed = True
+            cleanup = _runtime_cleanup_snapshot(runtime_ref, owned)
+            result = {
+                "requests": count,
+                "seconds": round(elapsed, 6),
+                "throughput_rps": round(count / elapsed, 3),
+                "runtime_identity": id(runtime_ref),
+                "actor_object_identity": id(thread_ref),
+                "actor_thread_ident": thread_ref.ident,
+                "generation_counter": generation_counter,
+                "server_accepts": [first.accept_count, second.accept_count],
+                "server_requests": [first.business_requests, second.business_requests],
+                "servers_used": sum(item > 0 for item in (first.business_requests, second.business_requests)),
+                "stale_events": stale_events,
+                "ledger": ledger.snapshot(),
+                "cleanup": cleanup,
+                **_unique_completion_summary(values, ledger),
+            }
+        finally:
+            if not closed:
+                transport.close()
+    del first, second
     result.update(
         resource_before=before_resources,
         resource_after=_resource_after_gc(),
@@ -198,9 +492,29 @@ def run_mixed_stress(
     response_delay: float = 0.0005,
 ) -> dict[str, Any]:
     before_resources = _resource_count()
-    with StressServer(push_every=push_every, close_every=close_every, response_delay=response_delay) as server:
+    ledger = StressLedger()
+    first_fail_every = max(2, close_every // 2) if close_every else 0
+    with (
+        StressServer(
+            server_id=1,
+            ledger=ledger,
+            push_every=push_every,
+            poison_every=push_every,
+            close_every=close_every,
+            fail_before_response_every=first_fail_every,
+            response_delay=response_delay,
+        ) as first,
+        StressServer(
+            server_id=2,
+            ledger=ledger,
+            push_every=push_every,
+            poison_every=push_every + 2 if push_every else 0,
+            close_every=close_every,
+            response_delay=response_delay,
+        ) as second,
+    ):
         pool = PooledSocketTransport(
-            hosts=[server.host],
+            hosts=[first.host, second.host],
             timeout=10,
             pool_size=pool_size,
             heartbeat_interval=None,
@@ -209,49 +523,122 @@ def run_mixed_stress(
             push_queue_bytes=8 * 1024 * 1024,
         )
 
-        def execute(_: int) -> int:
-            return pool.execute(TYPE_SECURITY_COUNT, {"market": "sz"})
+        def execute(token: int) -> dict[str, int]:
+            return _execute_unique(pool, token)
 
-        started = time.perf_counter()
-        with ThreadPoolExecutor(max_workers=concurrency) as executor:
-            values = list(executor.map(execute, range(requests)))
-        elapsed = time.perf_counter() - started
-        del executor
-        if any(value != 23285 for value in values):
-            raise AssertionError("mixed stress response mismatch")
-        diagnostics = pool.diagnostics
-        gap_reported = False
+        closed = False
         try:
-            pool.drain_pushes()
-        except PushOverflowError:
-            gap_reported = True
-            pool.drain_pushes()
-        actor_generations = [actor.tcp_generation for actor in diagnostics.actors]
-        stale_events = sum(actor.stale_event_count for actor in diagnostics.actors)
-        broker = diagnostics.broker
-        pool.close()
-        result = {
-            "requests": requests,
-            "pool_size": pool_size,
-            "concurrency": concurrency,
-            "seconds": round(elapsed, 6),
-            "throughput_rps": round(requests / elapsed, 3),
-            "server_requests": server.business_requests,
-            "server_accepts": server.accept_count,
-            "server_max_active": server.max_business_active,
-            "push_frames_sent": server.push_frames,
-            "push_dropped": diagnostics.push_dropped,
-            "push_gap_reported": gap_reported,
-            "actor_generations": actor_generations,
-            "stale_events": stale_events,
-            "broker_waiters": broker.waiter_count if broker is not None else -1,
-            "broker_leases": broker.active_leases if broker is not None else -1,
-            "resource_before": before_resources,
-            "actor_threads_after": len(_actor_threads()),
-        }
-    del server
+            started = time.perf_counter()
+            with ThreadPoolExecutor(max_workers=concurrency) as executor:
+                values = list(executor.map(execute, range(requests)))
+            elapsed = time.perf_counter() - started
+            diagnostics = pool.diagnostics
+            gap_reported = False
+            try:
+                pool.drain_pushes()
+            except PushOverflowError:
+                gap_reported = True
+                pool.drain_pushes()
+            actor_generations = [actor.tcp_generation for actor in diagnostics.actors]
+            stale_events = sum(actor.stale_event_count for actor in diagnostics.actors)
+            broker = pool._broker
+            push_buffer = pool._push_buffer
+            runtimes = [transport._runtime for transport in pool._transports]
+            if broker is None or push_buffer is None or any(runtime is None for runtime in runtimes):
+                raise AssertionError("mixed stress pool ownership disappeared")
+            owned = [_capture_runtime_resources(runtime) for runtime in runtimes]
+            pool.close()
+            closed = True
+            broker_after = broker.snapshot()
+            push_after = push_buffer.snapshot()
+            cleanup = [
+                _runtime_cleanup_snapshot(runtime, resources)
+                for runtime, resources in zip(runtimes, owned)
+            ]
+            result = {
+                "requests": requests,
+                "pool_size": pool_size,
+                "concurrency": concurrency,
+                "seconds": round(elapsed, 6),
+                "throughput_rps": round(requests / elapsed, 3),
+                "server_requests": [first.business_requests, second.business_requests],
+                "server_accepts": [first.accept_count, second.accept_count],
+                "servers_used": sum(item > 0 for item in (first.business_requests, second.business_requests)),
+                "server_max_active": ledger.snapshot()["max_business_active"],
+                "push_frames_sent": first.push_frames + second.push_frames,
+                "push_dropped": diagnostics.push_dropped,
+                "push_gap_reported": gap_reported,
+                "actor_generations": actor_generations,
+                "stale_events": stale_events,
+                "ledger": ledger.snapshot(),
+                "broker_after_close": {
+                    "idle_slots": broker_after.idle_slots,
+                    "waiters": broker_after.waiter_count,
+                    "pin_waiters": broker_after.pin_waiter_count,
+                    "leases": broker_after.active_leases,
+                    "closed": broker_after.closed,
+                },
+                "push_after_close": {
+                    "frames": push_after.frame_count,
+                    "bytes": push_after.byte_count,
+                    "closed": push_after.closed,
+                },
+                "cleanup": cleanup,
+                "resource_before": before_resources,
+                **_unique_completion_summary(values, ledger),
+            }
+        finally:
+            if not closed:
+                pool.close()
+    del first, second
+    result["actor_threads_after"] = len(_actor_threads())
     result["resource_after"] = _resource_after_gc()
     return result
+
+
+def run_warmed_resource_stress(
+    *,
+    warmup_rounds: int = 3,
+    measured_rounds: int = 6,
+    generations_per_round: int = 20,
+) -> dict[str, Any]:
+    if warmup_rounds < 1 or measured_rounds < 3 or generations_per_round < 1:
+        raise ValueError("resource stress requires warmup >= 1, measured >= 3, and generations >= 1")
+    rounds = []
+    for index in range(warmup_rounds + measured_rounds):
+        result = run_generation_stress(generations_per_round)
+        rounds.append(
+            {
+                "round": index,
+                "phase": "warmup" if index < warmup_rounds else "measured",
+                "resources": result["resource_after"],
+                "actor_threads": result["actor_threads_after"],
+                "cross_request_completions": result["cross_request_completions"],
+                "cross_generation_completions": result["cross_generation_completions"],
+                "owned_resources_closed": result["cleanup"]["all_owned_resources_closed"],
+            }
+        )
+    measured = rounds[warmup_rounds:]
+    counts = [item["resources"] for item in measured]
+    supported = all(value is not None for value in counts)
+    plateau = supported and len(set(counts)) == 1
+    monotonic_growth = supported and all(
+        later >= earlier for earlier, later in zip(counts, counts[1:])
+    ) and counts[-1] > counts[0]
+    return {
+        "warmup_rounds": warmup_rounds,
+        "measured_rounds": measured_rounds,
+        "generations_per_round": generations_per_round,
+        "samples": rounds,
+        "measured_resources": counts,
+        "resource_counter_supported": supported,
+        "exact_plateau": plateau,
+        "monotonic_growth": monotonic_growth,
+        "all_actor_threads_closed": all(item["actor_threads"] == 0 for item in measured),
+        "all_owned_resources_closed": all(item["owned_resources_closed"] for item in measured),
+        "cross_request_completions": sum(item["cross_request_completions"] for item in measured),
+        "cross_generation_completions": sum(item["cross_generation_completions"] for item in measured),
+    }
 
 
 def run_close_samples(samples: int, *, pool_size: int = 4, loaded: bool = False) -> dict[str, Any]:
@@ -290,42 +677,133 @@ def run_close_samples(samples: int, *, pool_size: int = 4, loaded: bool = False)
     }
 
 
-def run_heartbeat_impact(requests: int, *, trials: int = 3) -> dict[str, Any]:
-    if trials < 3 or trials % 2 == 0:
-        raise ValueError("heartbeat impact trials must be an odd number >= 3")
+def run_heartbeat_impact(requests: int, *, blocks: int = 4) -> dict[str, Any]:
+    if requests < 100 or blocks < 3:
+        raise ValueError("heartbeat impact requires at least 100 requests and three balanced blocks")
 
-    def run(interval: float | None) -> dict[str, Any]:
-        with StressServer(response_delay=0.001) as server:
-            pool = PooledSocketTransport(
-                hosts=[server.host], timeout=10, pool_size=4, heartbeat_interval=interval, max_pending_requests=256
-            )
-            pool.connect()
-            with ThreadPoolExecutor(max_workers=100) as executor:
-                warmup = list(
-                    executor.map(
-                        lambda _: pool.execute(TYPE_SECURITY_COUNT, {"market": "sz"}),
-                        range(min(500, max(100, requests // 10))),
-                    )
-                )
-                heartbeat_before = server.heartbeat_requests
-                started = time.perf_counter()
-                values = list(executor.map(lambda _: pool.execute(TYPE_SECURITY_COUNT, {"market": "sz"}), range(requests)))
-                elapsed = time.perf_counter() - started
-            if any(value != 23285 for value in warmup) or any(value != 23285 for value in values):
-                raise AssertionError("heartbeat workload response mismatch")
-            pool.close()
-            return {
-                "seconds": round(elapsed, 6),
-                "throughput_rps": round(requests / elapsed, 3),
-                "heartbeat_requests": server.heartbeat_requests - heartbeat_before,
-            }
+    pool_size = 4
+    concurrency = pool_size + 1
+    heartbeat_interval = 0.02
+
+    def set_interval(pool: PooledSocketTransport, interval: float | None) -> None:
+        now = time.monotonic()
+        for transport in pool._transports:
+            runtime = transport._runtime
+            if runtime is None:
+                raise AssertionError("heartbeat pool lost an Actor runtime")
+            runtime.heartbeat_interval = interval
+            generation = runtime.generation
+            if generation is not None:
+                generation.last_activity_at = now
+
+    next_token = 0
+    all_values: list[dict[str, int]] = []
+
+    def run_workers(executor: ThreadPoolExecutor, pool: PooledSocketTransport, total: int) -> float:
+        nonlocal next_token
+        tokens = list(range(next_token, next_token + total))
+        next_token += total
+        quotient, remainder = divmod(total, concurrency)
+        token_groups = []
+        offset = 0
+        for index in range(concurrency):
+            count = quotient + int(index < remainder)
+            token_groups.append(tokens[offset : offset + count])
+            offset += count
+        barrier = threading.Barrier(concurrency + 1)
+
+        def worker(worker_tokens: list[int]) -> list[dict[str, int]]:
+            barrier.wait()
+            return [_execute_unique(pool, token) for token in worker_tokens]
+
+        futures = [executor.submit(worker, worker_tokens) for worker_tokens in token_groups]
+        started = time.perf_counter()
+        barrier.wait()
+        values = [value for future in futures for value in future.result()]
+        elapsed = time.perf_counter() - started
+        if len(values) != total:
+            raise AssertionError("heartbeat workload response mismatch")
+        all_values.extend(values)
+        return elapsed
 
     samples: dict[str, list[dict[str, Any]]] = {"without_heartbeat": [], "with_heartbeat": []}
-    for trial in range(trials):
-        intervals = (None, 0.01) if trial % 2 == 0 else (0.01, None)
-        for interval in intervals:
-            key = "without_heartbeat" if interval is None else "with_heartbeat"
-            samples[key].append(run(interval))
+    raw_elapsed: dict[str, list[float]] = {"without_heartbeat": [], "with_heartbeat": []}
+    block_ratios = []
+    ledger = StressLedger()
+    with StressServer(server_id=1, ledger=ledger, response_delay=0.005) as server:
+        pool = PooledSocketTransport(
+            hosts=[server.host],
+            timeout=10,
+            pool_size=pool_size,
+            heartbeat_interval=heartbeat_interval,
+            max_pending_requests=256,
+        )
+        idle_heartbeat_before = server.heartbeat_responses
+        pool.connect()
+        if not server.wait_for_heartbeat_response_connections(pool_size, timeout=2.0):
+            pool.close()
+            raise AssertionError("automatic heartbeat did not reach every idle Actor connection")
+        idle_probe_heartbeats = server.heartbeat_responses - idle_heartbeat_before
+        idle_probe_connections = len(server.heartbeat_responses_by_connection)
+        warmup_count = min(100, requests)
+        try:
+            with ThreadPoolExecutor(max_workers=concurrency) as executor:
+                paced_heartbeat_before = server.heartbeat_responses
+                paced_business_requests = 0
+                for _ in range(8):
+                    heartbeat_baseline = server.heartbeat_response_snapshot()
+                    if not server.wait_for_heartbeat_response_round(heartbeat_baseline, timeout=2.0):
+                        raise AssertionError("paced automatic heartbeat round did not complete")
+                    run_workers(executor, pool, pool_size)
+                    paced_business_requests += pool_size
+                paced_heartbeat_requests = server.heartbeat_responses - paced_heartbeat_before
+                set_interval(pool, None)
+                threading.Event().wait(heartbeat_interval * 1.5)
+                for block in range(blocks):
+                    order = (None, heartbeat_interval, heartbeat_interval, None,
+                             heartbeat_interval, None, None, heartbeat_interval)
+                    block_elapsed = {"without_heartbeat": [], "with_heartbeat": []}
+                    for phase, interval in enumerate(order):
+                        set_interval(pool, None)
+                        threading.Event().wait(heartbeat_interval * 1.5)
+                        try:
+                            set_interval(pool, interval)
+                            run_workers(executor, pool, warmup_count)
+                            set_interval(pool, None)
+                            threading.Event().wait(heartbeat_interval * 1.5)
+                            gc.collect()
+                            gc_enabled = gc.isenabled()
+                            gc.disable()
+                            try:
+                                set_interval(pool, interval)
+                                heartbeat_before = server.heartbeat_requests
+                                elapsed = run_workers(executor, pool, requests)
+                            finally:
+                                set_interval(pool, None)
+                                if gc_enabled:
+                                    gc.enable()
+                            key = "without_heartbeat" if interval is None else "with_heartbeat"
+                            sample = {
+                                "block": block,
+                                "phase": phase,
+                                "seconds": round(elapsed, 6),
+                                "throughput_rps": round(requests / elapsed, 3),
+                                "heartbeat_requests": server.heartbeat_requests - heartbeat_before,
+                            }
+                            samples[key].append(sample)
+                            raw_elapsed[key].append(elapsed)
+                            block_elapsed[key].append(elapsed)
+                        finally:
+                            set_interval(pool, None)
+                    block_ratios.append(
+                        round(
+                            sum(block_elapsed["without_heartbeat"]) / sum(block_elapsed["with_heartbeat"]),
+                            6,
+                        )
+                    )
+        finally:
+            set_interval(pool, None)
+            pool.close()
 
     def summarize(values: list[dict[str, Any]]) -> dict[str, Any]:
         return {
@@ -338,12 +816,29 @@ def run_heartbeat_impact(requests: int, *, trials: int = 3) -> dict[str, Any]:
 
     baseline = summarize(samples["without_heartbeat"])
     active = summarize(samples["with_heartbeat"])
+    completion_summary = _unique_completion_summary(all_values, ledger)
     return {
-        "requests": requests,
-        "trials": trials,
+        "requests_per_phase": requests,
+        "blocks": blocks,
+        "phases": blocks * 8,
+        "pool_size": pool_size,
+        "concurrency": concurrency,
+        "response_delay_ms": 5.0,
+        "heartbeat_interval_ms": heartbeat_interval * 1000,
+        "idle_probe_heartbeats": idle_probe_heartbeats,
+        "idle_probe_connections": idle_probe_connections,
+        "paced_heartbeat_requests": paced_heartbeat_requests,
+        "paced_business_requests": paced_business_requests,
+        "heartbeat_during_business": server.heartbeat_during_business,
+        "business_requests": len(all_values),
         "without_heartbeat": baseline,
         "with_heartbeat": active,
-        "throughput_ratio": round(active["throughput_rps"] / baseline["throughput_rps"], 6),
+        "block_throughput_ratios": block_ratios,
+        "throughput_ratio": round(
+            sum(raw_elapsed["without_heartbeat"]) / sum(raw_elapsed["with_heartbeat"]),
+            6,
+        ),
+        **completion_summary,
     }
 
 
@@ -415,6 +910,29 @@ def _percentile(values: list[float], fraction: float) -> float:
     return values[min(len(values) - 1, int((len(values) - 1) * fraction))]
 
 
+def _git_identity() -> dict[str, Any]:
+    try:
+        sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        dirty = bool(
+            subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=ROOT,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return {"implementation_sha": None, "worktree_dirty": None}
+    return {"implementation_sha": sha, "worktree_dirty": dirty}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--generations", type=int, default=0)
@@ -424,14 +942,18 @@ def main() -> None:
     parser.add_argument("--close-samples", type=int, default=0)
     parser.add_argument("--heartbeat-requests", type=int, default=0)
     parser.add_argument("--idle-seconds", type=float, default=0.0)
+    parser.add_argument("--resource-rounds", type=int, default=0)
+    parser.add_argument("--resource-warmup", type=int, default=3)
+    parser.add_argument("--resource-generations", type=int, default=20)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     source_hash = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
     result: dict[str, Any] = {
-        "schema": 1,
+        "schema": 2,
         "workload_sha256": source_hash,
         "platform": platform.platform(),
         "python": platform.python_version(),
+        **_git_identity(),
     }
     if args.generations:
         result["generation_stress"] = run_generation_stress(args.generations)
@@ -446,6 +968,12 @@ def main() -> None:
         result["heartbeat_impact"] = run_heartbeat_impact(args.heartbeat_requests)
     if args.idle_seconds:
         result["idle_cpu"] = run_idle_cpu_sample(args.idle_seconds)
+    if args.resource_rounds:
+        result["warmed_resources"] = run_warmed_resource_stress(
+            warmup_rounds=args.resource_warmup,
+            measured_rounds=args.resource_rounds,
+            generations_per_round=args.resource_generations,
+        )
     encoded = json.dumps(result, ensure_ascii=True, indent=2) + "\n"
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)

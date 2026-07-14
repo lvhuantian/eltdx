@@ -881,7 +881,10 @@ def _receive_generation(runtime: ActorRuntime, generation: TcpGeneration) -> boo
             generation.receive_drained = True
             return True
         if not chunk:
-            generation.decoder.finish()
+            try:
+                generation.decoder.finish()
+            except ProtocolError as exc:
+                raise ConnectionClosedError("7709 socket closed with a partial response frame") from exc
             raise ConnectionClosedError("7709 socket closed by remote peer")
         generation.receive_drained = False
         bytes_read += len(chunk)

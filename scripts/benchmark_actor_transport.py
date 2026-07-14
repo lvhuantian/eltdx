@@ -5,9 +5,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import platform
 import socket
 import statistics
+import subprocess
 import sys
 import threading
 import time
@@ -16,7 +18,8 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src"))
+SOURCE_ROOT = Path(os.environ.get("ELTDX_SOURCE_ROOT", ROOT)).resolve()
+sys.path.insert(0, str(SOURCE_ROOT / "src"))
 
 from eltdx.protocol.constants import TYPE_HANDSHAKE, TYPE_SECURITY_COUNT  # noqa: E402
 from eltdx.transport import PooledSocketTransport  # noqa: E402
@@ -165,28 +168,62 @@ def run_case(pool_size: int, concurrency: int, requests: int, delay: float) -> d
         }
 
 
+def _git_identity() -> dict[str, Any]:
+    try:
+        sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=SOURCE_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        dirty = bool(
+            subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=SOURCE_ROOT,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return {"implementation_sha": None, "implementation_dirty": None}
+    return {"implementation_sha": sha, "implementation_dirty": dirty}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--label", required=True)
     parser.add_argument("--requests", type=int, default=1000)
     parser.add_argument("--delay-ms", type=float, default=1.0)
+    parser.add_argument("--acceptance", action="store_true")
+    parser.add_argument("--sequential-requests", type=int, default=10_000)
+    parser.add_argument("--concurrent-requests", type=int, default=100_000)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     source = Path(__file__).read_bytes()
     result = {
-        "schema": 1,
+        "schema": 2,
         "label": args.label,
         "workload_sha256": hashlib.sha256(source).hexdigest(),
+        "source_root": str(SOURCE_ROOT),
         "platform": platform.platform(),
         "python": platform.python_version(),
-        "requests_per_case": args.requests,
         "delay_ms": args.delay_ms,
-        "cases": [
+        **_git_identity(),
+    }
+    if args.acceptance:
+        result["cases"] = [
+            run_case(1, 1, args.sequential_requests, args.delay_ms / 1000),
+            run_case(4, 100, args.concurrent_requests, args.delay_ms / 1000),
+        ]
+    else:
+        result["requests_per_case"] = args.requests
+        result["cases"] = [
             run_case(pool_size, concurrency, args.requests, args.delay_ms / 1000)
             for pool_size in (1, 2, 4)
             for concurrency in (1, 10, 100)
-        ],
-    }
+        ]
     encoded = json.dumps(result, ensure_ascii=True, indent=2) + "\n"
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
