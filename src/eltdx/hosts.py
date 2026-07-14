@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import ipaddress
 import socket
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from functools import lru_cache
 from importlib import resources
 from typing import Any
 
@@ -21,6 +23,17 @@ class HostProbeResult:
     ok: bool
     latency_ms: float | None = None
     error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedEndpoint:
+    host: str
+    address: str
+    port: int
+    family: int
+    socktype: int
+    proto: int
+    sockaddr: tuple[Any, ...]
 
 
 FALLBACK_HOSTS: tuple[str, ...] = (
@@ -91,6 +104,55 @@ def unique_hosts(values: list[Any] | tuple[Any, ...]) -> list[str]:
         if host is not None and host not in hosts:
             hosts.append(host)
     return hosts
+
+
+@lru_cache(maxsize=256)
+def resolve_host(host: str) -> tuple[ResolvedEndpoint, ...]:
+    """Resolve one normalized host outside the Actor thread."""
+
+    normalized = normalize_host(host)
+    if normalized is None:
+        raise ValueError(f"invalid host: {host!r}")
+    address, port_text = normalized.rsplit(":", 1)
+    address = address.removeprefix("[").removesuffix("]")
+    port = int(port_text)
+    try:
+        numeric = ipaddress.ip_address(address)
+    except ValueError:
+        records = socket.getaddrinfo(address, port, type=socket.SOCK_STREAM)
+    else:
+        family = socket.AF_INET6 if numeric.version == 6 else socket.AF_INET
+        sockaddr: tuple[Any, ...] = (address, port, 0, 0) if family == socket.AF_INET6 else (address, port)
+        records = [(family, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", sockaddr)]
+
+    endpoints: list[ResolvedEndpoint] = []
+    seen: set[tuple[int, int, int, tuple[Any, ...]]] = set()
+    for family, socktype, proto, _, sockaddr in records:
+        key = (family, socktype, proto, tuple(sockaddr))
+        if key in seen:
+            continue
+        seen.add(key)
+        endpoints.append(
+            ResolvedEndpoint(
+                host=normalized,
+                address=str(sockaddr[0]),
+                port=port,
+                family=family,
+                socktype=socktype,
+                proto=proto,
+                sockaddr=tuple(sockaddr),
+            )
+        )
+    if not endpoints:
+        raise OSError(f"unable to resolve host: {normalized}")
+    return tuple(endpoints)
+
+
+def resolve_hosts(hosts: list[str] | tuple[str, ...]) -> tuple[ResolvedEndpoint, ...]:
+    endpoints: list[ResolvedEndpoint] = []
+    for host in unique_hosts(list(hosts)):
+        endpoints.extend(resolve_host(host))
+    return tuple(endpoints)
 
 
 def load_server_config() -> dict[str, Any]:

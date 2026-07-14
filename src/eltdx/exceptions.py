@@ -25,5 +25,17 @@ class ResponseTimeoutError(TransportError):
     """Raised when a request does not receive a response in time."""
 
 
+class PoolBusyError(TransportError):
+    """Raised when bounded pool admission has no remaining capacity."""
+
+
+class PushOverflowError(TransportError):
+    """Raised once after the bounded push buffer drops frames."""
+
+
+class TransportCloseTimeoutError(TransportError):
+    """Raised when a transport cannot prove resource shutdown in time."""
+
+
 class UnsupportedCommandError(EltdxError):
     """Raised when an API method has no migrated 7709 command yet."""
