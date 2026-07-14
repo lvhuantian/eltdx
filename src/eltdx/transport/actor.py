@@ -81,7 +81,7 @@ class RequestTicket:
     request_payload_snapshot: object
     deadline: float
     retry_safe: bool
-    completion: Callable[[RequestTicket], None] | None = None
+    completion: Callable[[RequestTicket | None], None] | None = None
     internal: bool = False
     attempts: int = 0
     state: RequestState = RequestState.ADMITTED
@@ -167,6 +167,7 @@ class ActorRuntime:
     push_buffer: PushBuffer | None = None
     heartbeat_interval: float | None = None
     request_timeout: float = 8.0
+    owns_push_buffer: bool = True
     control_lock: threading.Lock = field(default_factory=threading.Lock)
     state: RuntimeState = RuntimeState.STARTING
     stop_requested: bool = False
@@ -221,6 +222,7 @@ def start_actor(
     push_buffer: PushBuffer | None = None,
     heartbeat_interval: float | None = None,
     request_timeout: float = 8.0,
+    owns_push_buffer: bool = True,
     startup_timeout: float = 1.0,
 ) -> ActorRuntime:
     runtime = ActorRuntime(
@@ -231,6 +233,7 @@ def start_actor(
         push_buffer=push_buffer,
         heartbeat_interval=heartbeat_interval,
         request_timeout=request_timeout,
+        owns_push_buffer=owns_push_buffer,
     )
     thread = threading.Thread(
         target=_run_actor,
@@ -268,7 +271,7 @@ def submit_request(
     payload: object,
     deadline: float,
     retry_safe: bool,
-    completion: Callable[[RequestTicket], None] | None = None,
+    completion: Callable[[RequestTicket | None], None] | None = None,
 ) -> RequestTicket:
     ticket = RequestTicket(
         runtime_epoch=runtime.runtime_epoch,
@@ -902,7 +905,7 @@ def _finish_runtime(runtime: ActorRuntime) -> None:
         if ticket is not None:
             _complete_ticket(ticket, RequestState.CANCELLED, error=error)
     _drop_generation(runtime, error)
-    if runtime.push_buffer is not None:
+    if runtime.push_buffer is not None and runtime.owns_push_buffer:
         runtime.push_buffer.close(runtime.fatal_error)
 
     selector = runtime.selector

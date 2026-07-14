@@ -29,14 +29,14 @@ Implement the complete per-slot, single-threaded, non-blocking 7709 `ConnectionA
 | Status | ACTIVE |
 | Spec revision | 1.0 |
 | Spec SHA256 | `C13F9F551CDE202B48B3C1CD7307C2CD31B65DBBA255247D822A444B813CDF61` revalidated 2026-07-14 12:52 +08:00 |
-| Current checkpoint | A06 (starts after A05 commit/push) |
-| Last completed | A05 locally verified; commit/push next |
-| Next exact action | Replace round-robin pool scheduling with bounded FIFO admission, first-idle leases, pinned epoch proxies, parallel connect rollback, shared PushBuffer, and pool close wakeups. |
+| Current checkpoint | A07 (starts after A06 commit/push) |
+| Last completed | A06 locally verified; commit/push next |
+| Next exact action | Harden normal reopen, close-timeout failed states, Actor fatal pool fail-closed behavior, standalone/pooled finalizers, old-runtime isolation, and immutable diagnostics. |
 | Branch | `actor-transport-refactor` (created locally from verified base) |
 | Base SHA | `71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
-| Local HEAD | `949c787` before A05 |
-| Remote HEAD | work branch `949c787`; `origin/main=71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
-| Push state | A04 pushed normally |
+| Local HEAD | `5f82000` before A06 |
+| Remote HEAD | work branch `5f82000`; `origin/main=71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
+| Push state | A05 pushed normally |
 | Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), OPEN and draft |
 | CI state | run `29307148534` queued/running for Ubuntu CPython 3.10-3.13 at A00 head; Pages run `29307148575` in progress |
 | Current owner | active Goal thread `019f5ef5-6ebb-7291-89ed-6b55c6bb5992` |
@@ -63,7 +63,7 @@ Implement the complete per-slot, single-threaded, non-blocking 7709 `ConnectionA
 | A03 | A02 | DONE | Runtime, wakeup, selector, non-blocking connect, close |
 | A04 | A03 | DONE | Wire request lifecycle, retry, cancel, generations |
 | A05 | A04 | DONE | Socket facade, heartbeat, push, API compatibility |
-| A06 | A05 | PENDING | FIFO pool leases, pin, rollback, shared push |
+| A06 | A05 | DONE | FIFO pool leases, pin, rollback, shared push |
 | A07 | A06 | PENDING | Reopen, fatal, finalizer, diagnostics |
 | A08 | A07 | PENDING | Cross-platform matrix, stress, soak, performance |
 | A09 | A08 | PENDING | Docs, cleanup, full verification, FINAL delivery |
@@ -126,6 +126,15 @@ Allowed status values: `PENDING`, `IN_PROGRESS`, `DONE`, `BLOCKED`. At most one 
 - Commit: this A05 checkpoint commit
 - Trailer: `Actor-Checkpoint: A05`
 
+### A06
+
+- Status: `DONE`
+- Owned files: `src/eltdx/transport/pool.py`, pool integration hooks in Actor/socket, `src/eltdx/client.py`, pool/client/resource tests, and this ledger
+- Required commands: deterministic Broker and real loopback pool matrix; pool/socket/client/resource compatibility matrix; `python -m pytest -q`; old round-robin and bound completion scans
+- Acceptance evidence: targeted pool/socket/client/resource matrix 60 passed in 0.51s; full suite 166 passed in 1.06s; no skips or xfails; legacy scheduler scan clean
+- Commit: this A06 checkpoint commit
+- Trailer: `Actor-Checkpoint: A06`
+
 ## A01 Baseline Evidence
 
 All signatures are anchored to base commit `71089c0`; no intentionally failing test, skip, or xfail was added.
@@ -167,6 +176,8 @@ Benchmark environment: Windows 11 10.0.26200 AMD64, CPython 3.12.6, Intel i5-134
 | 2026-07-14 13:28 +08:00 | Windows 11 10.0.26200 AMD64 | CPython 3.12.6 | A04 | `python -m pytest -q` | PASS: 153 passed in 0.88s | No skips or xfails reported. |
 | 2026-07-14 13:41 +08:00 | Windows 11 10.0.26200 AMD64 | CPython 3.12.6 | A05 | PushBuffer/Actor/socket/client targeted matrix | PASS: 60 passed in 0.68s | Parser release, heartbeat, push dual limits/gap, close poller wake, 200-frame flood fairness. |
 | 2026-07-14 13:42 +08:00 | Windows 11 10.0.26200 AMD64 | CPython 3.12.6 | A05 | `python -m pytest -q` | PASS: 158 passed in 0.95s | No skips or xfails reported. |
+| 2026-07-14 14:03 +08:00 | Windows 11 10.0.26200 AMD64 | CPython 3.12.6 | A06 | pool/socket/client/resource targeted matrix | PASS: 60 passed in 0.51s | FIFO, exact-once release, slow-slot first-idle, queue bounds/timeout/close, pin exclusivity/local FIFO, parser release, rollback, stale proxy, shared push. |
+| 2026-07-14 14:03 +08:00 | Windows 11 10.0.26200 AMD64 | CPython 3.12.6 | A06 | `python -m pytest -q` | PASS: 166 passed in 1.06s | No skips or xfails reported. |
 
 ## Open Decisions
 
@@ -197,6 +208,7 @@ Bootstrap inspection found no additional dirty repository paths. Pre-existing Py
 | none | 0 | n/a | n/a | n/a |
 | `schannel: failed to receive handshake, SSL/TLS connection failed` on A01 push | 1 | 2026-07-14 13:02 +08:00 | first push failed; 5-second retry succeeded without history rewrite | resolved |
 | real closed-loopback port produced no Windows selector event and `SO_ERROR=0` until deadline | 1 | 2026-07-14 13:12 +08:00 | isolated with direct `connect_ex`/selector probe; firewall drops refusal | use selectable real fd with injected `ECONNREFUSED` for deterministic SO_ERROR branch, plus separate real loopback success test; resolved |
+| legacy tests monkeypatched obsolete slot `execute()` instead of lease-aware wire entry | 2 | 2026-07-14 13:53-14:00 +08:00 | pool and resource tests failed against intentional scheduler replacement | replaced with Broker/real-socket behavior tests and lease-aware resource stub; resolved |
 
 ## Remote Synchronization
 

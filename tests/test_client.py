@@ -84,12 +84,22 @@ def test_compat_constructor_accepts_single_host() -> None:
 
 
 def test_from_hosts_preserves_heartbeat_setting() -> None:
-    client = TdxClient.from_hosts(["127.0.0.1:7709"], timeout=0.1, heartbeat_interval=None)
+    client = TdxClient.from_hosts(
+        ["127.0.0.1:7709"],
+        timeout=0.1,
+        heartbeat_interval=None,
+        max_pending_requests=17,
+        push_queue_size=23,
+        push_queue_bytes=4096,
+    )
 
     assert client.timeout == 0.1
     assert client.f10.timeout == 0.1
     assert client.heartbeat_interval is None
     assert client.transport.heartbeat_interval is None
+    assert client.transport.max_pending_requests == 17
+    assert client.transport.push_queue_size == 23
+    assert client.transport.push_queue_bytes == 4096
 
 
 def test_compat_get_quote_batches_requests() -> None:

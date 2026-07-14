@@ -63,22 +63,24 @@ def test_download_file_pins_pooled_transport(monkeypatch) -> None:
     payloads = [b"abcdefgh", b"ABCDEFGH"]
 
     for index, item in enumerate(transport._transports):
-        def execute(command, payload=None, *, index=index):
+        def execute(command, payload=None, *, lease_id, deadline, completion, runtime=None, index=index):
             assert command == TYPE_FILE_CONTENT
             request = dict(payload or {})
             calls[index].append(request)
             offset = int(request["offset"])
             size = int(request["size"])
             content = payloads[index][offset : offset + size]
-            return FileContentChunk(
+            result = FileContentChunk(
                 path=str(request["path"]),
                 offset=offset,
                 request_size=size,
                 chunk_len=len(content),
                 content=content,
             )
+            completion(None)
+            return result
 
-        monkeypatch.setattr(item, "execute", execute)
+        monkeypatch.setattr(item, "_execute_with_lease", execute)
 
     assert ResourceApi(transport).download_file("sample.bin", chunk_size=4) == b"abcdefgh"
     assert [call["offset"] for call in calls[0]] == [0, 4, 8]

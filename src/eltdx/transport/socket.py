@@ -8,16 +8,18 @@ from collections.abc import Sequence
 from typing import Any
 
 from eltdx.exceptions import ConnectionClosedError, ResponseTimeoutError
-from eltdx.hosts import DEFAULT_HOSTS, resolve_hosts, unique_hosts
+from eltdx.hosts import DEFAULT_HOSTS, ResolvedEndpoint, resolve_hosts, unique_hosts
 from eltdx.protocol.commands import COMMANDS, parse_command_response
 from eltdx.protocol.constants import TYPE_HANDSHAKE, TYPE_HEARTBEAT
 
 from .actor import (
     ActorRuntime,
     FrameEnvelope,
+    RequestTicket,
     RuntimeState,
     cancel_ticket,
     close_actor,
+    request_actor_stop,
     start_actor,
     submit_connect,
     submit_request,
@@ -41,6 +43,9 @@ class SocketTransport:
         heartbeat_interval: float | None = DEFAULT_HEARTBEAT_INTERVAL,
         push_queue_size: int = DEFAULT_PUSH_QUEUE_SIZE,
         push_queue_bytes: int = DEFAULT_PUSH_QUEUE_BYTES,
+        _shared_push_buffer: PushBuffer | None = None,
+        _runtime_epoch: int | None = None,
+        _resolved_endpoints: tuple[ResolvedEndpoint, ...] | None = None,
     ) -> None:
         self._hosts = unique_hosts(list(hosts or DEFAULT_HOSTS))
         if not self._hosts:
@@ -65,6 +70,10 @@ class SocketTransport:
         self._closing = False
         self._last_handshake: Any = None
         self._last_heartbeat: Any = None
+        self._shared_push_buffer = _shared_push_buffer
+        self._fixed_runtime_epoch = _runtime_epoch
+        self._resolved_endpoints = _resolved_endpoints
+        self._owns_push_buffer = _shared_push_buffer is None
 
     @property
     def connected_host(self) -> str | None:
@@ -104,6 +113,9 @@ class SocketTransport:
             self._request_lock.release()
 
     def close(self) -> None:
+        self._close_with_timeout(1.0)
+
+    def _close_with_timeout(self, timeout: float) -> None:
         with self._lifecycle:
             while self._closing:
                 self._lifecycle.wait()
@@ -113,11 +125,11 @@ class SocketTransport:
                 self._lifecycle.wait()
             runtime = self._runtime
             push_buffer = self._push_buffer
-        if push_buffer is not None:
+        if push_buffer is not None and self._owns_push_buffer:
             push_buffer.close()
         try:
             if runtime is not None:
-                close_actor(runtime)
+                close_actor(runtime, timeout=timeout)
         except BaseException:
             with self._lifecycle:
                 self._closing = False
@@ -139,24 +151,56 @@ class SocketTransport:
         request_payload = dict(payload or {})
         runtime = self._ensure_runtime()
         deadline = time.monotonic() + self._timeout
+        return self._execute_with_lease(
+            command,
+            request_payload,
+            lease_id=0,
+            deadline=deadline,
+            completion=None,
+            runtime=runtime,
+        )
+
+    def _execute_with_lease(
+        self,
+        command: int,
+        payload: dict[str, Any] | None,
+        *,
+        lease_id: int,
+        deadline: float,
+        completion: Any,
+        runtime: ActorRuntime | None = None,
+    ) -> Any:
+        request_payload = dict(payload or {})
+        if runtime is None:
+            try:
+                runtime = self._ensure_runtime()
+            except BaseException:
+                if completion is not None:
+                    completion(None)
+                raise
         if not self._acquire_request_lock(deadline):
+            if completion is not None:
+                completion(None)
             raise ResponseTimeoutError("7709 response timed out during queue")
-        ticket = None
+        ticket: RequestTicket | None = None
         try:
             self._require_current_runtime(runtime)
             ticket = submit_request(
                 runtime,
-                lease_id=0,
+                lease_id=lease_id,
                 command=command,
                 payload=request_payload,
                 deadline=deadline,
                 retry_safe=_retry_safe(command),
+                completion=completion,
             )
             envelope = wait_ticket(ticket)
         except BaseException:
             if ticket is not None and not ticket.completed.is_set():
                 cancel_ticket(runtime, ticket)
                 ticket.completed.wait(max(0.0, deadline - time.monotonic()) + 0.05)
+            elif ticket is None and completion is not None:
+                completion(None)
             raise
         finally:
             self._request_lock.release()
@@ -210,16 +254,14 @@ class SocketTransport:
                     continue
                 self._starting = True
                 observed_epoch = self._epoch
-                candidate_epoch = observed_epoch + 1
+                candidate_epoch = self._fixed_runtime_epoch or (observed_epoch + 1)
                 break
 
         candidate: ActorRuntime | None = None
         try:
-            endpoints = resolve_hosts(self._hosts)
-            push_buffer = PushBuffer(
-                candidate_epoch,
-                max_frames=self._push_queue_size,
-                max_bytes=self._push_queue_bytes,
+            endpoints = self._resolved_endpoints or resolve_hosts(self._hosts)
+            push_buffer = self._shared_push_buffer or PushBuffer(
+                candidate_epoch, max_frames=self._push_queue_size, max_bytes=self._push_queue_bytes
             )
             candidate = start_actor(
                 candidate_epoch,
@@ -227,6 +269,7 @@ class SocketTransport:
                 push_buffer=push_buffer,
                 heartbeat_interval=self._heartbeat_interval,
                 request_timeout=self._timeout,
+                owns_push_buffer=self._owns_push_buffer,
             )
         except BaseException:
             with self._lifecycle:
@@ -247,6 +290,38 @@ class SocketTransport:
             close_actor(candidate)
             raise ConnectionClosedError("7709 transport changed while resolving endpoints")
         return candidate
+
+    def _configure_pool_runtime(
+        self,
+        *,
+        push_buffer: PushBuffer,
+        runtime_epoch: int,
+        endpoints: tuple[ResolvedEndpoint, ...],
+    ) -> None:
+        with self._lifecycle:
+            if self._runtime is not None or self._starting:
+                raise RuntimeError("cannot reconfigure a running socket transport")
+            self._shared_push_buffer = push_buffer
+            self._fixed_runtime_epoch = runtime_epoch
+            self._resolved_endpoints = endpoints
+            self._owns_push_buffer = False
+            self._push_buffer = push_buffer
+
+    def _request_stop(self) -> None:
+        with self._lifecycle:
+            runtime = self._runtime
+        if runtime is not None:
+            request_actor_stop(runtime)
+
+    def _cancel_lease(self, lease_id: int) -> None:
+        with self._lifecycle:
+            runtime = self._runtime
+        if runtime is None:
+            return
+        with runtime.control_lock:
+            active = runtime.active_task
+        if isinstance(active, RequestTicket) and active.lease_id == lease_id:
+            cancel_ticket(runtime, active)
 
     def _require_current_runtime(self, runtime: ActorRuntime) -> None:
         with self._lifecycle:
