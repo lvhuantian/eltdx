@@ -68,6 +68,17 @@ conclude that no small Broker or Actor optimization can satisfy both strict
 FIFO and this raw saturated p50 comparison. Changing either requirement is a
 material specification decision and is not authorized by the current goal.
 
+A post-failure, read-only no-backlog diagnostic was predeclared as one complete
+10,000-request A-B-B-A block at pool 4/concurrency 4. It measured baseline versus
+current p50 of 5.8856/5.9845 ms and p99 of 7.2848/7.4216 ms: deltas of only
+0.0989/0.1369 ms, both below the original 0.2 ms floor. This supports separating
+fixed scheduling cost from saturated FIFO queue residence, but it is not an
+acceptance artifact and cannot retroactively change the failed `dcf6190`
+campaign. Three reviews agree that a prospective replacement protocol must be
+authorized before implementation, freeze all samples and stopping rules, retain
+the saturated raw p50/p99 disclosure, and use fixed cohorts with raw per-request
+latencies to prevent old lock barging from gaming the comparison.
+
 ## Confirmed Blockers
 
 ### A. Receive and request boundary
@@ -211,6 +222,7 @@ exact-source performance artifacts remain to be generated after checkpointing.
 | 2026-07-15 | Exact-`dcf6190` full 1/2/4 x 1/10/100 matrix | All nine 3,000-request cases completed with maximum active work 1/2/4; artifact SHA256 `2CCFC7C56852A19AC3DDE5F91249E3C161E08C813C618C7C49DED2DECD0CFBC6` |
 | 2026-07-15 | First exact-`dcf6190` full A-B-B-A acceptance | Workload SHA `9E7A7FB2E7DA00DA86B956AE8081575C35F53A3E243292FB05FA0FC83B672338`; throughput PASS at 97.27/96.58 percent; sequential p50/p99 and concurrent p99 PASS; concurrent p50 **FAIL** at 153.1688 ms versus 116.8734 ms baseline and 128.5607 ms ceiling. Artifact SHA256 values in A1/B1/B2/A2 order: `7E51D20A5412DB2BD855521C145A75EDF897F8F3F829788E55B8883FF60AB444`, `F1D71435F0ACD4B7E81916DE9C59EF1F336BC0A50D4752C98309078BF303DE86`, `AF52F0C06CAC877AFD0DCA6FCC101DA5964CA2300CF53228727A860135EF6D60`, `BA2CC234DEB9E165C23DCD49D4381E14ED4AA113D8E8D4676176640B17063D84` |
 | 2026-07-15 | Three independent exact-performance audits | All classify the campaign overall **FAIL**. Strict FIFO gives p50 approximately `N/X`; direct handoff already exists, batch wake cannot create leases, earlier release would violate one-inflight ownership, and matching the raw baseline p50 would require barging or a material specification change |
+| 2026-07-15 | Post-failure no-backlog latency diagnostic | One predeclared pool 4/concurrency 4, 10,000-request A-B-B-A block retained all four runs. Baseline/current run-summary p50 was **5.8856/5.9845 ms** and p99 **7.2848/7.4216 ms**; deltas 0.0989/0.1369 ms are below 0.2 ms. Diagnostic only: it does not replace or reclassify the failed saturated campaign |
 
 Post-`0b8ad54` corrections make Broker close broadcast every independently
 registered pin waiter Event without retaining proxies. A delayed assigned caller
