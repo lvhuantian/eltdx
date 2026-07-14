@@ -15,7 +15,7 @@ The result document remains historical evidence only until FINAL rewrites it.
 | Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), confirmed OPEN and draft at pushed HEAD `dcf6190` |
 | Final-review correction base | `cc46e6042e60b1d70732ae813b089f9c8b572572` |
 | Latest pushed correction checkpoint | `dcf619021771ef7c0592fa46a8313b44f798a2e8`; exact CI and Pages successful |
-| Current local follow-up | Exact stress/heartbeat/resource/throughput evidence passes; saturated concurrent p50 gate fails and conflicts with strict FIFO semantics |
+| Current local follow-up | FIFO-v1 revision, producer, verifier, adversarial tests, full suite, builds, and three clean reviews complete; freeze checkpoint commit pending before sampling |
 | Baseline worktree | Clean (`git status --short --branch`) |
 | Superseded result | Existing `COMPLETE` claim and 183-test evidence |
 
@@ -40,7 +40,7 @@ again before FINAL evidence is accepted.
 | F03 connect and failover | COMPLETE (`2e48be0`) | Candidate/attempt budgets, next-endpoint retry, Windows peer verification, non-busy rearm, and seven real/fault-injected regressions |
 | F04 Broker and pinned leases | COMPLETE (`117b8c6`, corrections `0b8ad54`, `b66a7a8`) | Per-waiter Event, exact lease/ticket cancellation, FIFO admission, close broadcast to every pin-local waiter, and failed-pin capacity recovery |
 | F05 lifecycle and shutdown | COMPLETE (`117b8c6`, corrections `0b8ad54`, `b66a7a8`) | Candidate ownership, epoch guard, single close owner, exact resource retention, best-effort cleanup, and monotonic failed-close states |
-| F06 stress, performance, resources, compatibility | ACCEPTANCE OPEN (`dcf6190`) | Exact stress, resources, heartbeat, matrix, both throughput gates, sequential latency, and concurrent p99 pass; concurrent p50 is 31.06 percent over baseline against a 10 percent limit |
+| F06 stress, performance, resources, compatibility | CONTRACT REVISION IN PROGRESS (`dcf6190` failure retained) | User authorized prospective fixed-cohort latency gates while preserving strict FIFO, saturated throughput gates, and raw p50/p99 disclosure |
 | Final-review correctness correction | PUSHED (`b66a7a8`, performance correction `dcf6190`) | DNS/host fallback, startup and socket ownership, Broker/pin races, close-owner cleanup, pool-connect identity, `CommandSpec` compatibility, and Actor hot-path selector state; exact CI/Pages and 299-test local suite passed |
 | FINAL independent review and CI | PENDING | Two clean adversarial reviews; local matrix/build/docs and exact-HEAD CI/Pages green |
 
@@ -78,6 +78,17 @@ campaign. Three reviews agree that a prospective replacement protocol must be
 authorized before implementation, freeze all samples and stopping rules, retain
 the saturated raw p50/p99 disclosure, and use fixed cohorts with raw per-request
 latencies to prevent old lock barging from gaming the comparison.
+
+## Authorized Resolution
+
+The user selected option 1 after the exact failure and independent audits:
+strict call-order FIFO remains authoritative. Plan revision 1.1 prospectively
+separates saturated closed-loop queue residence from added scheduling cost.
+FIFO-v1 freezes eight trials in `ABBA + BAAB` order, retains saturated
+pool-4/concurrency-100 throughput and raw p50/p99, and independently gates
+sequential plus four-worker no-backlog cohort p50/p99 from pooled raw nanosecond
+samples. The 100-worker closed wave remains report-only evidence. The old
+`dcf6190` campaign remains FAIL.
 
 ## Confirmed Blockers
 
@@ -223,6 +234,12 @@ exact-source performance artifacts remain to be generated after checkpointing.
 | 2026-07-15 | First exact-`dcf6190` full A-B-B-A acceptance | Workload SHA `9E7A7FB2E7DA00DA86B956AE8081575C35F53A3E243292FB05FA0FC83B672338`; throughput PASS at 97.27/96.58 percent; sequential p50/p99 and concurrent p99 PASS; concurrent p50 **FAIL** at 153.1688 ms versus 116.8734 ms baseline and 128.5607 ms ceiling. Artifact SHA256 values in A1/B1/B2/A2 order: `7E51D20A5412DB2BD855521C145A75EDF897F8F3F829788E55B8883FF60AB444`, `F1D71435F0ACD4B7E81916DE9C59EF1F336BC0A50D4752C98309078BF303DE86`, `AF52F0C06CAC877AFD0DCA6FCC101DA5964CA2300CF53228727A860135EF6D60`, `BA2CC234DEB9E165C23DCD49D4381E14ED4AA113D8E8D4676176640B17063D84` |
 | 2026-07-15 | Three independent exact-performance audits | All classify the campaign overall **FAIL**. Strict FIFO gives p50 approximately `N/X`; direct handoff already exists, batch wake cannot create leases, earlier release would violate one-inflight ownership, and matching the raw baseline p50 would require barging or a material specification change |
 | 2026-07-15 | Post-failure no-backlog latency diagnostic | One predeclared pool 4/concurrency 4, 10,000-request A-B-B-A block retained all four runs. Baseline/current run-summary p50 was **5.8856/5.9845 ms** and p99 **7.2848/7.4216 ms**; deltas 0.0989/0.1369 ms are below 0.2 ms. Diagnostic only: it does not replace or reclassify the failed saturated campaign |
+| 2026-07-15 | User contract decision | Selected option 1: preserve strict FIFO and prospectively replace the raw saturated p50 hard gate with independently verified fixed-cohort scheduling gates; saturated raw p50/p99 remain mandatory disclosure |
+| 2026-07-15 | FIFO-v1 producer/verifier implementation | Added raw `perf_counter_ns` samples, prestarted fixed cohorts, Broker boundary cleanup checks, a two-stage canonical declaration/externally recorded hash, fixed `ABBA + BAAB` schedule, exact identity/config/schema/time checks, pooled integer throughput math, four independent latency gates, and report-only saturated/100-worker raw latency; initial focused evidence tests **20 passed** before adversarial expansion |
+| 2026-07-15 | FIFO-v1 adversarial evidence hardening | Closed producer/workload root forgery, impossible elapsed/latency integrals, partial-submit Future loss, double cohort waits, Windows server/accept cleanup, warmup counter contamination, reset/sendall race, policy/stopping rewrites, bool-as-int schema values, unknown hidden fields, derived summary forgery, overlapping/naive timestamps, non-Windows execution, declaration/run hash separation, and terminal failure recording |
+| 2026-07-15 | Frozen FIFO-v1 identities before checkpoint | Plan revision 1.1 SHA256 `41B5641A1204DCF73D392EFD3EB14C56A9F86A37621CD3AA8F80192D784491AB`; producer SHA256 `EAB6E650522E137F1F0142859E9BDB8B798073CE16038CA2E8911AD4925B0973`; verifier SHA256 `6ED5710EF09DAE2CD2239E7DD3268ADC0970C4782DB6F0680E222ADB0F70D649` |
+| 2026-07-15 | FIFO-v1 focused and full local verification | Evidence suite **41 passed**; complete suite **340 passed in 70.95s**; compileall and diff check passed; wheel/sdist built; MkDocs strict passed |
+| 2026-07-15 | Three independent pre-sampling reviews | CLEAN: producer concurrency/cleanup/timing, verifier/runner mathematics and anti-forgery, and user-contract/scope review; no formal FIFO-v1 sample existed before the freeze checkpoint |
 
 Post-`0b8ad54` corrections make Broker close broadcast every independently
 registered pin waiter Event without retaining proxies. A delayed assigned caller
@@ -338,14 +355,12 @@ artifacts must be regenerated at the next exact implementation SHA.
 
 ## Exact Next Action
 
-Record and push this exact evidence failure without the unfinished RESULT
-rewrite. Completion then requires an explicit decision between the two
-conflicting requirements: preserve strict call-order FIFO and revise the raw
-saturated p50 acceptance definition prospectively, or preserve the raw p50
-comparison and authorize a non-FIFO/barging scheduler. Do not silently change
-the benchmark, discard this failed campaign, relax FIFO, or declare FINAL.
-After that decision, implement the selected contract, freeze the new acceptance
-campaign before its first sample, regenerate exact-SHA evidence, transfer it to
-RESULT, run at least two new clean FINAL reviews, delete this ledger, commit
-FINAL with both required trailers, push, and wait for exact FINAL-head CI and
-Pages success.
+Finish the FIFO-v1 scripts, adversarial tests, plan revision, and ledger in one
+checkpoint without the unfinished RESULT rewrite. Run full local tests/builds,
+push, and wait for exact-head CI/Pages before taking any formal sample. Then
+create a clean exact-SHA worktree, regenerate stress/heartbeat/resource/matrix
+evidence, run the frozen eight-trial FIFO-v1 campaign exactly once, and verify
+the self-contained bundle. Transfer all evidence including the retained
+`dcf6190` failure to RESULT, obtain at least two fresh clean FINAL reviews,
+delete this ledger, commit FINAL with both required trailers, push, wait for
+exact FINAL-head CI/Pages, and remove task worktrees only after evidence transfer.

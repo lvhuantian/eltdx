@@ -4,10 +4,15 @@
 > 适用仓库：`C:\Users\ax\Desktop\eltdx\eltdx-src`
 > 形成方案时的基准提交：`71089c0a2867a75dc79aa2c340213f4e3845b6e3`
 > 目标分支：`actor-transport-refactor`
-> 规范版本：1.0
-> 最后更新：2026-07-14
+> 规范版本：1.1
+> 最后更新：2026-07-15
 
 本文档是 7709 transport Actor 改造的唯一实现规范。实现线程在开始工作、上下文压缩后恢复、网络中断后恢复以及最终验收前，都必须完整重读本文档，不能仅依赖聊天摘要或记忆。
+
+版本 1.1 经用户明确选择，保留第 17 节 strict FIFO，不用旧锁 barging
+换取较低的饱和 p50。首次 exact-`dcf6190` A-B-B-A 仍按 1.0 口径记录为
+FAIL；1.1 只前瞻定义新的 fixed-cohort 调度开销门，不能追溯改判或删除
+旧 artifact。
 
 ---
 
@@ -945,7 +950,7 @@ Actor-Checkpoint: A03
 - 本地 Windows 跑快速 1,000 次重连和完整测试。
 - 跑 10,000 次 generation 更换、100,000 次混合请求的 soak。
 - 对 pool size 1/2/4、并发 1/10/100 建基准。
-- 使用 A01 同一个 benchmark 脚本、server workload、机器和配置生成新结果，并保存旧/新对比。
+- 使用同一已冻结 revision 的 benchmark、verifier、server workload、机器和配置同时加载旧/新 source root，并保存全部原始对比。
 - CI 覆盖 Ubuntu Python 3.10-3.13 和 Windows 关键版本。
 
 验收：满足第 24 节全部指标，无 skipped/xfail/flaky 掩盖失败。
@@ -1074,11 +1079,54 @@ Actor-Checkpoint: A03
 - `pool_size=1`，10,000 顺序请求吞吐 >= 旧实现 95%。
 - `pool_size=4`，100 并发、100,000 请求吞吐 >= 旧实现 95%。
 - 服务端最大业务并发恰好等于 pool size。
-- p50/p99 新增调度开销不超过 10% 或 0.2ms，取较宽者。
+- 100 并发持续饱和场景的 raw p50/p99 必须逐 trial 和 pooled 全量报告，
+  但不再把 strict FIFO queue residence 冒充新增固定调度开销；吞吐 95%
+  硬门保持不变，p99 改善不能代偿其他 gate。
+- 新增调度开销由同一 frozen campaign 的两个独立 latency probe 判定：
+  `pool=1/concurrency=1` 顺序调用，以及 `pool=4/fixed cohort=4` 无积压
+  调用。cohort 内同时放行，全部 future terminal 后才能创建下一 cohort；
+  4-worker gate 使用 call latency。
+- 上述两个 probe 的 p50 和 p99 分别要求
+  `current - baseline <= max(baseline * 10%, 0.2ms)`，四个 gate 必须全部
+  通过。不得用吞吐、report-only 数据或另一个 quantile 抵消失败。
+- `pool=4/fixed cohort=100` 有竞争 wave 仍保存共同 wave epoch 到完成的
+  raw cohort latency，作为防跨 wave barging 的强制诊断，但不属于用户
+  授权的无积压调度开销硬门。
 - 一个 slot 500ms、其他 slot 10ms 时，新请求进入空闲 slot。
 - caller parser 人为阻塞 50ms 时，slot 已能服务下一请求。
 - heartbeat 对持续业务吞吐影响 < 1%。
 - idle Actor 不持续消耗 CPU。
+
+#### FIFO v1 前瞻 campaign
+
+- 在首个样本前提交 benchmark、verifier、精确配置和停止规则。正式顺序
+  固定为 `ABBA + BAAB`，即 baseline/current/current/baseline 后接
+  current/baseline/baseline/current，共 8 个 trial；每个 cell 只允许
+  `attempt=1`。
+- 正式 campaign 必须分成两个独立命令：`declare` 只创建 declaration，
+  主 Agent 在任何样本前先把其 canonical SHA256 写入外部任务记录；随后
+  `run --expected-hash` 必须逐字匹配该记录。run 开始时目录只能包含这
+  一个 declaration，任何隐藏文件、旧 attempt 或 terminal artifact 都
+  直接失败。
+- 每个 trial 使用同一 Windows/Python、同一脚本 SHA、同一 5.000ms
+  loopback server delay、clean `71089c0` baseline 和 clean exact current
+  HEAD。开始前写入带 canonical SHA256 的 declaration。
+- 每个 trial 固定运行：顺序 1,000 warmup + 10,000 timed；持续饱和
+  1,000 warmup + 100,000 timed；4-worker cohort 100 warmup + 2,500 timed
+  cohorts；100-worker report-only wave 10 warmup + 50 timed cohorts。
+- producer 保存每个 timed request 的未四舍五入 `latency_ns`、精确
+  `elapsed_ns`、SHA/dirty/config identity、worker 数和 server max active。
+  current cohort 在每个边界还必须证明 idle slots 全归还、waiter/pin
+  waiter/active lease 全为 0。
+- 独立 stdlib verifier 不导入 `eltdx`，只信原始数组。吞吐按所有固定
+  trial 的 `sum(requests) / sum(elapsed)` 聚合并用整数交叉乘判门；p50
+  使用完整 pooled raw 样本的中位数，p99 使用排序索引
+  `floor((N-1)*0.99)`。
+- 缺失、追加、换序、重复 trial/index、dirty source、SHA/hash/config
+  不一致、非 Windows、trial 时间重叠、未知 schema 字段、请求错误、
+  样本数/物理计时关系错误或任一 gate 失败都使 campaign FAIL。
+  不允许查看中间结果后停止、补跑或替换 cell。客观基础设施中断必须
+  保留原目录并用新 campaign ID 从 trial 0 完整重跑。
 
 ### Close
 
