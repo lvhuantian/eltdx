@@ -29,16 +29,16 @@ Implement the complete per-slot, single-threaded, non-blocking 7709 `ConnectionA
 | Status | ACTIVE |
 | Spec revision | 1.0 |
 | Spec SHA256 | `C13F9F551CDE202B48B3C1CD7307C2CD31B65DBBA255247D822A444B813CDF61` revalidated 2026-07-14 12:52 +08:00 |
-| Current checkpoint | A01 (starts after A00 remote synchronization) |
-| Last completed | A00 locally verified; commit/push/PR synchronization next |
-| Next exact action | Explicitly stage the plan and ledger, create the A00 commit with its required trailer, push normally, and create the draft PR. |
+| Current checkpoint | A01 |
+| Last completed | A00: `f0168688f8d1ac26f00291e69bb4717b3d3aed77` |
+| Next exact action | Read the current transport/protocol/client implementation and tests, then add the deterministic scripted-server/fault-injection harness and fixed baseline benchmark workload. |
 | Branch | `actor-transport-refactor` (created locally from verified base) |
 | Base SHA | `71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
-| Local HEAD | `71089c0a2867a75dc79aa2c340213f4e3845b6e3` before A00 commit |
-| Remote HEAD | `origin/main=71089c0a2867a75dc79aa2c340213f4e3845b6e3`; no remote work branch after fetch |
-| Push state | pending verified A00 commit |
-| Draft PR | not created |
-| CI state | not started |
+| Local HEAD | `f0168688f8d1ac26f00291e69bb4717b3d3aed77` before this additive A00 synchronization record |
+| Remote HEAD | work branch `f0168688f8d1ac26f00291e69bb4717b3d3aed77` verified from PR head; `origin/main=71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
+| Push state | A00 pushed normally; synchronization record pending push |
+| Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), OPEN and draft |
+| CI state | run `29307148534` queued/running for Ubuntu CPython 3.10-3.13 at A00 head; Pages run `29307148575` in progress |
 | Current owner | active Goal thread `019f5ef5-6ebb-7291-89ed-6b55c6bb5992` |
 
 ## Architecture Invariants
@@ -58,7 +58,7 @@ Implement the complete per-slot, single-threaded, non-blocking 7709 `ConnectionA
 | ID | Depends On | Status | Acceptance Summary |
 | --- | --- | --- | --- |
 | A00 | none | DONE | Baseline, branch, ledger, tests; remote/PR sync immediately follows commit |
-| A01 | A00 | PENDING | Deterministic fault-injection harness and reproducible baseline evidence |
+| A01 | A00 | IN_PROGRESS | Deterministic fault-injection harness and reproducible baseline evidence |
 | A02 | A01 | PENDING | Incremental frame decoder and bounded zlib |
 | A03 | A02 | PENDING | Runtime, wakeup, selector, non-blocking connect, close |
 | A04 | A03 | PENDING | Wire request lifecycle, retry, cancel, generations |
@@ -78,8 +78,17 @@ Allowed status values: `PENDING`, `IN_PROGRESS`, `DONE`, `BLOCKED`. At most one 
 - Owned files: handoff documents and test/baseline records only
 - Required commands: `python -m pytest -q`; Git/GitHub/environment inspection commands recorded below
 - Acceptance evidence: branch and remote baseline verified; 102-test baseline suite passed
-- Commit: this A00 checkpoint commit (SHA recorded in the next additive synchronization record)
+- Commit: `f0168688f8d1ac26f00291e69bb4717b3d3aed77`; this additive record preserves post-push metadata without amending it
 - Trailer: `Actor-Checkpoint: A00`
+
+### A01
+
+- Status: `IN_PROGRESS`
+- Owned files: deterministic test support, A01 compatibility tests, benchmark script/data summary, and this ledger
+- Required commands: inspect first; exact targeted tests and fixed benchmark command will be recorded before commit
+- Acceptance evidence: pending
+- Commit: not created
+- Trailer: `Actor-Checkpoint: A01`
 
 ## Test Evidence
 
@@ -120,9 +129,9 @@ Bootstrap inspection found no additional dirty repository paths. Pre-existing Py
 | Item | State | Evidence |
 | --- | --- | --- |
 | `git fetch` | complete | `git fetch --prune origin` succeeded 2026-07-14 12:51 +08:00; `origin/main` matches base |
-| work branch push | pending A00 | remote branch does not yet exist |
-| draft PR | not created | n/a |
-| CI | not started | n/a |
+| work branch push | A00 complete; sync push pending | PR head confirmed at `f0168688f8d1ac26f00291e69bb4717b3d3aed77` |
+| draft PR | OPEN, draft | https://github.com/electkismet/eltdx/pull/12 |
+| CI | in progress | https://github.com/electkismet/eltdx/actions/runs/29307148534 (Ubuntu Python 3.10-3.13) |
 
 ## Resume Checklist
 
