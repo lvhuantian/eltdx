@@ -12,10 +12,10 @@ The result document remains historical evidence only until FINAL rewrites it.
 | Baseline HEAD | `994c49b51f47255bdcd9cdc3308a5a554f37588b` |
 | Base | `71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
 | Branch | `actor-transport-refactor` |
-| Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), confirmed OPEN and draft at pushed HEAD `b66a7a8` |
+| Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), confirmed OPEN and draft at pushed HEAD `dcf6190` |
 | Final-review correction base | `cc46e6042e60b1d70732ae813b089f9c8b572572` |
-| Latest pushed correction checkpoint | `b66a7a82bd2d38022237f4ac9dab3f31567cb366`; exact CI and Pages successful |
-| Current local follow-up | Actor hot-path performance corrections verified with 299 passing tests; checkpoint commit pending |
+| Latest pushed correction checkpoint | `dcf619021771ef7c0592fa46a8313b44f798a2e8`; exact CI and Pages successful |
+| Current local follow-up | Exact stress/heartbeat/resource/throughput evidence passes; saturated concurrent p50 gate fails and conflicts with strict FIFO semantics |
 | Baseline worktree | Clean (`git status --short --branch`) |
 | Superseded result | Existing `COMPLETE` claim and 183-test evidence |
 
@@ -40,9 +40,33 @@ again before FINAL evidence is accepted.
 | F03 connect and failover | COMPLETE (`2e48be0`) | Candidate/attempt budgets, next-endpoint retry, Windows peer verification, non-busy rearm, and seven real/fault-injected regressions |
 | F04 Broker and pinned leases | COMPLETE (`117b8c6`, corrections `0b8ad54`, `b66a7a8`) | Per-waiter Event, exact lease/ticket cancellation, FIFO admission, close broadcast to every pin-local waiter, and failed-pin capacity recovery |
 | F05 lifecycle and shutdown | COMPLETE (`117b8c6`, corrections `0b8ad54`, `b66a7a8`) | Candidate ownership, epoch guard, single close owner, exact resource retention, best-effort cleanup, and monotonic failed-close states |
-| F06 stress, performance, resources, compatibility | IN PROGRESS (`0955a8e`, resource correction `cc46e60`, evidence base `b66a7a8`) | Correctness, stress, resources, and heartbeat pass at `b66a7a8`; baseline-relative throughput was just below 95 percent, so hot-path correction and fresh exact-SHA evidence remain required |
-| Final-review correctness correction | PUSHED (`b66a7a8`) | DNS/host fallback, startup and socket ownership, Broker/pin races, close-owner cleanup, pool-connect identity, and `CommandSpec` compatibility; exact CI/Pages and 296-test local suite passed |
+| F06 stress, performance, resources, compatibility | ACCEPTANCE OPEN (`dcf6190`) | Exact stress, resources, heartbeat, matrix, both throughput gates, sequential latency, and concurrent p99 pass; concurrent p50 is 31.06 percent over baseline against a 10 percent limit |
+| Final-review correctness correction | PUSHED (`b66a7a8`, performance correction `dcf6190`) | DNS/host fallback, startup and socket ownership, Broker/pin races, close-owner cleanup, pool-connect identity, `CommandSpec` compatibility, and Actor hot-path selector state; exact CI/Pages and 299-test local suite passed |
 | FINAL independent review and CI | PENDING | Two clean adversarial reviews; local matrix/build/docs and exact-HEAD CI/Pages green |
+
+## Current Acceptance Blocker
+
+The first predeclared exact-`dcf6190` 10,000/100,000 A-B-B-A campaign is
+retained as a failure, not rerun until a favorable sample appears. Both
+throughput gates pass (sequential 97.27 percent, concurrent 96.58 percent), as
+do sequential p50/p99 and concurrent p99. Concurrent p50 does not pass:
+
+- Baseline run-summary median: 116.8734 ms.
+- Current run-summary median: 153.1688 ms.
+- Delta: +36.2954 ms (31.06 percent).
+- Allowed delta: max(11.6873 ms, 0.2 ms); passing ceiling 128.5607 ms.
+
+Strict call-order FIFO is also an explicit design requirement in
+`ACTOR_REFACTOR_PLAN.md`. With 100 closed-loop callers and measured throughput
+near 645 requests/second, Little's law gives about 155 ms per caller cycle,
+which matches the narrow current distribution. Reaching 128.6 ms under FIFO
+would require about 778 requests/second; four connections with a fixed 5 ms
+server delay have an absolute ceiling of 800 before protocol, loopback, thread,
+and timer overhead. The old lock scheduler obtains 93-140 ms p50 through
+barging, while other callers absorb 261-549 ms p99. Three independent reviews
+conclude that no small Broker or Actor optimization can satisfy both strict
+FIFO and this raw saturated p50 comparison. Changing either requirement is a
+material specification decision and is not authorized by the current goal.
 
 ## Confirmed Blockers
 
@@ -181,6 +205,12 @@ exact-source performance artifacts remain to be generated after checkpointing.
 | 2026-07-15 | Full 10,000 sequential / 100,000 concurrent baseline-current-current-baseline acceptance at `b66a7a8` | Sequential ratio **0.948497**, concurrent ratio **0.943353**; both below required 0.95, so FINAL remained open |
 | 2026-07-15 | Actor hot-path correction verification | Normal immediate sends retain READ interest without selector modify; partial/would-block sends arm READ|WRITE; pooled/pinned calls pass their exact completion without a redundant lock wrapper. Compile passed, focused matrix **162 passed**, full suite **299 passed in 69.93s** |
 | 2026-07-15 | Counterbalanced hot-path diagnostics against clean `b66a7a8` | Sequential 3,000-request ABBA measured **+0.3751%**. Two independent 4 x 10,000 concurrent ABBA sets combined to about **+2.0%** but showed system drift, so they are diagnostic only. A stale-wakeup drain experiment measured about **-0.56%** and was rejected without source changes |
+| 2026-07-15 | Exact pushed `dcf6190` checks | CI run `29368040831` passed Ubuntu 3.10-3.13 and Windows 3.11/3.13; Pages run `29368040880` passed |
+| 2026-07-15 | Clean exact-`dcf6190` heavy stress | 10,000 generations in 17.130445s and 100,000 mixed requests in 72.418717s used both servers; 110,000 unique results and all duplicate/missing/unexpected/cross counters **0**; 800 close cleanup snapshots terminal; close p99 3.1632/2.7634 ms; handles exactly **189 x 8**; heartbeat ratio 1.011021; artifact SHA256 `4180E3F50C24BB950F341B32D9559892080DDC3B5A5300DA9FAE64A6F42678EC` |
+| 2026-07-15 | Three fixed exact-`dcf6190` heartbeat repetitions | Ratios **0.994514/0.992093/0.999226**; combined raw elapsed ratio **0.995277** across 105,696 unique business responses, zero timed heartbeats and zero cross counters; artifact hashes `6B4A56E0198471CCF907AB28049521FBF8865929D099D392B6A9D889E476410C`, `D07819BF318834E62D1378838D5065076450A1AC9505A662572102E253050D69`, `AD7CE4B3C6DA153E1FDF3041D18D73AE3DEED5F25D764DE6496C1B4FE02F366F` |
+| 2026-07-15 | Exact-`dcf6190` full 1/2/4 x 1/10/100 matrix | All nine 3,000-request cases completed with maximum active work 1/2/4; artifact SHA256 `2CCFC7C56852A19AC3DDE5F91249E3C161E08C813C618C7C49DED2DECD0CFBC6` |
+| 2026-07-15 | First exact-`dcf6190` full A-B-B-A acceptance | Workload SHA `9E7A7FB2E7DA00DA86B956AE8081575C35F53A3E243292FB05FA0FC83B672338`; throughput PASS at 97.27/96.58 percent; sequential p50/p99 and concurrent p99 PASS; concurrent p50 **FAIL** at 153.1688 ms versus 116.8734 ms baseline and 128.5607 ms ceiling. Artifact SHA256 values in A1/B1/B2/A2 order: `7E51D20A5412DB2BD855521C145A75EDF897F8F3F829788E55B8883FF60AB444`, `F1D71435F0ACD4B7E81916DE9C59EF1F336BC0A50D4752C98309078BF303DE86`, `AF52F0C06CAC877AFD0DCA6FCC101DA5964CA2300CF53228727A860135EF6D60`, `BA2CC234DEB9E165C23DCD49D4381E14ED4AA113D8E8D4676176640B17063D84` |
+| 2026-07-15 | Three independent exact-performance audits | All classify the campaign overall **FAIL**. Strict FIFO gives p50 approximately `N/X`; direct handoff already exists, batch wake cannot create leases, earlier release would violate one-inflight ownership, and matching the raw baseline p50 would require barging or a material specification change |
 
 Post-`0b8ad54` corrections make Broker close broadcast every independently
 registered pin waiter Event without retaining proxies. A delayed assigned caller
@@ -296,11 +326,14 @@ artifacts must be regenerated at the next exact implementation SHA.
 
 ## Exact Next Action
 
-Commit and push the verified Actor hot-path correction without the unfinished
-RESULT rewrite, then wait for exact-head CI and Pages. From a clean worktree at
-that SHA, rerun heavy 10,000-generation/100,000-request stress, the three fixed
-heartbeat repetitions, full 1/2/4 x 1/10/100 matrix, and full 10,000/100,000
-baseline-current-current-baseline acceptance. Transfer exact evidence to RESULT,
-run at least two new clean FINAL reviews, delete this ledger, commit FINAL with
-both `Actor-Checkpoint: FINAL` and `Fix-Checkpoint: FINAL`, push, and wait for
-exact FINAL-head CI and Pages success.
+Record and push this exact evidence failure without the unfinished RESULT
+rewrite. Completion then requires an explicit decision between the two
+conflicting requirements: preserve strict call-order FIFO and revise the raw
+saturated p50 acceptance definition prospectively, or preserve the raw p50
+comparison and authorize a non-FIFO/barging scheduler. Do not silently change
+the benchmark, discard this failed campaign, relax FIFO, or declare FINAL.
+After that decision, implement the selected contract, freeze the new acceptance
+campaign before its first sample, regenerate exact-SHA evidence, transfer it to
+RESULT, run at least two new clean FINAL reviews, delete this ledger, commit
+FINAL with both required trailers, push, and wait for exact FINAL-head CI and
+Pages success.
