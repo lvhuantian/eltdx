@@ -8,7 +8,7 @@ ledger, which is deleted in the same finalization commit.
 
 | Field | Value |
 | --- | --- |
-| Status | COMPLETE after FINAL-head CI verification |
+| Status | COMPLETE after the latest FINAL-head CI verification |
 | Spec | `ACTOR_REFACTOR_PLAN.md`, revision 1.0 |
 | Spec SHA256 | `C13F9F551CDE202B48B3C1CD7307C2CD31B65DBBA255247D822A444B813CDF61` |
 | Base SHA | `71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
@@ -19,14 +19,14 @@ ledger, which is deleted in the same finalization commit.
 | A09 CI | [run 29327373570](https://github.com/electkismet/eltdx/actions/runs/29327373570), SUCCESS |
 | A09 Pages | [run 29327373632](https://github.com/electkismet/eltdx/actions/runs/29327373632), build SUCCESS |
 
-`SELF` is the unique commit that contains this manifest, deletes
+`SELF` is the newest first-parent commit that contains this manifest, has no
 `ACTOR_REFACTOR_PROGRESS.md`, and has the trailer `Actor-Checkpoint: FINAL`.
 A Git commit cannot embed its own cryptographic SHA, so the exact value is
 intentionally resolved from Git rather than represented by an impossible
 self-hash:
 
 ```powershell
-git log --all --format="%H%x09%B" --grep="Actor-Checkpoint: FINAL"
+git log -1 --first-parent --format="%H%x09%B" --grep="Actor-Checkpoint: FINAL"
 ```
 
 At delivery, local HEAD, `refs/heads/actor-transport-refactor`, and PR #12 head
@@ -51,7 +51,8 @@ The delivery response records the resolved SHA and URLs after those runs finish.
 | A09 | `9755ee5cfbc9bba616479e166585c03ff6a92bf6` | Documentation and final review |
 | A09 correction | `c2c4eb0135c4e05e11f72766faa33a83ea52df99` | Preserve decoded frames across fairness slices |
 | A09 correction | `b30c6b9ce885e29666f0e90a1565a195cf50074a` | Defer pooled heartbeat under Broker pressure |
-| FINAL | `SELF` | Permanent manifest and temporary-ledger deletion |
+| FINAL attempt | `c4036811ed66085950ad27eaca0d783fa6b9294b` | Permanent manifest and ledger deletion; CI found a scripted-server close race |
+| FINAL correction | `SELF` | Deterministic server lifetime fix and permanent manifest update |
 
 All published checkpoint commits were appended and pushed normally. No pushed
 commit was amended or rebased, and the branch was never force-pushed.
@@ -121,6 +122,9 @@ Environment: Windows 11 `10.0.26200` AMD64, Intel i5-13400F, CPython 3.12.6.
 | 2026-07-14 18:52 | `python -m pytest -q` | 183 passed in 24.98s |
 | 2026-07-14 18:52 | `python -m build` | `eltdx-1.0.2` sdist and wheel built |
 | 2026-07-14 18:52 | `python -m mkdocs build --strict` | PASS |
+| 2026-07-14 19:09 | reconnect/socket/Actor targeted matrix | 24 passed in 0.71s |
+| 2026-07-14 19:09 | `python -m pytest -q` | 183 passed in 25.22s |
+| 2026-07-14 19:09 | `python -m build`; `python -m mkdocs build --strict` | sdist/wheel and strict docs PASS |
 
 The final suite reported no skipped or xfailed tests. A source audit found no
 `pytest.mark.skip` or `pytest.mark.xfail` in `tests/`. The added-code audit found
@@ -136,9 +140,18 @@ missing Broker-pressure signal. The weak Broker guard and warmed multi-trial
 benchmark fixed both issues. The final full suite and heavy benchmark below are
 post-fix evidence.
 
+The first FINAL attempt, `c403681`, kept the verified implementation unchanged
+but its Ubuntu 3.11 CI run [29327752577](https://github.com/electkismet/eltdx/actions/runs/29327752577)
+found a second deterministic-test issue: the reconnect test's second scripted
+server returned immediately after sending a successful response. `execute()`
+completed correctly, but the Actor could process the resulting EOF and clear
+its live `connected_host` before the assertion. The harness now holds that
+connection with an Event until the assertion finishes; runtime host semantics
+remain unchanged and no sleep or timeout inflation is used.
+
 ## Cross-Platform CI
 
-A09 verified code SHA: `b30c6b9ce885e29666f0e90a1565a195cf50074a`.
+A09 verified implementation SHA: `b30c6b9ce885e29666f0e90a1565a195cf50074a`.
 
 | Platform | Python | Job | Result |
 | --- | --- | --- | --- |

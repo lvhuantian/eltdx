@@ -78,6 +78,8 @@ def test_socket_transport_handles_push_before_matching_response() -> None:
 
 
 def test_socket_transport_reconnects_after_reader_disconnect() -> None:
+    release_second_connection = threading.Event()
+
     def first_connection(conn: socket.socket) -> None:
         msg_id, msg_type, _ = _read_request(conn)
         assert msg_type == TYPE_HANDSHAKE
@@ -91,6 +93,7 @@ def test_socket_transport_reconnects_after_reader_disconnect() -> None:
         msg_id, msg_type, _ = _read_request(conn)
         assert msg_type == TYPE_SECURITY_COUNT
         conn.sendall(_response(msg_id, TYPE_SECURITY_COUNT, (321).to_bytes(2, "little")))
+        release_second_connection.wait()
 
     with Scripted7709Server([first_connection, second_connection]) as server:
         transport = SocketTransport(hosts=[server.host], timeout=1)
@@ -98,6 +101,7 @@ def test_socket_transport_reconnects_after_reader_disconnect() -> None:
             assert transport.execute(TYPE_SECURITY_COUNT, {"market": "sz"}) == 321
             assert transport.connected_host == server.host
         finally:
+            release_second_connection.set()
             transport.close()
 
 
