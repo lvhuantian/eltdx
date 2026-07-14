@@ -7,6 +7,7 @@ import selectors
 import socket
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from enum import Enum, auto
@@ -101,6 +102,7 @@ class TcpGeneration:
     tx_bytes: bytes = b""
     tx_offset: int = 0
     active_exchange: WireExchange | None = None
+    decoded_frames: deque[ResponseFrame] = field(default_factory=deque)
     connected_at: float = 0.0
     last_activity_at: float = 0.0
 
@@ -402,6 +404,10 @@ def _run_actor(runtime: ActorRuntime) -> None:
             _drain_control(runtime)
             if runtime.stop_requested:
                 break
+            generation = runtime.generation
+            if generation is not None and generation.decoded_frames:
+                _receive_generation(runtime, generation)
+                continue
             _expire_active_task(runtime)
             _schedule_heartbeat(runtime)
             timeout = _selector_timeout(runtime)
@@ -661,6 +667,15 @@ def _receive_generation(runtime: ActorRuntime, generation: TcpGeneration) -> Non
     bytes_read = 0
     frames_read = 0
     while bytes_read < 256 * 1024 and frames_read < 64:
+        while generation.decoded_frames and frames_read < 64:
+            response = generation.decoded_frames.popleft()
+            frames_read += 1
+            exchange_before = generation.active_exchange
+            _route_frame(runtime, generation, response)
+            if runtime.generation is not generation:
+                return
+        if generation.decoded_frames:
+            return
         try:
             chunk = generation.sock.recv(min(64 * 1024, 256 * 1024 - bytes_read))
         except BlockingIOError:
@@ -671,16 +686,9 @@ def _receive_generation(runtime: ActorRuntime, generation: TcpGeneration) -> Non
         bytes_read += len(chunk)
         generation.last_activity_at = time.monotonic()
         frames = generation.decoder.feed(chunk)
-        terminal_frame = False
-        for response in frames:
-            frames_read += 1
-            exchange_before = generation.active_exchange
-            _route_frame(runtime, generation, response)
-            terminal_frame = terminal_frame or (exchange_before is not None and generation.active_exchange is None)
-            if runtime.generation is not generation or frames_read >= 64:
-                return
-        if terminal_frame:
-            return
+        if len(generation.decoded_frames) + len(frames) > 1024:
+            raise ProtocolError("decoded response frame queue exceeds limit: 1024")
+        generation.decoded_frames.extend(frames)
 
 
 def _route_frame(runtime: ActorRuntime, generation: TcpGeneration, response: ResponseFrame) -> None:

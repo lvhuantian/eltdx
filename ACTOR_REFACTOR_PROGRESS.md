@@ -30,8 +30,8 @@ Implement the complete per-slot, single-threaded, non-blocking 7709 `ConnectionA
 | Spec revision | 1.0 |
 | Spec SHA256 | `C13F9F551CDE202B48B3C1CD7307C2CD31B65DBBA255247D822A444B813CDF61` revalidated 2026-07-14 12:52 +08:00 |
 | Current checkpoint | A09 |
-| Last completed | A09 locally verified; commit/push and required CI next |
-| Next exact action | Explicitly stage the A09 docs/test/ledger files, create and push the A09 verification checkpoint, then wait for all required CI checks on that exact SHA. |
+| Last completed | A09 locally verified; correction commit/push and required CI next |
+| Next exact action | Explicitly stage the bounded decoded-frame correction and ledger, push the A09 correction checkpoint, then wait for all required CI checks on that exact SHA. |
 | Branch | `actor-transport-refactor` (created locally from verified base) |
 | Base SHA | `71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
 | Local HEAD | `bf6fed2` before A09 |
@@ -66,7 +66,7 @@ Implement the complete per-slot, single-threaded, non-blocking 7709 `ConnectionA
 | A06 | A05 | DONE | FIFO pool leases, pin, rollback, shared push |
 | A07 | A06 | DONE | Reopen, fatal, finalizer, diagnostics |
 | A08 | A07 | DONE | Cross-platform matrix, stress, soak, performance |
-| A09 | A08 | IN_PROGRESS | Docs, cleanup, full verification, FINAL delivery |
+| A09 | A08 | IN_PROGRESS | Docs, cleanup, full verification, FINAL delivery (decoded-frame correction pending) |
 
 Allowed status values: `PENDING`, `IN_PROGRESS`, `DONE`, `BLOCKED`. At most one checkpoint may be `IN_PROGRESS`.
 
@@ -158,8 +158,8 @@ Allowed status values: `PENDING`, `IN_PROGRESS`, `DONE`, `BLOCKED`. At most one 
 - Status: `DONE`
 - Owned files: architecture/API/debug/changelog docs, MkDocs nav, CI follow-up test correction, final review evidence, and this ledger
 - Required commands: fresh full pytest/build/MkDocs strict/stress audit; complete base..HEAD review; A09 push; all required CI green before FINAL
-- Acceptance evidence: fresh full suite 182 passed in 12.65s; `python -m build` and `python -m mkdocs build --strict` passed; full base..HEAD file inventory and forbidden-path/no-skip/no-background-process audit completed
-- Commit: this A09 verification checkpoint
+- Acceptance evidence: initial A09 commit `9755ee5` passed locally but Linux CI exposed decoded-frame budget loss under push flood; correction preserves a bounded 1,024-frame generation queue and consumes it across 64-frame fairness slices; targeted 28 passed in 11.00s, fresh full suite 182 passed in 11.95s, build and strict docs passed
+- Commit: this A09 correction commit
 - Trailer: `Actor-Checkpoint: A09`
 
 ## A08 Performance And Stress Evidence
@@ -230,6 +230,8 @@ Benchmark environment: Windows 11 10.0.26200 AMD64, CPython 3.12.6, Intel i5-134
 | 2026-07-14 15:33 +08:00 | Windows 11 10.0.26200 AMD64 | CPython 3.12.6 | A08 | `python -m mkdocs build --strict` | PASS | Strict documentation build succeeded. |
 | 2026-07-14 15:39 +08:00 | Windows 11 10.0.26200 AMD64 | CPython 3.12.6 | A09 | `python -m pytest -q` | PASS: 182 passed in 12.65s | Fresh uninterrupted final local suite; no skips or xfails. |
 | 2026-07-14 15:39 +08:00 | Windows 11 10.0.26200 AMD64 | CPython 3.12.6 | A09 | `python -m build` and `python -m mkdocs build --strict` | PASS | Built sdist/wheel and strict docs after transport documentation update. |
+| 2026-07-14 16:00 +08:00 | Windows 11 10.0.26200 AMD64 | CPython 3.12.6 | A09 correction | `python -m pytest -q` | PASS: 182 passed in 11.95s | Fixed CI-discovered decoded-frame budget loss; flood/Actor/stress targeted matrix also passed 28 tests. |
+| 2026-07-14 16:00 +08:00 | Windows 11 10.0.26200 AMD64 | CPython 3.12.6 | A09 correction | `python -m build` and `python -m mkdocs build --strict` | PASS | Fresh post-fix package and documentation verification. |
 
 ## Open Decisions
 
