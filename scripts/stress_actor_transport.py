@@ -290,29 +290,57 @@ def run_close_samples(samples: int, *, pool_size: int = 4, loaded: bool = False)
     }
 
 
-def run_heartbeat_impact(requests: int) -> dict[str, Any]:
+def run_heartbeat_impact(requests: int, *, trials: int = 3) -> dict[str, Any]:
+    if trials < 3 or trials % 2 == 0:
+        raise ValueError("heartbeat impact trials must be an odd number >= 3")
+
     def run(interval: float | None) -> dict[str, Any]:
         with StressServer(response_delay=0.001) as server:
             pool = PooledSocketTransport(
                 hosts=[server.host], timeout=10, pool_size=4, heartbeat_interval=interval, max_pending_requests=256
             )
-            started = time.perf_counter()
+            pool.connect()
             with ThreadPoolExecutor(max_workers=100) as executor:
+                warmup = list(
+                    executor.map(
+                        lambda _: pool.execute(TYPE_SECURITY_COUNT, {"market": "sz"}),
+                        range(min(500, max(100, requests // 10))),
+                    )
+                )
+                heartbeat_before = server.heartbeat_requests
+                started = time.perf_counter()
                 values = list(executor.map(lambda _: pool.execute(TYPE_SECURITY_COUNT, {"market": "sz"}), range(requests)))
-            elapsed = time.perf_counter() - started
-            if any(value != 23285 for value in values):
+                elapsed = time.perf_counter() - started
+            if any(value != 23285 for value in warmup) or any(value != 23285 for value in values):
                 raise AssertionError("heartbeat workload response mismatch")
             pool.close()
             return {
                 "seconds": round(elapsed, 6),
                 "throughput_rps": round(requests / elapsed, 3),
-                "heartbeat_requests": server.heartbeat_requests,
+                "heartbeat_requests": server.heartbeat_requests - heartbeat_before,
             }
 
-    baseline = run(None)
-    active = run(0.01)
+    samples: dict[str, list[dict[str, Any]]] = {"without_heartbeat": [], "with_heartbeat": []}
+    for trial in range(trials):
+        intervals = (None, 0.01) if trial % 2 == 0 else (0.01, None)
+        for interval in intervals:
+            key = "without_heartbeat" if interval is None else "with_heartbeat"
+            samples[key].append(run(interval))
+
+    def summarize(values: list[dict[str, Any]]) -> dict[str, Any]:
+        return {
+            "seconds": round(statistics.median(item["seconds"] for item in values), 6),
+            "throughput_rps": round(statistics.median(item["throughput_rps"] for item in values), 3),
+            "heartbeat_requests": max(item["heartbeat_requests"] for item in values),
+            "heartbeat_requests_total": sum(item["heartbeat_requests"] for item in values),
+            "samples": values,
+        }
+
+    baseline = summarize(samples["without_heartbeat"])
+    active = summarize(samples["with_heartbeat"])
     return {
         "requests": requests,
+        "trials": trials,
         "without_heartbeat": baseline,
         "with_heartbeat": active,
         "throughput_ratio": round(active["throughput_rps"] / baseline["throughput_rps"], 6),

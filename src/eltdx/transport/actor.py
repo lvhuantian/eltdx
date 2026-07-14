@@ -168,6 +168,7 @@ class ActorRuntime:
     socket_factory: SocketFactory = socket.socket
     push_buffer: PushBuffer | None = None
     heartbeat_interval: float | None = None
+    heartbeat_allowed: Callable[[], bool] | None = None
     request_timeout: float = 8.0
     owns_push_buffer: bool = True
     fatal_callback: Callable[[ActorRuntime, BaseException], None] | None = None
@@ -224,6 +225,7 @@ def start_actor(
     socket_factory: SocketFactory = socket.socket,
     push_buffer: PushBuffer | None = None,
     heartbeat_interval: float | None = None,
+    heartbeat_allowed: Callable[[], bool] | None = None,
     request_timeout: float = 8.0,
     owns_push_buffer: bool = True,
     fatal_callback: Callable[[ActorRuntime, BaseException], None] | None = None,
@@ -236,6 +238,7 @@ def start_actor(
         socket_factory=socket_factory,
         push_buffer=push_buffer,
         heartbeat_interval=heartbeat_interval,
+        heartbeat_allowed=heartbeat_allowed,
         request_timeout=request_timeout,
         owns_push_buffer=owns_push_buffer,
         fatal_callback=fatal_callback,
@@ -815,7 +818,11 @@ def _schedule_heartbeat(runtime: ActorRuntime) -> None:
     with runtime.control_lock:
         if runtime.pending_task is not None or runtime.cancel_request is not None:
             return
-    if time.monotonic() < generation.last_activity_at + interval:
+    now = time.monotonic()
+    if now < generation.last_activity_at + interval:
+        return
+    if runtime.heartbeat_allowed is not None and not runtime.heartbeat_allowed():
+        generation.last_activity_at = now
         return
     ticket = RequestTicket(
         runtime_epoch=runtime.runtime_epoch,

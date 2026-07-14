@@ -11,7 +11,7 @@ from actor_support import Scripted7709Server, handshake_payload, read_request, r
 from eltdx.exceptions import ConnectionClosedError, PoolBusyError
 from eltdx.protocol.constants import TYPE_HANDSHAKE, TYPE_SECURITY_COUNT
 from eltdx.transport import PooledSocketTransport
-from eltdx.transport.pool import LeaseBroker
+from eltdx.transport.pool import HeartbeatAdmissionGuard, LeaseBroker
 from eltdx.transport import socket as socket_module
 
 
@@ -55,6 +55,25 @@ def test_lease_broker_assigns_waiters_fifo_and_releases_exactly_once() -> None:
     assert snapshot.idle_slots == 1
     assert snapshot.waiter_count == 0
     assert snapshot.active_leases == 0
+
+
+def test_pooled_heartbeat_guard_defers_for_business_pressure() -> None:
+    broker = LeaseBroker(1, pool_size=1, max_pending_requests=4)
+    guard = HeartbeatAdmissionGuard(broker)
+
+    assert guard()
+    lease = broker.acquire(time.monotonic() + 1)
+    assert not guard()
+    assert broker.release(lease)
+    assert guard()
+
+    pinned = broker.acquire(time.monotonic() + 1, pinned=True)
+    assert guard()
+    broker.reserve_pin_waiter()
+    assert not guard()
+    broker.release_pin_waiter()
+    assert guard()
+    assert broker.release(pinned)
 
 
 def test_pool_uses_first_idle_slot_instead_of_queueing_behind_slow_slot() -> None:

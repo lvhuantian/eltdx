@@ -30,16 +30,16 @@ Implement the complete per-slot, single-threaded, non-blocking 7709 `ConnectionA
 | Spec revision | 1.0 |
 | Spec SHA256 | `C13F9F551CDE202B48B3C1CD7307C2CD31B65DBBA255247D822A444B813CDF61` revalidated 2026-07-14 12:52 +08:00 |
 | Current checkpoint | A09 |
-| Last completed | A09 locally verified; correction commit/push and required CI next |
-| Next exact action | Explicitly stage the bounded decoded-frame correction and ledger, push the A09 correction checkpoint, then wait for all required CI checks on that exact SHA. |
+| Last completed | A09 locally verified after adding the weak Broker heartbeat admission guard and warmed, order-alternated multi-trial benchmark; additive correction commit/push/CI next |
+| Next exact action | Explicitly stage the seven A09 correction files, commit with `Actor-Checkpoint: A09`, push normally, and wait for all required CI on that exact SHA before FINAL. |
 | Branch | `actor-transport-refactor` (created locally from verified base) |
 | Base SHA | `71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
-| Local HEAD | `bf6fed2` before A09 |
-| Remote HEAD | work branch `bf6fed2`; `origin/main=71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
-| Push state | A08 pushed normally; its Windows jobs passed and all Ubuntu jobs exposed the same fixed push-flood harness lifetime issue; A09 push pending |
+| Local HEAD | `c2c4eb0135c4e05e11f72766faa33a83ea52df99` before the heartbeat correction |
+| Remote HEAD | work branch `c2c4eb0135c4e05e11f72766faa33a83ea52df99`; `origin/main=71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
+| Push state | A09 correction `c2c4eb0` pushed normally; locally verified additive A09 correction pending commit/push |
 | Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), OPEN and draft |
-| CI state | run `29307148534` queued/running for Ubuntu CPython 3.10-3.13 at A00 head; Pages run `29307148575` in progress |
-| Current owner | active Goal thread `019f5ef5-6ebb-7291-89ed-6b55c6bb5992` |
+| CI state | `c2c4eb0` CI run `29316661894` SUCCESS on Ubuntu 3.10-3.13 and Windows 3.11/3.13; Pages run `29316661904` build SUCCESS |
+| Current owner | active Goal thread `019f6032-ec69-7d01-89d6-74956c49f7a6` |
 
 ## Architecture Invariants
 
@@ -66,7 +66,7 @@ Implement the complete per-slot, single-threaded, non-blocking 7709 `ConnectionA
 | A06 | A05 | DONE | FIFO pool leases, pin, rollback, shared push |
 | A07 | A06 | DONE | Reopen, fatal, finalizer, diagnostics |
 | A08 | A07 | DONE | Cross-platform matrix, stress, soak, performance |
-| A09 | A08 | IN_PROGRESS | Docs, cleanup, full verification, FINAL delivery (decoded-frame correction pending) |
+| A09 | A08 | DONE | Docs, cleanup, full verification, decoded-frame and heartbeat-pressure corrections |
 
 Allowed status values: `PENDING`, `IN_PROGRESS`, `DONE`, `BLOCKED`. At most one checkpoint may be `IN_PROGRESS`.
 
@@ -156,10 +156,10 @@ Allowed status values: `PENDING`, `IN_PROGRESS`, `DONE`, `BLOCKED`. At most one 
 ### A09
 
 - Status: `DONE`
-- Owned files: architecture/API/debug/changelog docs, MkDocs nav, CI follow-up test correction, final review evidence, and this ledger
+- Owned files: architecture/API/debug/changelog docs, MkDocs nav, CI follow-up test corrections, Actor/pool/socket heartbeat admission guard, final review evidence, and this ledger
 - Required commands: fresh full pytest/build/MkDocs strict/stress audit; complete base..HEAD review; A09 push; all required CI green before FINAL
-- Acceptance evidence: initial A09 commit `9755ee5` passed locally but Linux CI exposed decoded-frame budget loss under push flood; correction preserves a bounded 1,024-frame generation queue and consumes it across 64-frame fairness slices; targeted 28 passed in 11.00s, fresh full suite 182 passed in 11.95s, build and strict docs passed
-- Commit: this A09 correction commit
+- Acceptance evidence: initial A09 commit `9755ee5` passed locally but Linux CI exposed decoded-frame budget loss under push flood; `c2c4eb0` fixed the bounded frame queue and passed all required CI. Fresh resume verification then exposed a noisy single-sample heartbeat benchmark and the missing pool-pressure guard. The final correction uses a Broker weak reference to defer pooled heartbeat under business pressure; targeted 40 passed, final heavy stress passed, fresh full suite 183 passed, build and strict docs passed.
+- Commit: this additive A09 heartbeat correction commit
 - Trailer: `Actor-Checkpoint: A09`
 
 ## A08 Performance And Stress Evidence
@@ -179,6 +179,15 @@ Paired 5ms workload uses the unchanged A01 benchmark script SHA256 `27F80ADE3121
 | pool 4, concurrency 100, 100,000 requests | 682.586 req/s | 654.552 req/s | 95.89% |
 
 The 1ms loopback diagnostic remains retained for timer-sensitivity audit: final new artifact SHA256 `DDCA90A7ABDA152E53D3D4C9F97447F10DD8E67E60C8AAE6A6C6CE34E06D6DCD`; the Windows microbenchmark observed scheduling p50/p99 increments of approximately 0.14/0.13ms, within the 0.2ms allowance. The 1ms server sleep is deliberately not used as the throughput acceptance workload because Windows timer granularity caused large scheduling variance; it is not hidden or discarded.
+
+Post-A09 final-code stress artifact: `artifacts/actor_stress_final_v3.json`, SHA256 `4C7B593BD38EA13696599D5DB34CD895DB91D9D704F338DF08C42021F56448F9`, workload SHA256 `C11B03DC9ABE8D842B4AAEC0B03396323B5BC29795D7B48F95C4A74731BA87F3`.
+
+- 10,000 generation changes: 19.263s, one Actor identity, 10,000 accepts, stale events 0, Actor threads 0 after close, Windows handles 190 -> 206 after GC.
+- 100,000 mixed requests: 54.025s, 1,850.988 req/s, server max active exactly 4, stale events 0, waiter/lease/Actor counts all 0 after close, handles 204 -> 205 after GC.
+- Close p99: idle 2.0864ms, loaded 1.9982ms. Idle process CPU ratio: 0.
+- Warmed, order-alternated heartbeat benchmark: three 10,000-request trials per condition, median ratio 1.018972; maximum per-trial heartbeats 4 (0.04%) and total 7 across 30,000 requests.
+
+Post-A09 final-code 5ms artifact: `artifacts/actor_performance_5ms_final_v2.json`, SHA256 `6909B7EDD5E30209F2DEEAC8187DA671C69411836CC20849ED9EAC41D36D840C`. Against the unchanged old artifact, sequential throughput is 98.454% and pool4/concurrency100 throughput is 96.445%; sequential p50/p99 deltas are 0.1017/0.1421ms and server concurrency is exactly 1/4.
 
 ## A01 Baseline Evidence
 
@@ -232,6 +241,11 @@ Benchmark environment: Windows 11 10.0.26200 AMD64, CPython 3.12.6, Intel i5-134
 | 2026-07-14 15:39 +08:00 | Windows 11 10.0.26200 AMD64 | CPython 3.12.6 | A09 | `python -m build` and `python -m mkdocs build --strict` | PASS | Built sdist/wheel and strict docs after transport documentation update. |
 | 2026-07-14 16:00 +08:00 | Windows 11 10.0.26200 AMD64 | CPython 3.12.6 | A09 correction | `python -m pytest -q` | PASS: 182 passed in 11.95s | Fixed CI-discovered decoded-frame budget loss; flood/Actor/stress targeted matrix also passed 28 tests. |
 | 2026-07-14 16:00 +08:00 | Windows 11 10.0.26200 AMD64 | CPython 3.12.6 | A09 correction | `python -m build` and `python -m mkdocs build --strict` | PASS | Fresh post-fix package and documentation verification. |
+| 2026-07-14 18:41 +08:00 | Windows 11 10.0.26200 AMD64 | CPython 3.12.6 | A09 resume | `python -m pytest -q`; `python -m build`; `python -m mkdocs build --strict` | FAIL: 181 passed, 1 failed; build/docs PASS | Single sequential heartbeat throughput sample was 0.828189; five diagnostic repeats ranged 0.970430-1.163034, proving the timing assertion is not a stable 1% measurement. |
+| 2026-07-14 18:48 +08:00 | Windows 11 10.0.26200 AMD64 | CPython 3.12.6 | A09 heartbeat correction | `python -m pytest -q tests/test_transport_pool.py tests/test_transport_actor.py tests/test_socket_transport.py tests/test_transport_stress.py` | PASS: 40 passed in 31.66s | Weak Broker guard, Actor/socket, push flood, close and warmed three-trial heartbeat benchmark. |
+| 2026-07-14 18:49 +08:00 | Windows 11 10.0.26200 AMD64 | CPython 3.12.6 | A09 final stress | `python scripts/stress_actor_transport.py --generations 10000 --requests 100000 --pool-size 4 --concurrency 100 --close-samples 100 --heartbeat-requests 10000 --idle-seconds 0.5 --output artifacts/actor_stress_final_v3.json` | PASS in 115.2s | Final-code 10k/100k/resource/close/heartbeat/idle artifact and hashes recorded above. |
+| 2026-07-14 18:52 +08:00 | Windows 11 10.0.26200 AMD64 | CPython 3.12.6 | A09 final local | `python -m pytest -q`; `python -m build`; `python -m mkdocs build --strict` | PASS: 183 passed in 24.98s; build/docs PASS | Fresh uninterrupted post-correction suite; no skips or xfails. |
+| 2026-07-14 18:53 +08:00 | Windows 11 10.0.26200 AMD64 | CPython 3.12.6 | A09 final performance | A01 `run_case` workload, 5ms, pool1/concurrency1/10k and pool4/concurrency100/100k | PASS in 212.8s | Final-code ratios 98.454% and 96.445%; artifact/hash recorded above. |
 
 ## Open Decisions
 
@@ -264,15 +278,16 @@ Bootstrap inspection found no additional dirty repository paths. Pre-existing Py
 | real closed-loopback port produced no Windows selector event and `SO_ERROR=0` until deadline | 1 | 2026-07-14 13:12 +08:00 | isolated with direct `connect_ex`/selector probe; firewall drops refusal | use selectable real fd with injected `ECONNREFUSED` for deterministic SO_ERROR branch, plus separate real loopback success test; resolved |
 | legacy tests monkeypatched obsolete slot `execute()` instead of lease-aware wire entry | 2 | 2026-07-14 13:53-14:00 +08:00 | pool and resource tests failed against intentional scheduler replacement | replaced with Broker/real-socket behavior tests and lease-aware resource stub; resolved |
 | initial A07 lifecycle pytest produced no output and outlived tool timeout | 1 | 2026-07-14 14:15 +08:00 | verbose replay localized missing pool runtime-guard initialization; timed-out child PID 18124 was explicitly terminated | fixed guard placement, reran deterministic suite green, and process audit found no pytest/Actor residue |
+| heartbeat throughput ratio `0.828189 < 0.95` in fresh A09 full suite | 1 | 2026-07-14 18:41 +08:00 | five repeats ranged 0.970430-1.163034; warmed three-pair prototype was 0.981280 with 11-17 heartbeats per 5,000 requests; Actor only observed its mailbox and not Broker pressure | resolved by weak Broker admission guard plus warmed, order-alternated multi-trial benchmark; final heavy ratio 1.018972 and full suite green |
 
 ## Remote Synchronization
 
 | Item | State | Evidence |
 | --- | --- | --- |
 | `git fetch` | complete | `git fetch --prune origin` succeeded 2026-07-14 12:51 +08:00; `origin/main` matches base |
-| work branch push | A00 complete; sync push pending | PR head confirmed at `f0168688f8d1ac26f00291e69bb4717b3d3aed77` |
+| work branch push | A09 correction complete; next correction pending | PR head and remote branch confirmed at `c2c4eb0135c4e05e11f72766faa33a83ea52df99` |
 | draft PR | OPEN, draft | https://github.com/electkismet/eltdx/pull/12 |
-| CI | in progress | https://github.com/electkismet/eltdx/actions/runs/29307148534 (Ubuntu Python 3.10-3.13) |
+| CI | A09 correction green | https://github.com/electkismet/eltdx/actions/runs/29316661894 (Ubuntu Python 3.10-3.13, Windows 3.11/3.13) |
 
 ## Resume Checklist
 
@@ -289,13 +304,13 @@ Bootstrap inspection found no additional dirty repository paths. Pre-existing Py
 
 ## Finalization Checklist
 
-- [ ] A00-A09 are DONE with evidence.
-- [ ] Full local test/build/docs/stress matrix is green.
-- [ ] Required Windows and Ubuntu CI is green.
-- [ ] Resource, response-attribution, timeout, close, and performance gates pass.
-- [ ] No skipped/xfail/flaky critical test remains.
-- [ ] No background test/server/Actor remains.
-- [ ] Full base-to-HEAD diff is reviewed.
+- [x] A00-A09 are DONE with evidence.
+- [x] Full local test/build/docs/stress matrix is green.
+- [ ] Required Windows and Ubuntu CI is green on the pending additive A09 correction SHA.
+- [x] Resource, response-attribution, timeout, close, and performance gates pass.
+- [x] No skipped/xfail/flaky critical test remains.
+- [x] No background test/server/Actor remains.
+- [x] Full base-to-HEAD diff is reviewed.
 - [ ] Work branch and remote HEAD match.
 - [ ] Draft PR is current and remains unmerged.
 - [ ] A09 verification checkpoint is committed, pushed, and required CI is green.

@@ -53,5 +53,6 @@ def test_idle_actor_blocks_and_heartbeat_defers_under_continuous_work() -> None:
     impact = run_heartbeat_impact(5000)
 
     assert idle["cpu_ratio"] < 0.1
+    assert impact["trials"] == 3
     assert impact["with_heartbeat"]["heartbeat_requests"] < impact["requests"] // 100
     assert impact["throughput_ratio"] >= 0.95

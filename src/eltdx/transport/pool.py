@@ -216,6 +216,17 @@ class LeaseBroker:
                 closed=self._closed,
             )
 
+    def allows_heartbeat(self) -> bool:
+        with self._condition:
+            if self._closed or self._pin_waiters:
+                return False
+            if any(waiter.state is AdmissionState.WAITING for waiter in self._waiters):
+                return False
+            return not any(
+                lease.state is LeaseState.ACTIVE and not lease.pinned
+                for lease in self._active_leases.values()
+            )
+
     def wait_for_waiters(self, count: int, timeout: float = 2.0) -> bool:
         with self._condition:
             return self._condition.wait_for(
@@ -247,6 +258,17 @@ class LeaseCompletion:
         broker = self._broker_ref()
         if broker is not None:
             broker.release(self._lease)
+
+
+class HeartbeatAdmissionGuard:
+    """Allow pooled heartbeats without retaining the pool scheduling core."""
+
+    def __init__(self, broker: LeaseBroker) -> None:
+        self._broker_ref = weakref.ref(broker)
+
+    def __call__(self) -> bool:
+        broker = self._broker_ref()
+        return broker is not None and broker.allows_heartbeat()
 
 
 class PoolRuntimeGuard:
@@ -746,6 +768,7 @@ class PooledSocketTransport:
                 max_bytes=self._push_queue_bytes,
             )
             broker = LeaseBroker(candidate_epoch, self._pool_size, self._max_pending_requests)
+            heartbeat_allowed = HeartbeatAdmissionGuard(broker)
             self._runtime_guard.configure(broker, push_buffer)
             guard_ref = weakref.ref(self._runtime_guard)
             for transport, endpoints in zip(self._transports, endpoint_sets):
@@ -755,6 +778,7 @@ class PooledSocketTransport:
                     endpoints=endpoints,
                     actor_fatal_callback=ActorFatalHandle(guard_ref),
                     runtime_started_callback=RuntimeRegistration(guard_ref),
+                    heartbeat_allowed=heartbeat_allowed,
                 )
         except BaseException:
             if broker is not None:

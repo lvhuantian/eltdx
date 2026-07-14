@@ -94,6 +94,7 @@ class SocketTransport:
         self._owns_push_buffer = _shared_push_buffer is None
         self._actor_fatal_callback = _actor_fatal_callback
         self._runtime_started_callback = _runtime_started_callback
+        self._heartbeat_allowed: Any = None
         self._finalizer: weakref.finalize | None = None
 
     @property
@@ -325,6 +326,7 @@ class SocketTransport:
                 endpoints,
                 push_buffer=push_buffer,
                 heartbeat_interval=self._heartbeat_interval,
+                heartbeat_allowed=self._heartbeat_allowed,
                 request_timeout=self._timeout,
                 owns_push_buffer=self._owns_push_buffer,
                 fatal_callback=self._actor_fatal_callback,
@@ -360,6 +362,7 @@ class SocketTransport:
         endpoints: tuple[ResolvedEndpoint, ...],
         actor_fatal_callback: Any = None,
         runtime_started_callback: Any = None,
+        heartbeat_allowed: Any = None,
     ) -> None:
         with self._lifecycle:
             if self._runtime is not None or self._starting:
@@ -371,6 +374,7 @@ class SocketTransport:
             self._push_buffer = push_buffer
             self._actor_fatal_callback = actor_fatal_callback
             self._runtime_started_callback = runtime_started_callback
+            self._heartbeat_allowed = heartbeat_allowed
 
     def _request_stop(self) -> None:
         with self._lifecycle:
