@@ -29,14 +29,14 @@ Implement the complete per-slot, single-threaded, non-blocking 7709 `ConnectionA
 | Status | ACTIVE |
 | Spec revision | 1.0 |
 | Spec SHA256 | `C13F9F551CDE202B48B3C1CD7307C2CD31B65DBBA255247D822A444B813CDF61` revalidated 2026-07-14 12:52 +08:00 |
-| Current checkpoint | A09 (starts after A08 commit/push) |
-| Last completed | A08 locally verified; commit/push and CI next |
-| Next exact action | Update architecture/API/debug/changelog documentation, perform base..HEAD review and fresh full verification, then push A09 and wait for required CI. |
+| Current checkpoint | A09 |
+| Last completed | A09 locally verified; commit/push and required CI next |
+| Next exact action | Explicitly stage the A09 docs/test/ledger files, create and push the A09 verification checkpoint, then wait for all required CI checks on that exact SHA. |
 | Branch | `actor-transport-refactor` (created locally from verified base) |
 | Base SHA | `71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
-| Local HEAD | `049f101` before A08 |
-| Remote HEAD | work branch `049f101`; `origin/main=71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
-| Push state | A07 pushed normally |
+| Local HEAD | `bf6fed2` before A09 |
+| Remote HEAD | work branch `bf6fed2`; `origin/main=71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
+| Push state | A08 pushed normally; its Windows jobs passed and all Ubuntu jobs exposed the same fixed push-flood harness lifetime issue; A09 push pending |
 | Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), OPEN and draft |
 | CI state | run `29307148534` queued/running for Ubuntu CPython 3.10-3.13 at A00 head; Pages run `29307148575` in progress |
 | Current owner | active Goal thread `019f5ef5-6ebb-7291-89ed-6b55c6bb5992` |
@@ -66,7 +66,7 @@ Implement the complete per-slot, single-threaded, non-blocking 7709 `ConnectionA
 | A06 | A05 | DONE | FIFO pool leases, pin, rollback, shared push |
 | A07 | A06 | DONE | Reopen, fatal, finalizer, diagnostics |
 | A08 | A07 | DONE | Cross-platform matrix, stress, soak, performance |
-| A09 | A08 | PENDING | Docs, cleanup, full verification, FINAL delivery |
+| A09 | A08 | IN_PROGRESS | Docs, cleanup, full verification, FINAL delivery |
 
 Allowed status values: `PENDING`, `IN_PROGRESS`, `DONE`, `BLOCKED`. At most one checkpoint may be `IN_PROGRESS`.
 
@@ -153,6 +153,15 @@ Allowed status values: `PENDING`, `IN_PROGRESS`, `DONE`, `BLOCKED`. At most one 
 - Commit: this A08 checkpoint commit
 - Trailer: `Actor-Checkpoint: A08`
 
+### A09
+
+- Status: `DONE`
+- Owned files: architecture/API/debug/changelog docs, MkDocs nav, CI follow-up test correction, final review evidence, and this ledger
+- Required commands: fresh full pytest/build/MkDocs strict/stress audit; complete base..HEAD review; A09 push; all required CI green before FINAL
+- Acceptance evidence: fresh full suite 182 passed in 12.65s; `python -m build` and `python -m mkdocs build --strict` passed; full base..HEAD file inventory and forbidden-path/no-skip/no-background-process audit completed
+- Commit: this A09 verification checkpoint
+- Trailer: `Actor-Checkpoint: A09`
+
 ## A08 Performance And Stress Evidence
 
 Final stress artifact: `artifacts/actor_stress_final_v2.json`, SHA256 `4955C7AAF5C1A2153F903FD4D94847D176644FE3C18D91A515E0BC1A3BBE6715`, workload SHA256 `33FEBF83A46862181784D1DC89FCBF97B0BFD0B47DBDF3DF21E16FCADFD753A6`.
@@ -219,6 +228,8 @@ Benchmark environment: Windows 11 10.0.26200 AMD64, CPython 3.12.6, Intel i5-134
 | 2026-07-14 15:33 +08:00 | Windows 11 10.0.26200 AMD64 | CPython 3.12.6 | A08 | `python -m pytest -q` | PASS: 182 passed in 13.72s | Includes deterministic stress/soak and heartbeat/idle tests; no skips or xfails. |
 | 2026-07-14 15:33 +08:00 | Windows 11 10.0.26200 AMD64 | CPython 3.12.6 | A08 | `python -m build` | PASS | Built `eltdx-1.0.2.tar.gz` and wheel. |
 | 2026-07-14 15:33 +08:00 | Windows 11 10.0.26200 AMD64 | CPython 3.12.6 | A08 | `python -m mkdocs build --strict` | PASS | Strict documentation build succeeded. |
+| 2026-07-14 15:39 +08:00 | Windows 11 10.0.26200 AMD64 | CPython 3.12.6 | A09 | `python -m pytest -q` | PASS: 182 passed in 12.65s | Fresh uninterrupted final local suite; no skips or xfails. |
+| 2026-07-14 15:39 +08:00 | Windows 11 10.0.26200 AMD64 | CPython 3.12.6 | A09 | `python -m build` and `python -m mkdocs build --strict` | PASS | Built sdist/wheel and strict docs after transport documentation update. |
 
 ## Open Decisions
 

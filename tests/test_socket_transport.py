@@ -199,7 +199,7 @@ def test_push_flood_is_bounded_and_does_not_starve_matching_response() -> None:
         for index in range(200):
             conn.sendall(_response(0x290000 + index, TYPE_REFRESH_STREAM, bytes.fromhex("9393")))
         conn.sendall(_response(msg_id, msg_type, (456).to_bytes(2, "little")))
-        release.wait(timeout=2)
+        release.wait()
 
     with Scripted7709Server([handler]) as server:
         transport = SocketTransport(
