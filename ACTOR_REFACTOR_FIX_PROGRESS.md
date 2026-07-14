@@ -12,8 +12,10 @@ The result document remains historical evidence only until FINAL rewrites it.
 | Baseline HEAD | `994c49b51f47255bdcd9cdc3308a5a554f37588b` |
 | Base | `71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
 | Branch | `actor-transport-refactor` |
-| Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), confirmed OPEN and draft at pushed HEAD `cc46e60` |
+| Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), confirmed OPEN and draft at pushed HEAD `0b8ad54` |
 | Final-review correction base | `cc46e6042e60b1d70732ae813b089f9c8b572572` |
+| Latest pushed correction checkpoint | `0b8ad54f036d852b437e9812c9fc733d8217aa62`; exact CI and Pages successful |
+| Current local follow-up | Post-checkpoint adversarial corrections verified with 296 passing tests; commit pending |
 | Baseline worktree | Clean (`git status --short --branch`) |
 | Superseded result | Existing `COMPLETE` claim and 183-test evidence |
 
@@ -36,10 +38,10 @@ again before FINAL evidence is accepted.
 | F01 receive ordering and boundaries | COMPLETE (`8aa089d`) | Sequence boundary, full-send gate, pre-send drain, heartbeat gate, partial-tail handling, and unified receive failure path |
 | F02 request identity and build isolation | COMPLETE (`8aa089d`) | Monotonic request ID, exact cancel, request-local build errors, strict deadline, terminal-owned slot, callback isolation |
 | F03 connect and failover | COMPLETE (`2e48be0`) | Candidate/attempt budgets, next-endpoint retry, Windows peer verification, non-busy rearm, and seven real/fault-injected regressions |
-| F04 Broker and pinned leases | COMPLETE (`117b8c6`), final-review corrections pending checkpoint | Per-waiter Event, exact lease/ticket cancellation, FIFO admission, monotonic pinned close, deadline-valid assignment, and capacity preservation |
-| F05 lifecycle and shutdown | COMPLETE (`117b8c6`), final-review corrections pending checkpoint | Candidate ownership, epoch guard, submission/retire gate, single shutdown attempt, rollback ownership, cleanup-error retention, and monotonic failed-close states |
-| F06 stress, performance, resources, compatibility | COMPLETE (`0955a8e`, resource correction `cc46e60`); evidence superseded for FINAL | Unique wire nonce/provenance, two servers, warmed resource plateau, strict heartbeat gate, and reproducible baseline source root; production changes after `cc46e60` require fresh artifacts |
-| Final-review correctness correction | IMPLEMENTED; checkpoint pending | DNS preflight/host fallback, startup resource ownership, Broker/pin deadline and wake-close races, pool-connect admission/epoch identity, and `CommandSpec` compatibility; full local suite 270 passed |
+| F04 Broker and pinned leases | COMPLETE (`117b8c6`, correction `0b8ad54`); post-review follow-up commit pending | Per-waiter Event, exact lease/ticket cancellation, FIFO admission, close broadcast to every pin-local waiter, and failed-pin capacity recovery |
+| F05 lifecycle and shutdown | COMPLETE (`117b8c6`, correction `0b8ad54`); post-review follow-up commit pending | Candidate ownership, epoch guard, single close owner, exact resource retention, best-effort cleanup, and monotonic failed-close states |
+| F06 stress, performance, resources, compatibility | COMPLETE (`0955a8e`, resource correction `cc46e60`); schema follow-up commit and fresh FINAL evidence pending | Unique provenance, two servers, warmed plateau, strict aggregate heartbeat gate, and exact resource snapshots; production changes require fresh artifacts |
+| Final-review correctness correction | PUSHED (`0b8ad54`); adversarial follow-up VERIFIED, commit pending | DNS/host fallback, startup and socket ownership, Broker/pin races, close-owner cleanup, pool-connect identity, and `CommandSpec` compatibility; latest full local suite 296 passed |
 | FINAL independent review and CI | PENDING | Two clean adversarial reviews; local matrix/build/docs and exact-HEAD CI/Pages green |
 
 ## Confirmed Blockers
@@ -162,6 +164,27 @@ exact-source performance artifacts remain to be generated after checkpointing.
 | 2026-07-15 | New DNS/cleanup/Broker/pin/pool-connect node regressions | All targeted nodes passed, including delayed Event close races, expired handoffs, all-slot connect admission, old/new Broker identity, resolver generations, and post-close heartbeat stability |
 | 2026-07-15 | `python -m pytest -q` after final-review corrections | **270 passed in 74.06s** |
 | 2026-07-15 | Independent correctness re-review of current correction worktree | CLEAN for code: reproduced races closed; compile/diff checks passed; result/evidence still pending exact new SHA |
+| 2026-07-15 | Exact pushed `0b8ad54` PR checks | CI run `29357246798` passed Ubuntu 3.10-3.13 and Windows 3.11/3.13; Pages run `29357250104` passed |
+| 2026-07-15 | Post-`0b8ad54` adversarial red probes | Reproduced pin-local waiter stranding, assigned-before-wire FAILED lease loss, invalid numeric-port Actor fatal, facade/unpublished Push cleanup loss, callback/selector cleanup suppression, snapshot/notify/startup-wait close-owner escapes, and late-candidate stop loss |
+| 2026-07-15 | Post-review deterministic regression nodes after fixes | Pin/host/cleanup/owner exact nodes all passed; full Actor/Socket/Pool/lifecycle/resources matrix **164 passed in 7.26s** |
+| 2026-07-15 | Cleanup/close-owner independent re-review | CLEAN: exact owned buffers, deferred non-Push errors, multi-runtime best-effort stop/close, late candidates, and every owner exception boundary re-probed |
+| 2026-07-15 | Pin/host independent re-review | CLEAN: 600 reserve/close and release/close race rounds, exact Event unregister, FAILED lease auto-release, FIFO, ports 0/1/65535/65536/99999, mixed resolve, and bracketed IPv6 probe |
+| 2026-07-15 | First expanded full suite | **295 passed, 1 failed**; only strict heartbeat aggregate ratio `0.987068 < 0.99`, with zero timed wire heartbeats; acceptance remained open |
+| 2026-07-15 | Heartbeat measurement and production correction | Counterbalanced odd/even phase positions; active business now exits `_schedule_heartbeat` before heartbeat-only reads; aggregate elapsed ratio remains the strict `>0.99` gate and block median is diagnostic only |
+| 2026-07-15 | Strict heartbeat test after hot-path correction | PASS; independent aggregate sample `1.000357`, zero timed wire heartbeats |
+| 2026-07-15 | `python -m compileall -q src tests scripts` and `git diff --check` | PASS |
+| 2026-07-15 | Latest `python -m pytest -q` | **296 passed in 71.29s** |
+
+Post-`0b8ad54` corrections make Broker close broadcast every independently
+registered pin waiter Event without retaining proxies. A delayed assigned caller
+that never creates `PinCompletion` now releases a FAILED exact lease itself.
+Socket close owns every facade/runtime/candidate PushBuffer identity, preserves
+the first deferred non-Push cleanup error, and guards every exception after the
+close-owner bit is published. Invalid ports are rejected before DNS/Actor work,
+and bracketed IPv6 probe addresses are canonicalized consistently with resolve.
+The stress schema now binds close snapshots to the exact returned ticket and
+resources, records configured/high-water Push limits and endpoint provenance,
+and uses token-bound keep-open ownership.
 
 F03 preserves the public absolute deadline and assigns only private candidate
 and first-attempt sub-deadlines. Handshake timeout/EOF, partial business send,

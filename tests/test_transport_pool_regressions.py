@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import errno
+import gc
 import socket
 import threading
 import time
+import weakref
 
 import pytest
 
@@ -14,7 +16,7 @@ from eltdx.transport import socket as socket_module
 from eltdx.transport.actor import cancel_ticket
 from eltdx.transport import actor as actor_module
 from eltdx.transport import pool as pool_module
-from eltdx.transport.pool import LeaseBroker, PinWaiter, PinnedTransportProxy, PooledSocketTransport
+from eltdx.transport.pool import LeaseBroker, PinCompletion, PinWaiter, PinnedTransportProxy, PooledSocketTransport
 from eltdx.transport.push import PushBuffer
 
 
@@ -75,6 +77,26 @@ class BlockingSetEvent:
     def set(self) -> None:
         self._set_entered.set()
         assert self._allow_set.wait(timeout=2)
+        self._event.set()
+
+    def is_set(self) -> bool:
+        return self._event.is_set()
+
+
+class DelayedReturnEvent:
+    def __init__(self, return_entered: threading.Event, allow_return: threading.Event) -> None:
+        self._event = threading.Event()
+        self._return_entered = return_entered
+        self._allow_return = allow_return
+
+    def wait(self, timeout: float | None = None) -> bool:
+        result = self._event.wait(timeout)
+        if result:
+            self._return_entered.set()
+            assert self._allow_return.wait(timeout=2)
+        return result
+
+    def set(self) -> None:
         self._event.set()
 
     def is_set(self) -> bool:
@@ -349,6 +371,30 @@ def test_pinned_close_timeout_can_finish_cleanup_and_restore_capacity() -> None:
     assert (snapshot.idle_slots, snapshot.active_leases) == (1, 0)
 
 
+def test_failed_pin_completion_retains_cleanup_owner_until_terminal() -> None:
+    broker, _, _, proxy = _new_fake_proxy(timeout=0.01)
+    proxy._active_call = 1
+    completion = PinCompletion(proxy, 1)
+
+    with pytest.raises(TransportCloseTimeoutError, match="did not quiesce"):
+        proxy.close()
+    reference = weakref.ref(proxy)
+    del proxy
+    gc.collect()
+
+    assert reference() is not None
+    assert completion._proxy is reference()
+    assert (broker.snapshot().idle_slots, broker.snapshot().active_leases) == (0, 1)
+
+    completion(None)
+    gc.collect()
+
+    assert completion._proxy is None
+    assert reference() is None
+    snapshot = broker.snapshot()
+    assert (snapshot.idle_slots, snapshot.active_leases) == (1, 0)
+
+
 def test_pinned_close_releases_each_waiter_reservation_exactly_once(monkeypatch) -> None:
     broker, _, _, proxy = _new_fake_proxy(timeout=1)
     broker.reserve_pin_waiter()
@@ -360,8 +406,8 @@ def test_pinned_close_releases_each_waiter_reservation_exactly_once(monkeypatch)
     result: list[BaseException] = []
     original_release = broker.release_pin_waiter
 
-    def delayed_release() -> None:
-        original_release()
+    def delayed_release(completed=None) -> None:
+        original_release(completed)
         release_entered.set()
         assert allow_release.wait(timeout=2)
 
@@ -409,7 +455,7 @@ def test_pinned_waiter_reservation_cannot_invert_local_fifo(monkeypatch) -> None
     reserve_lock = threading.Lock()
     results: list[BaseException] = []
 
-    def controlled_reserve() -> None:
+    def controlled_reserve(completed=None) -> None:
         nonlocal reserve_calls
         with reserve_lock:
             reserve_calls += 1
@@ -419,7 +465,7 @@ def test_pinned_waiter_reservation_cannot_invert_local_fifo(monkeypatch) -> None
             assert allow_first_reserve.wait(timeout=2)
         else:
             second_reserve_entered.set()
-        original_reserve()
+        original_reserve(completed)
 
     monkeypatch.setattr(broker, "reserve_pin_waiter", controlled_reserve)
 
@@ -454,10 +500,10 @@ def test_pinned_waiter_reservation_cannot_invert_local_fifo(monkeypatch) -> None
 
 def test_pin_terminal_skips_expired_waiter_before_assigning_live_waiter() -> None:
     broker, _, _, proxy = _new_fake_proxy(timeout=1)
-    broker.reserve_pin_waiter()
-    broker.reserve_pin_waiter()
     expired = PinWaiter(2, time.monotonic() - 1, reserved=True)
     live = PinWaiter(3, time.monotonic() + 1, reserved=True)
+    broker.reserve_pin_waiter(expired.completed)
+    broker.reserve_pin_waiter(live.completed)
     proxy._active_call = 1
     proxy._call_counter = 3
     proxy._waiters.extend((expired, live))
@@ -521,6 +567,155 @@ def test_pin_close_before_assignment_wakeup_rejects_unstarted_call(monkeypatch) 
     assert proxy._active_call is None
     snapshot = broker.snapshot()
     assert (snapshot.idle_slots, snapshot.pin_waiter_count, snapshot.active_leases) == (1, 0, 0)
+
+
+def test_pool_close_wakes_all_pin_local_waiters_after_terminal() -> None:
+    broker, _, _, proxy = _new_fake_proxy(timeout=5)
+    proxy._active_call = 1
+    proxy._call_counter = 1
+    results: list[object] = []
+
+    def admit() -> None:
+        try:
+            results.append(proxy._admit(time.monotonic() + 5))
+        except BaseException as exc:
+            results.append(exc)
+
+    waiters = [threading.Thread(target=admit) for _ in range(2)]
+    for waiter in waiters:
+        waiter.start()
+    assert broker.wait_for_pin_waiters(2)
+
+    broker.close()
+    proxy._wire_terminal(1)
+    for waiter in waiters:
+        waiter.join(timeout=0.5)
+    alive_after_terminal = [waiter for waiter in waiters if waiter.is_alive()]
+    with proxy._condition:
+        remaining_waiters = len(proxy._waiters)
+        active_call = proxy._active_call
+        state = proxy._state
+
+    if alive_after_terminal:
+        proxy.close()
+        for waiter in waiters:
+            waiter.join(timeout=2)
+
+    assert not alive_after_terminal
+    assert len(results) == 2
+    assert all(isinstance(item, ConnectionClosedError) for item in results)
+    assert remaining_waiters == 0
+    assert active_call is None
+    assert state is pool_module.PinState.CLOSED
+    snapshot = broker.snapshot()
+    assert snapshot.closed
+    assert (snapshot.idle_slots, snapshot.waiter_count, snapshot.pin_waiter_count, snapshot.active_leases) == (0, 0, 0, 0)
+
+
+def test_broker_close_wakes_queued_pin_waiter_while_assigned_consumer_is_delayed(monkeypatch) -> None:
+    broker, _, _, proxy = _new_fake_proxy(timeout=5)
+    proxy._active_call = 1
+    proxy._call_counter = 1
+    first_return_entered = threading.Event()
+    allow_first_return = threading.Event()
+    first_completed = DelayedReturnEvent(first_return_entered, allow_first_return)
+    second_completed = threading.Event()
+    completed_events = iter((first_completed, second_completed))
+    results: dict[str, object] = {}
+    second_done = threading.Event()
+
+    monkeypatch.setattr(
+        pool_module,
+        "PinWaiter",
+        lambda call_id, deadline, **kwargs: PinWaiter(
+            call_id,
+            deadline,
+            completed=next(completed_events),
+            **kwargs,
+        ),
+    )
+
+    def admit(name: str, done: threading.Event | None = None) -> None:
+        try:
+            results[name] = proxy._admit(time.monotonic() + 5)
+        except BaseException as exc:
+            results[name] = exc
+        finally:
+            if done is not None:
+                done.set()
+
+    first = threading.Thread(target=admit, args=("first",))
+    second = threading.Thread(target=admit, args=("second", second_done))
+    first.start()
+    assert broker.wait_for_pin_waiters(1)
+    second.start()
+    assert broker.wait_for_pin_waiters(2)
+
+    proxy._wire_terminal(1)
+    assert first_return_entered.wait(timeout=2)
+    broker.close()
+    second_exited_on_broker_close = second_done.wait(timeout=0.5)
+
+    allow_first_return.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    assert second_exited_on_broker_close
+    assert not first.is_alive() and not second.is_alive()
+    assert isinstance(results["first"], ConnectionClosedError)
+    assert isinstance(results["second"], ConnectionClosedError)
+    with proxy._condition:
+        assert proxy._active_call is None
+        assert not proxy._waiters
+        assert proxy._state is pool_module.PinState.CLOSED
+
+
+def test_failed_pin_releases_lease_when_assigned_consumer_never_started_wire(monkeypatch) -> None:
+    broker, lease, _, proxy = _new_fake_proxy(timeout=0.02)
+    proxy._active_call = 1
+    proxy._call_counter = 1
+    return_entered = threading.Event()
+    allow_return = threading.Event()
+    completed = DelayedReturnEvent(return_entered, allow_return)
+    result: list[object] = []
+
+    monkeypatch.setattr(
+        pool_module,
+        "PinWaiter",
+        lambda call_id, deadline, **kwargs: PinWaiter(call_id, deadline, completed=completed, **kwargs),
+    )
+
+    def admit() -> None:
+        try:
+            result.append(proxy._admit(time.monotonic() + 2))
+        except BaseException as exc:
+            result.append(exc)
+
+    waiter = threading.Thread(target=admit)
+    waiter.start()
+    assert broker.wait_for_pin_waiters(1)
+    proxy._wire_terminal(1)
+    assert return_entered.wait(timeout=2)
+
+    with pytest.raises(TransportCloseTimeoutError, match="did not quiesce"):
+        proxy.close()
+    assert proxy._state is pool_module.PinState.FAILED
+    assert proxy._active_call == 2
+    assert (broker.snapshot().idle_slots, broker.snapshot().active_leases) == (0, 1)
+
+    allow_return.set()
+    waiter.join(timeout=2)
+    snapshot = broker.snapshot()
+    leaked = (snapshot.idle_slots, snapshot.active_leases) != (1, 0)
+    if leaked:
+        proxy.close()
+
+    assert not waiter.is_alive()
+    assert len(result) == 1 and isinstance(result[0], ConnectionClosedError)
+    assert proxy._active_call is None
+    assert proxy._state is pool_module.PinState.CLOSED
+    assert not leaked
+    assert lease.state is pool_module.LeaseState.RELEASED
 
 
 class BlockingConnectSlot(FakePinnedSlot):

@@ -9,8 +9,8 @@ import time
 import pytest
 
 from actor_support import Scripted7709Server, handshake_payload, read_request, response_bytes
-from eltdx.exceptions import ConnectionClosedError, ResponseTimeoutError
-from eltdx.hosts import resolve_host, resolve_hosts
+from eltdx.exceptions import ConnectionClosedError, ResponseTimeoutError, TransportCloseTimeoutError
+from eltdx.hosts import normalize_host, probe_host, resolve_host, resolve_hosts
 from eltdx.protocol.commands import parse_command_response
 from eltdx.protocol.constants import TYPE_HANDSHAKE, TYPE_SECURITY_COUNT
 from eltdx.transport.actor import (
@@ -67,6 +67,61 @@ def test_numeric_endpoint_resolution_never_calls_blocking_dns(monkeypatch) -> No
     assert endpoint.sockaddr == ("127.0.0.1", 7709)
 
 
+@pytest.mark.parametrize(
+    ("host", "normalized"),
+    [
+        ("127.0.0.1:0", None),
+        ("127.0.0.1:1", "127.0.0.1:1"),
+        ("127.0.0.1:65535", "127.0.0.1:65535"),
+        ("127.0.0.1:65536", None),
+        ("127.0.0.1:99999", None),
+        ("[::1]:00080", "[::1]:80"),
+    ],
+)
+def test_host_port_normalization_boundaries(host: str, normalized: str | None) -> None:
+    assert normalize_host(host) == normalized
+
+
+def test_probe_bracketed_ipv6_uses_unbracketed_socket_address(monkeypatch) -> None:
+    captured: list[tuple[tuple[str, int], float]] = []
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback) -> None:
+            return None
+
+    def create_connection(address, timeout):
+        captured.append((address, timeout))
+        return Connection()
+
+    monkeypatch.setattr(socket, "create_connection", create_connection)
+
+    result = probe_host("[::1]:7709", timeout=0.25)
+
+    assert result.ok and result.host == "[::1]:7709"
+    assert captured == [(('::1', 7709), 0.25)]
+
+
+def test_invalid_port_never_reaches_dns_or_probe_socket(monkeypatch) -> None:
+    resolve_host.cache_clear()
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("DNS called")))
+    monkeypatch.setattr(
+        socket,
+        "create_connection",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("socket probe called")),
+    )
+
+    with pytest.raises(ValueError, match="invalid host"):
+        resolve_host("127.0.0.1:65536")
+    endpoints = resolve_hosts(["127.0.0.1:65536", "127.0.0.1:9"])
+    result = probe_host("127.0.0.1:65536")
+
+    assert [endpoint.host for endpoint in endpoints] == ["127.0.0.1:9"]
+    assert not result.ok and result.error == "invalid host"
+
+
 def test_actor_startup_register_failure_closes_selector_and_wakeup_pair(monkeypatch) -> None:
     selectors_created: list[FailingRegisterSelector] = []
     sockets_created: list[socket.socket] = []
@@ -111,6 +166,56 @@ def test_actor_startup_register_failure_closes_selector_and_wakeup_pair(monkeypa
     assert isinstance(runtime.fatal_error, RuntimeError)
     assert str(runtime.fatal_error) == "deterministic selector registration failure"
     assert not runtime.actor_thread.is_alive()
+
+
+def test_pre_generation_socket_close_failure_is_retained_and_surfaced() -> None:
+    created: list[FailingCandidateSocket] = []
+
+    class FailingCandidateSocket:
+        def __init__(self, *_args) -> None:
+            self.allow_close = False
+            self.closed = False
+            self.close_calls = 0
+            created.append(self)
+
+        def setblocking(self, _value: bool) -> None:
+            raise OSError("deterministic setblocking failure")
+
+        def close(self) -> None:
+            self.close_calls += 1
+            if not self.allow_close:
+                raise RuntimeError("deterministic candidate close failure")
+            self.closed = True
+
+        def fileno(self) -> int:
+            return -1 if self.closed else 73
+
+    runtime = start_actor(
+        19,
+        resolve_hosts(["127.0.0.1:9"]),
+        socket_factory=FailingCandidateSocket,
+    )
+    ticket = submit_connect(runtime, time.monotonic() + 1)
+    assert runtime.stopped.wait(timeout=2)
+    with pytest.raises(RuntimeError, match="candidate close failure"):
+        wait_ticket(ticket)
+
+    assert len(created) == 1
+    candidate = created[0]
+    assert runtime.generation is not None and runtime.generation.sock is candidate
+    assert isinstance(runtime.cleanup_error, RuntimeError)
+    assert candidate.close_calls >= 2 and candidate.fileno() == 73
+    with pytest.raises(TransportCloseTimeoutError, match="resource cleanup failed"):
+        close_actor(runtime)
+    assert runtime.generation is not None and runtime.generation.sock is candidate
+
+    candidate.allow_close = True
+    candidate.close()
+    with runtime.control_lock:
+        runtime.generation = None
+        runtime.cleanup_error = None
+    close_actor(runtime)
+    assert runtime.state is RuntimeState.FAILED_CLOSED
 
 
 def test_actor_uses_so_error_and_fails_over_to_next_host() -> None:

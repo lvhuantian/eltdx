@@ -94,7 +94,13 @@ def normalize_host(value: Any) -> str | None:
     port = port.strip()
     if not address or not port.isdigit():
         return None
-    return f"{address}:{int(port)}"
+    try:
+        port_number = int(port)
+    except ValueError:
+        return None
+    if not 1 <= port_number <= 65535:
+        return None
+    return f"{address}:{port_number}"
 
 
 def unique_hosts(values: list[Any] | tuple[Any, ...]) -> list[str]:
@@ -200,6 +206,7 @@ def probe_host(host: str, *, timeout: float = DEFAULT_PROBE_TIMEOUT) -> HostProb
         return HostProbeResult(host=str(host), ok=False, error="invalid host")
 
     address, port_text = normalized.rsplit(":", 1)
+    address = address.removeprefix("[").removesuffix("]")
     started = time.perf_counter()
     try:
         with socket.create_connection((address, int(port_text)), timeout=timeout):

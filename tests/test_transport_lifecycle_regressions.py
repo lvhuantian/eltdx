@@ -990,6 +990,341 @@ def test_thread_start_failure_closes_owned_push_buffer(monkeypatch) -> None:
     assert candidate.state is RuntimeState.FAILED_CLOSED
 
 
+def test_public_close_retries_unpublished_candidate_push_cleanup(monkeypatch) -> None:
+    buffers: list[RetryPushBuffer] = []
+
+    class RetryPushBuffer(PushBuffer):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self.allow_close = False
+            self.close_calls = 0
+            buffers.append(self)
+
+        def close(self, error=None) -> None:
+            self.close_calls += 1
+            if not self.allow_close:
+                raise RuntimeError("candidate push cleanup injection")
+            super().close(error)
+
+    def fail_start(thread) -> None:
+        raise RuntimeError("thread start injection")
+
+    monkeypatch.setattr(socket_module, "PushBuffer", RetryPushBuffer)
+    monkeypatch.setattr(actor_module.threading.Thread, "start", fail_start)
+    transport = SocketTransport(["127.0.0.1:9"], timeout=1, heartbeat_interval=None)
+
+    with pytest.raises(ActorStartupError, match="before thread startup"):
+        transport._ensure_runtime(time.monotonic() + 1)
+
+    candidate = transport._candidate
+    assert candidate is not None and candidate.push_buffer is buffers[0]
+    push = buffers[0]
+    assert push.close_calls == 1 and not push.snapshot().closed
+    with pytest.raises(TransportCloseTimeoutError, match="resource cleanup failed"):
+        transport.close()
+    assert push.close_calls == 2
+    with transport._lifecycle:
+        assert not transport._closing
+        assert transport._close_failed
+
+    push.allow_close = True
+    transport.close()
+
+    assert push.close_calls == 3 and push.snapshot().closed
+    assert candidate.cleanup_error is None
+    assert candidate.push_cleanup_error is None
+    assert candidate.state is RuntimeState.FAILED_CLOSED
+    assert transport._candidate is None and transport._runtime is candidate
+
+
+def test_push_retry_preserves_startup_callback_cleanup_failure(monkeypatch) -> None:
+    buffers: list[RetryPushBuffer] = []
+
+    class RetryPushBuffer(PushBuffer):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self.allow_close = False
+            buffers.append(self)
+
+        def close(self, error=None) -> None:
+            if not self.allow_close:
+                raise RuntimeError("candidate push cleanup injection")
+            super().close(error)
+
+    def reject_registration(_runtime: ActorRuntime) -> None:
+        raise ValueError("candidate registration injection")
+
+    def fail_fatal_callback(_runtime: ActorRuntime, _error: BaseException) -> None:
+        raise LookupError("fatal callback cleanup injection")
+
+    monkeypatch.setattr(socket_module, "PushBuffer", RetryPushBuffer)
+    transport = SocketTransport(
+        ["127.0.0.1:9"],
+        timeout=1,
+        heartbeat_interval=None,
+        _runtime_started_callback=reject_registration,
+        _actor_fatal_callback=fail_fatal_callback,
+    )
+
+    with pytest.raises(ActorStartupError, match="before thread startup"):
+        transport._ensure_runtime(time.monotonic() + 1)
+
+    candidate = transport._candidate
+    assert candidate is not None and candidate.push_buffer is buffers[0]
+    with pytest.raises(TransportCloseTimeoutError, match="resource cleanup failed"):
+        transport.close()
+
+    buffers[0].allow_close = True
+    with pytest.raises(TransportCloseTimeoutError, match="resource cleanup failed"):
+        transport.close()
+
+    assert buffers[0].snapshot().closed
+    assert isinstance(candidate.cleanup_error, LookupError)
+    assert str(candidate.cleanup_error) == "fatal callback cleanup injection"
+    assert candidate.push_cleanup_error is None
+    assert candidate.state is RuntimeState.FAILED_CLOSING
+
+    with candidate.control_lock:
+        candidate.cleanup_error = None
+        candidate.deferred_cleanup_error = None
+    transport.close()
+    assert candidate.state is RuntimeState.FAILED_CLOSED
+
+
+def test_push_snapshot_failure_cannot_strand_public_close(monkeypatch) -> None:
+    buffers: list[UnreliableSnapshotPushBuffer] = []
+
+    class UnreliableSnapshotPushBuffer(PushBuffer):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self.allow_close = False
+            self.allow_snapshot = False
+            buffers.append(self)
+
+        def close(self, error=None) -> None:
+            if not self.allow_close:
+                raise RuntimeError("candidate push cleanup injection")
+            super().close(error)
+
+        def snapshot(self):
+            if not self.allow_snapshot:
+                raise LookupError("push snapshot injection")
+            return super().snapshot()
+
+    def fail_start(thread) -> None:
+        raise RuntimeError("thread start injection")
+
+    monkeypatch.setattr(socket_module, "PushBuffer", UnreliableSnapshotPushBuffer)
+    monkeypatch.setattr(actor_module.threading.Thread, "start", fail_start)
+    transport = SocketTransport(["127.0.0.1:9"], timeout=1, heartbeat_interval=None)
+
+    with pytest.raises(ActorStartupError, match="before thread startup"):
+        transport._ensure_runtime(time.monotonic() + 1)
+    candidate = transport._candidate
+    assert candidate is not None and candidate.push_buffer is buffers[0]
+
+    with pytest.raises(TransportCloseTimeoutError, match="resource cleanup failed"):
+        transport.close()
+    with transport._lifecycle:
+        assert not transport._closing
+        assert transport._close_failed
+
+    buffers[0].allow_close = True
+    buffers[0].allow_snapshot = True
+    transport.close()
+
+    assert buffers[0].snapshot().closed
+    assert candidate.cleanup_error is None
+    assert candidate.state is RuntimeState.FAILED_CLOSED
+
+
+def test_actor_fatal_callback_failure_survives_push_cleanup_retry(monkeypatch) -> None:
+    buffers: list[RetryPushBuffer] = []
+    real_start_actor = actor_module.start_actor
+
+    class RetryPushBuffer(PushBuffer):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self.allow_close = False
+            buffers.append(self)
+
+        def close(self, error=None) -> None:
+            if not self.allow_close:
+                raise RuntimeError("actor push cleanup injection")
+            super().close(error)
+
+    def start_with_fatal_selector(*args, **kwargs):
+        kwargs["selector_factory"] = lambda: (_ for _ in ()).throw(ValueError("selector startup injection"))
+        return real_start_actor(*args, **kwargs)
+
+    def fail_fatal_callback(_runtime: ActorRuntime, _error: BaseException) -> None:
+        raise LookupError("actor fatal callback injection")
+
+    monkeypatch.setattr(socket_module, "PushBuffer", RetryPushBuffer)
+    monkeypatch.setattr(socket_module, "start_actor", start_with_fatal_selector)
+    transport = SocketTransport(
+        ["127.0.0.1:9"],
+        timeout=1,
+        heartbeat_interval=None,
+        _actor_fatal_callback=fail_fatal_callback,
+    )
+
+    with pytest.raises(ActorStartupError, match="failed during startup"):
+        transport._ensure_runtime(time.monotonic() + 1)
+    candidate = transport._candidate
+    assert candidate is not None and candidate.push_buffer is buffers[0]
+
+    with pytest.raises(TransportCloseTimeoutError, match="resource cleanup failed"):
+        transport.close()
+    buffers[0].allow_close = True
+    with pytest.raises(TransportCloseTimeoutError, match="resource cleanup failed"):
+        transport.close()
+
+    assert buffers[0].snapshot().closed
+    assert isinstance(candidate.cleanup_error, LookupError)
+    assert str(candidate.cleanup_error) == "actor fatal callback injection"
+    assert candidate.push_cleanup_error is None
+    assert candidate.state is RuntimeState.FAILED_CLOSING
+
+    with candidate.control_lock:
+        candidate.cleanup_error = None
+        candidate.deferred_cleanup_error = None
+    transport.close()
+    assert candidate.state is RuntimeState.FAILED_CLOSED
+
+
+def test_close_stop_failure_still_cleans_every_owned_runtime(monkeypatch) -> None:
+    transport = SocketTransport(["127.0.0.1:9"], timeout=1, heartbeat_interval=None)
+    runtime = ActorRuntime(1, ())
+    candidate = ActorRuntime(2, ())
+    with transport._lifecycle:
+        transport._runtime = runtime
+        transport._candidate = candidate
+    stop_calls: list[ActorRuntime] = []
+    close_calls: list[ActorRuntime] = []
+
+    def stop(item: ActorRuntime) -> None:
+        stop_calls.append(item)
+        if item is runtime:
+            raise RuntimeError("stop request injection")
+
+    monkeypatch.setattr(socket_module, "request_actor_stop", stop)
+    monkeypatch.setattr(socket_module, "close_actor", lambda item, timeout: close_calls.append(item))
+
+    with pytest.raises(RuntimeError, match="stop request injection"):
+        transport._close_with_timeout(0.1)
+
+    assert stop_calls == [runtime, candidate, runtime, candidate]
+    assert close_calls == [runtime, candidate]
+    with transport._lifecycle:
+        assert not transport._closing
+        assert transport._close_failed
+
+
+def test_close_owner_resets_state_when_startup_wait_raises(monkeypatch) -> None:
+    transport = SocketTransport(["127.0.0.1:9"], timeout=1, heartbeat_interval=None)
+    candidate = ActorRuntime(7, ())
+    with transport._lifecycle:
+        transport._starting = True
+
+    def fail_wait(timeout=None) -> bool:
+        transport._candidate = candidate
+        raise RuntimeError("lifecycle wait injection")
+
+    monkeypatch.setattr(transport._lifecycle, "wait", fail_wait)
+
+    with pytest.raises(RuntimeError, match="lifecycle wait injection"):
+        transport._close_with_timeout(0.1)
+
+    with transport._lifecycle:
+        assert not transport._closing
+        assert transport._close_failed
+        transport._starting = False
+    assert candidate.stop_requested
+    assert candidate.state is RuntimeState.FAILED_CLOSING
+
+
+def test_close_owner_resets_state_when_publish_notification_raises(monkeypatch) -> None:
+    transport = SocketTransport(["127.0.0.1:9"], timeout=1, heartbeat_interval=None)
+    real_notify_all = transport._lifecycle.notify_all
+    notify_calls = 0
+
+    def fail_first_notify() -> None:
+        nonlocal notify_calls
+        notify_calls += 1
+        if notify_calls == 1:
+            raise RuntimeError("close owner notification injection")
+        real_notify_all()
+
+    monkeypatch.setattr(transport._lifecycle, "notify_all", fail_first_notify)
+
+    with pytest.raises(RuntimeError, match="close owner notification injection"):
+        transport._close_with_timeout(0.1)
+
+    with transport._lifecycle:
+        assert not transport._closing
+        assert transport._close_failed
+    transport.close()
+    assert notify_calls >= 3
+
+
+def test_thread_constructor_failure_closes_owned_push_buffer(monkeypatch) -> None:
+    def fail_constructor(*args, **kwargs):
+        raise RuntimeError("thread constructor injection")
+
+    monkeypatch.setattr(actor_module.threading, "Thread", fail_constructor)
+    push = PushBuffer(77)
+
+    with pytest.raises(ActorStartupError, match="before thread startup") as raised:
+        actor_module.start_actor(77, (), push_buffer=push)
+
+    runtime = raised.value.runtime
+    assert isinstance(raised.value.__cause__, RuntimeError)
+    assert str(raised.value.__cause__) == "thread constructor injection"
+    assert runtime.actor_thread is None
+    assert runtime.stopped.is_set() and runtime.started.is_set()
+    assert push.snapshot().closed
+    assert runtime.cleanup_error is None
+    actor_module.close_actor(runtime)
+    assert runtime.state is RuntimeState.FAILED_CLOSED
+
+
+def test_before_thread_push_cleanup_failure_is_retained_and_surfaced() -> None:
+    class FailingPushBuffer(PushBuffer):
+        def __init__(self) -> None:
+            super().__init__(78)
+            self.allow_close = False
+
+        def close(self, error=None) -> None:
+            if not self.allow_close:
+                raise RuntimeError("push cleanup injection")
+            super().close(error)
+
+    push = FailingPushBuffer()
+
+    def reject_candidate(_runtime: ActorRuntime) -> None:
+        raise ValueError("candidate callback injection")
+
+    with pytest.raises(ActorStartupError, match="before thread startup") as raised:
+        actor_module.start_actor(78, (), push_buffer=push, candidate_callback=reject_candidate)
+
+    runtime = raised.value.runtime
+    assert isinstance(raised.value.__cause__, ValueError)
+    assert str(raised.value.__cause__) == "candidate callback injection"
+    assert isinstance(runtime.cleanup_error, RuntimeError)
+    assert str(runtime.cleanup_error) == "push cleanup injection"
+    assert not push.snapshot().closed
+    with pytest.raises(TransportCloseTimeoutError, match="resource cleanup failed"):
+        actor_module.close_actor(runtime)
+
+    push.allow_close = True
+    push.close()
+    with runtime.control_lock:
+        runtime.cleanup_error = None
+    actor_module.close_actor(runtime)
+    assert runtime.state is RuntimeState.FAILED_CLOSED
+
+
 def test_public_close_surfaces_and_retains_selector_cleanup_failure(monkeypatch) -> None:
     selectors_created: list[selectors.SelectSelector] = []
     real_start_actor = actor_module.start_actor
@@ -1035,6 +1370,145 @@ def test_public_close_surfaces_and_retains_selector_cleanup_failure(monkeypatch)
     transport.close()
     assert transport._candidate is None and transport._runtime is candidate
     assert candidate.state is RuntimeState.FAILED_CLOSED
+
+
+def test_public_close_can_retry_owned_push_cleanup_failure(monkeypatch) -> None:
+    release = threading.Event()
+
+    def handler(conn: socket.socket) -> None:
+        msg_id, msg_type, _ = read_request(conn)
+        conn.sendall(response_bytes(msg_id, msg_type, handshake_payload()))
+        msg_id, msg_type, _ = read_request(conn)
+        conn.sendall(response_bytes(msg_id, msg_type, (75).to_bytes(2, "little")))
+        release.wait(timeout=2)
+
+    with Scripted7709Server([handler]) as server:
+        transport = SocketTransport([server.host], timeout=1, heartbeat_interval=None)
+        assert transport.execute(TYPE_SECURITY_COUNT, {"market": "sz"}) == 75
+        runtime = transport._runtime
+        push = transport._push_buffer
+        assert runtime is not None and push is not None
+        real_close = push.close
+        allow_close = False
+
+        def fail_close(error=None) -> None:
+            if not allow_close:
+                raise RuntimeError("push cleanup injection")
+            real_close(error)
+
+        monkeypatch.setattr(push, "close", fail_close)
+        try:
+            with pytest.raises(TransportCloseTimeoutError, match="resource cleanup failed"):
+                transport.close()
+
+            assert runtime.stopped.wait(timeout=2)
+            with transport._lifecycle:
+                assert not transport._closing
+                assert transport._close_failed
+                assert transport._runtime is runtime
+            assert isinstance(runtime.cleanup_error, RuntimeError)
+            assert str(runtime.cleanup_error) == "push cleanup injection"
+            assert not push.snapshot().closed
+
+            allow_close = True
+            transport.close()
+
+            assert push.snapshot().closed
+            assert runtime.cleanup_error is None
+            assert runtime.state is RuntimeState.FAILED_CLOSED
+            with transport._lifecycle:
+                assert not transport._closing
+        finally:
+            allow_close = True
+            release.set()
+            try:
+                transport.close()
+            except TransportCloseTimeoutError:
+                pass
+
+
+def test_push_retry_cannot_hide_retained_selector_cleanup_failure(monkeypatch) -> None:
+    release = threading.Event()
+    selectors_created: list[selectors.SelectSelector] = []
+    real_start_actor = actor_module.start_actor
+
+    class FailingCloseSelector(selectors.SelectSelector):
+        def __init__(self) -> None:
+            super().__init__()
+            self.allow_close = False
+            self.close_calls = 0
+            selectors_created.append(self)
+
+        def close(self) -> None:
+            self.close_calls += 1
+            if not self.allow_close:
+                raise RuntimeError("selector cleanup injection")
+            super().close()
+
+    def start_with_failing_selector(*args, **kwargs):
+        kwargs["selector_factory"] = FailingCloseSelector
+        return real_start_actor(*args, **kwargs)
+
+    def handler(conn: socket.socket) -> None:
+        msg_id, msg_type, _ = read_request(conn)
+        conn.sendall(response_bytes(msg_id, msg_type, handshake_payload()))
+        msg_id, msg_type, _ = read_request(conn)
+        conn.sendall(response_bytes(msg_id, msg_type, (76).to_bytes(2, "little")))
+        release.wait(timeout=2)
+
+    monkeypatch.setattr(socket_module, "start_actor", start_with_failing_selector)
+    with Scripted7709Server([handler]) as server:
+        transport = SocketTransport([server.host], timeout=1, heartbeat_interval=None)
+        assert transport.execute(TYPE_SECURITY_COUNT, {"market": "sz"}) == 76
+        runtime = transport._runtime
+        push = transport._push_buffer
+        assert runtime is not None and push is not None
+        real_push_close = push.close
+        allow_push_close = False
+
+        def fail_push_close(error=None) -> None:
+            if not allow_push_close:
+                raise RuntimeError("push cleanup injection")
+            real_push_close(error)
+
+        monkeypatch.setattr(push, "close", fail_push_close)
+        selector = selectors_created[0]
+        try:
+            with pytest.raises(TransportCloseTimeoutError, match="resource cleanup failed"):
+                transport.close()
+            assert runtime.stopped.wait(timeout=2)
+            assert runtime.selector is selector
+            assert runtime.cleanup_error is runtime.push_cleanup_error
+
+            allow_push_close = True
+            with pytest.raises(TransportCloseTimeoutError, match="resource cleanup failed"):
+                transport.close()
+
+            assert push.snapshot().closed
+            assert runtime.selector is selector
+            assert runtime.cleanup_error is not None
+            assert runtime.state is RuntimeState.FAILED_CLOSING
+
+            selector.allow_close = True
+            selector.close()
+            with runtime.control_lock:
+                runtime.selector = None
+                runtime.cleanup_error = None
+                runtime.deferred_cleanup_error = None
+            transport.close()
+
+            assert selector.close_calls == 2
+            assert runtime.cleanup_error is None
+            assert runtime.push_cleanup_error is None
+            assert runtime.state is RuntimeState.FAILED_CLOSED
+        finally:
+            allow_push_close = True
+            selector.allow_close = True
+            release.set()
+            try:
+                transport.close()
+            except TransportCloseTimeoutError:
+                pass
 
 
 def test_old_startup_waiter_cannot_inherit_runtime_created_after_close(monkeypatch) -> None:

@@ -212,6 +212,8 @@ class ActorRuntime:
     generation_started: threading.Event = field(default_factory=threading.Event)
     fatal_error: BaseException | None = None
     cleanup_error: BaseException | None = None
+    push_cleanup_error: BaseException | None = None
+    deferred_cleanup_error: BaseException | None = None
     actor_thread: threading.Thread | None = None
     selector: selectors.BaseSelector | None = None
     wake_reader: socket.socket | None = None
@@ -288,14 +290,14 @@ def start_actor(
         owns_push_buffer=owns_push_buffer,
         fatal_callback=fatal_callback,
     )
-    thread = threading.Thread(
-        target=_run_actor,
-        args=(runtime,),
-        name=f"eltdx-7709-actor-{runtime_epoch}",
-        daemon=True,
-    )
-    runtime.actor_thread = thread
     try:
+        thread = threading.Thread(
+            target=_run_actor,
+            args=(runtime,),
+            name=f"eltdx-7709-actor-{runtime_epoch}",
+            daemon=True,
+        )
+        runtime.actor_thread = thread
         if candidate_callback is not None:
             candidate_callback(runtime)
         thread.start()
@@ -466,6 +468,7 @@ def actor_snapshot(runtime: ActorRuntime) -> ActorSnapshot:
 
 
 def _run_actor(runtime: ActorRuntime) -> None:
+    fatal_callback_error: BaseException | None = None
     try:
         selector = runtime.selector_factory()
         with runtime.control_lock:
@@ -522,9 +525,12 @@ def _run_actor(runtime: ActorRuntime) -> None:
             runtime.last_error = exc
             runtime.state = RuntimeState.FAILED
         if runtime.fatal_callback is not None:
-            runtime.fatal_callback(runtime, exc)
+            try:
+                runtime.fatal_callback(runtime, exc)
+            except BaseException as callback_error:
+                fatal_callback_error = callback_error
     finally:
-        _finish_runtime(runtime)
+        _finish_runtime(runtime, fatal_callback_error)
 
 
 def _drain_control(runtime: ActorRuntime) -> None:
@@ -706,13 +712,9 @@ def _start_next_endpoint(runtime: ActorRuntime) -> None:
         runtime.endpoint_index = (endpoint_index + 1) % len(runtime.endpoints)
         runtime.endpoints_remaining -= 1
         connect_deadline = now + max(0.0, budget_deadline - now) / candidate_count
-        sock: socket.socket | None = None
         try:
             sock = runtime.socket_factory(endpoint.family, endpoint.socktype, endpoint.proto)
-            sock.setblocking(False)
         except OSError as exc:
-            if sock is not None:
-                sock.close()
             runtime.last_error = exc
             continue
         runtime.generation_counter += 1
@@ -727,6 +729,12 @@ def _start_next_endpoint(runtime: ActorRuntime) -> None:
         )
         runtime.generation = generation
         runtime.generation_started.set()
+        try:
+            sock.setblocking(False)
+        except OSError as exc:
+            runtime.last_error = exc
+            _drop_generation(runtime, exc)
+            continue
         try:
             result = sock.connect_ex(endpoint.sockaddr)
         except OSError as exc:
@@ -1072,9 +1080,11 @@ def _selector_timeout(runtime: ActorRuntime) -> float | None:
 
 
 def _schedule_heartbeat(runtime: ActorRuntime) -> None:
+    if runtime.active_task is not None:
+        return
     interval = runtime.heartbeat_interval
     generation = runtime.generation
-    if interval is None or interval <= 0 or generation is None or runtime.active_task is not None:
+    if interval is None or interval <= 0 or generation is None:
         return
     with runtime.control_lock:
         if runtime.pending_task is not None or runtime.cancel_requests:
@@ -1244,21 +1254,36 @@ def _notify_submitted_ticket(
 
 
 def _fail_actor_startup(runtime: ActorRuntime, error: BaseException) -> None:
+    cleanup_errors: list[BaseException] = []
+    push_cleanup_error: BaseException | None = None
     with runtime.control_lock:
         runtime.fatal_error = error
         runtime.last_error = error
         runtime.state = RuntimeState.FAILED
+    if runtime.push_buffer is not None and runtime.owns_push_buffer:
+        try:
+            runtime.push_buffer.close(error)
+        except BaseException as exc:
+            cleanup_errors.append(exc)
+            push_cleanup_error = exc
+    if runtime.fatal_callback is not None:
+        try:
+            runtime.fatal_callback(runtime, error)
+        except BaseException as exc:
+            cleanup_errors.append(exc)
+    with runtime.control_lock:
+        if cleanup_errors:
+            runtime.cleanup_error = cleanup_errors[0]
+        runtime.push_cleanup_error = push_cleanup_error
+        runtime.deferred_cleanup_error = _first_non_push_cleanup_error(cleanup_errors, push_cleanup_error)
         runtime.started.set()
         runtime.stopped.set()
-    if runtime.push_buffer is not None and runtime.owns_push_buffer:
-        runtime.push_buffer.close(error)
-    if runtime.fatal_callback is not None:
-        runtime.fatal_callback(runtime, error)
 
 
-def _finish_runtime(runtime: ActorRuntime) -> None:
+def _finish_runtime(runtime: ActorRuntime, initial_cleanup_error: BaseException | None = None) -> None:
     error = runtime.fatal_error or ConnectionClosedError("7709 Actor stopped")
-    cleanup_errors: list[BaseException] = []
+    cleanup_errors: list[BaseException] = [] if initial_cleanup_error is None else [initial_cleanup_error]
+    push_cleanup_error: BaseException | None = None
     selector = runtime.selector
     reader = runtime.wake_reader
     writer = runtime.wake_writer
@@ -1288,6 +1313,7 @@ def _finish_runtime(runtime: ActorRuntime) -> None:
                 runtime.push_buffer.close(runtime.fatal_error)
             except BaseException as exc:
                 cleanup_errors.append(exc)
+                push_cleanup_error = exc
 
         if selector is not None and reader is not None:
             try:
@@ -1328,9 +1354,11 @@ def _finish_runtime(runtime: ActorRuntime) -> None:
         if notify_cleanup_failure and runtime.fatal_callback is not None:
             try:
                 runtime.fatal_callback(runtime, cleanup_errors[0])
-            except BaseException:
-                pass
+            except BaseException as exc:
+                cleanup_errors.append(exc)
         with runtime.control_lock:
+            runtime.push_cleanup_error = push_cleanup_error
+            runtime.deferred_cleanup_error = _first_non_push_cleanup_error(cleanup_errors, push_cleanup_error)
             runtime.selector = selector if selector_close_failed else None
             runtime.wake_reader = reader if reader_close_failed else None
             runtime.wake_writer = writer if writer_close_failed else None
@@ -1343,3 +1371,16 @@ def _finish_runtime(runtime: ActorRuntime) -> None:
                 runtime.state = RuntimeState.STOPPED
             runtime.stopped.set()
             runtime.started.set()
+
+
+def _first_non_push_cleanup_error(
+    cleanup_errors: list[BaseException],
+    push_cleanup_error: BaseException | None,
+) -> BaseException | None:
+    skipped_push = False
+    for error in cleanup_errors:
+        if push_cleanup_error is not None and not skipped_push and error is push_cleanup_error:
+            skipped_push = True
+            continue
+        return error
+    return None

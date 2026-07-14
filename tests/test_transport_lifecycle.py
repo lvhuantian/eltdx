@@ -598,6 +598,31 @@ def test_dns_failure_skips_to_healthy_numeric_host(monkeypatch, pooled: bool) ->
 
 
 @pytest.mark.parametrize("pooled", [False, True])
+def test_invalid_numeric_port_skips_to_healthy_host(pooled: bool) -> None:
+    release = threading.Event()
+
+    def handler(conn: socket.socket) -> None:
+        msg_id, msg_type, _ = read_request(conn)
+        conn.sendall(response_bytes(msg_id, msg_type, handshake_payload()))
+        msg_id, msg_type, _ = read_request(conn)
+        conn.sendall(response_bytes(msg_id, msg_type, (74).to_bytes(2, "little")))
+        release.wait(timeout=2)
+
+    with Scripted7709Server([handler]) as server:
+        transport = (
+            PooledSocketTransport(["127.0.0.1:99999", server.host], pool_size=1, timeout=1, heartbeat_interval=None)
+            if pooled
+            else SocketTransport(["127.0.0.1:99999", server.host], timeout=1, heartbeat_interval=None)
+        )
+        try:
+            assert transport.execute(TYPE_SECURITY_COUNT, {"market": "sz"}) == 74
+            assert transport.connected_host == server.host
+        finally:
+            release.set()
+            transport.close()
+
+
+@pytest.mark.parametrize("pooled", [False, True])
 def test_all_dns_failures_raise_transport_error(monkeypatch, pooled: bool) -> None:
     resolve_host.cache_clear()
     monkeypatch.setattr(

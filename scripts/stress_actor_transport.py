@@ -17,14 +17,14 @@ import subprocess
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from eltdx.exceptions import PushOverflowError  # noqa: E402
+from eltdx.exceptions import PushOverflowError, TransportError  # noqa: E402
 from eltdx.models import FileContentChunk  # noqa: E402
 from eltdx.protocol.constants import (  # noqa: E402
     TYPE_FILE_CONTENT,
@@ -88,10 +88,14 @@ class StressLedger:
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
+            retried = [items for items in self._attempts.values() if len(items) > 1]
+            cross_endpoint = sum(len({item[1] for item in items}) > 1 for items in retried)
             return {
                 "attempts": self._attempt_sequence,
                 "logical_requests": len(self._attempts),
-                "retried_requests": sum(len(items) > 1 for items in self._attempts.values()),
+                "retried_requests": len(retried),
+                "cross_endpoint_retried_requests": cross_endpoint,
+                "same_endpoint_retried_requests": len(retried) - cross_endpoint,
                 "max_business_active": self._max_active_business,
             }
 
@@ -105,6 +109,7 @@ class StressServer:
         push_every: int = 0,
         poison_every: int = 0,
         close_every: int = 0,
+        keep_open_token: int | None = None,
         fail_before_response_every: int = 0,
         response_delay: float = 0.0,
     ) -> None:
@@ -113,6 +118,7 @@ class StressServer:
         self.push_every = push_every
         self.poison_every = poison_every
         self.close_every = close_every
+        self.keep_open_token = keep_open_token
         self.fail_before_response_every = fail_before_response_every
         self.response_delay = response_delay
         self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -230,6 +236,7 @@ class StressServer:
             with conn:
                 while not self._stop.is_set():
                     msg_id, msg_type, request = _read_request(conn)
+                    token: int | None = None
                     if msg_type == TYPE_HANDSHAKE:
                         conn.sendall(_response(msg_id, msg_type, _handshake_payload()))
                         continue
@@ -300,7 +307,11 @@ class StressServer:
                             self.active_business -= 1
                         if self.ledger is not None:
                             self.ledger.leave_business()
-                    if self.close_every and sequence % self.close_every == 0:
+                    if (
+                        self.close_every
+                        and sequence % self.close_every == 0
+                        and token != self.keep_open_token
+                    ):
                         return
         except (EOFError, OSError, TimeoutError):
             return
@@ -356,19 +367,20 @@ def _unique_completion_summary(values: list[dict[str, int]], ledger: StressLedge
     }
 
 
-def _capture_runtime_resources(runtime: Any) -> tuple[Any, Any, Any, Any]:
+def _capture_runtime_resources(runtime: Any) -> tuple[Any, Any, Any, Any, Any]:
     with runtime.control_lock:
         generation = runtime.generation
         return (
             runtime.selector,
             runtime.wake_reader,
             runtime.wake_writer,
+            generation,
             generation.sock if generation is not None else None,
         )
 
 
 def _socket_closed(sock: Any) -> bool:
-    return sock is None or sock.fileno() == -1
+    return sock is not None and sock.fileno() == -1
 
 
 def _selector_closed(selector: Any) -> bool:
@@ -380,8 +392,8 @@ def _selector_closed(selector: Any) -> bool:
         return True
 
 
-def _runtime_cleanup_snapshot(runtime: Any, owned: tuple[Any, Any, Any, Any]) -> dict[str, Any]:
-    selector, wake_reader, wake_writer, tcp_socket = owned
+def _runtime_cleanup_snapshot(runtime: Any, owned: tuple[Any, Any, Any, Any, Any]) -> dict[str, Any]:
+    selector, wake_reader, wake_writer, generation, tcp_socket = owned
     with runtime.control_lock:
         thread = runtime.actor_thread
         snapshot = {
@@ -396,6 +408,11 @@ def _runtime_cleanup_snapshot(runtime: Any, owned: tuple[Any, Any, Any, Any]) ->
             "cancel_count": len(runtime.cancel_requests),
         }
     snapshot.update(
+        saved_selector_present=selector is not None,
+        saved_wake_reader_present=wake_reader is not None,
+        saved_wake_writer_present=wake_writer is not None,
+        saved_generation_present=generation is not None,
+        saved_tcp_present=tcp_socket is not None,
         saved_selector_closed=_selector_closed(selector),
         saved_wake_reader_closed=_socket_closed(wake_reader),
         saved_wake_writer_closed=_socket_closed(wake_writer),
@@ -410,6 +427,11 @@ def _runtime_cleanup_snapshot(runtime: Any, owned: tuple[Any, Any, Any, Any]) ->
         and not snapshot["pending_ticket_present"]
         and not snapshot["active_ticket_present"]
         and snapshot["cancel_count"] == 0
+        and snapshot["saved_selector_present"]
+        and snapshot["saved_wake_reader_present"]
+        and snapshot["saved_wake_writer_present"]
+        and snapshot["saved_generation_present"]
+        and snapshot["saved_tcp_present"]
         and snapshot["saved_selector_closed"]
         and snapshot["saved_wake_reader_closed"]
         and snapshot["saved_wake_writer_closed"]
@@ -422,8 +444,20 @@ def run_generation_stress(count: int) -> dict[str, Any]:
     before_threads = _actor_threads()
     ledger = StressLedger()
     with (
-        StressServer(server_id=1, ledger=ledger, close_every=1, poison_every=31) as first,
-        StressServer(server_id=2, ledger=ledger, close_every=1, poison_every=29) as second,
+        StressServer(
+            server_id=1,
+            ledger=ledger,
+            close_every=1,
+            keep_open_token=count - 1,
+            poison_every=31,
+        ) as first,
+        StressServer(
+            server_id=2,
+            ledger=ledger,
+            close_every=1,
+            keep_open_token=count - 1,
+            poison_every=29,
+        ) as second,
     ):
         transport = SocketTransport(hosts=[first.host, second.host], timeout=5, heartbeat_interval=None)
         runtime_ref = None
@@ -443,6 +477,7 @@ def run_generation_stress(count: int) -> dict[str, Any]:
                 elif runtime is not runtime_ref or runtime.actor_thread is not thread_ref:
                     raise AssertionError("Actor object identity changed across generations")
             elapsed = time.perf_counter() - started
+            transport.connect()
             diagnostics = transport.diagnostics
             generation_counter = diagnostics.actor.tcp_generation if diagnostics.actor is not None else 0
             stale_events = diagnostics.actor.stale_event_count if diagnostics.actor is not None else -1
@@ -529,13 +564,14 @@ def run_mixed_stress(
                 values = list(executor.map(execute, range(requests)))
             elapsed = time.perf_counter() - started
             del executor
-            diagnostics = pool.diagnostics
             gap_reported = False
             try:
                 pool.drain_pushes()
             except PushOverflowError:
                 gap_reported = True
                 pool.drain_pushes()
+            pool.connect()
+            diagnostics = pool.diagnostics
             actor_generations = [actor.tcp_generation for actor in diagnostics.actors]
             stale_events = sum(actor.stale_event_count for actor in diagnostics.actors)
             broker = pool._broker
@@ -578,6 +614,12 @@ def run_mixed_stress(
                 "push_after_close": {
                     "frames": push_after.frame_count,
                     "bytes": push_after.byte_count,
+                    "configured_max_frames": push_buffer.max_frames,
+                    "configured_max_bytes": push_buffer.max_bytes,
+                    "max_frames_observed": push_after.max_frames_observed,
+                    "max_bytes_observed": push_after.max_bytes_observed,
+                    "dropped_total": push_after.dropped_total,
+                    "gap_pending": push_after.gap_pending,
                     "closed": push_after.closed,
                 },
                 "cleanup": cleanup,
@@ -638,11 +680,18 @@ def run_warmed_resource_stress(
 
 def run_close_samples(samples: int, *, pool_size: int = 4, loaded: bool = False) -> dict[str, Any]:
     latencies: list[float] = []
+    sample_evidence: list[dict[str, Any]] = []
+    completed_results = 0
+    expected_errors: dict[str, int] = {}
     with StressServer(response_delay=0.05 if loaded else 0.0) as server:
         handled = 0
         for _ in range(samples):
             pool = PooledSocketTransport(hosts=[server.host], timeout=2, pool_size=pool_size, heartbeat_interval=None)
             pool.connect()
+            runtimes = [transport._runtime for transport in pool._transports]
+            if any(runtime is None for runtime in runtimes):
+                raise AssertionError("close sample pool lost an Actor runtime")
+            owned = [_capture_runtime_resources(runtime) for runtime in runtimes]
             futures = []
             executor = None
             if loaded:
@@ -654,13 +703,34 @@ def run_close_samples(samples: int, *, pool_size: int = 4, loaded: bool = False)
             started = time.perf_counter()
             pool.close()
             latencies.append((time.perf_counter() - started) * 1000)
+            cleanup = [
+                _runtime_cleanup_snapshot(runtime, resources)
+                for runtime, resources in zip(runtimes, owned)
+            ]
+            if not all(item["all_owned_resources_closed"] for item in cleanup):
+                raise AssertionError("close sample retained Actor-owned resources")
+            settle_started = time.perf_counter()
             if executor is not None:
                 for future in futures:
                     try:
                         future.result(timeout=2)
-                    except BaseException:
-                        pass
+                    except FutureTimeoutError as exc:
+                        raise AssertionError("caller future did not settle after loaded close") from exc
+                    except TransportError as exc:
+                        name = type(exc).__name__
+                        expected_errors[name] = expected_errors.get(name, 0) + 1
+                    else:
+                        completed_results += 1
                 executor.shutdown()
+            settle_ms = (time.perf_counter() - settle_started) * 1000
+            sample_evidence.append(
+                {
+                    "futures": len(futures),
+                    "futures_terminal_within_timeout": all(future.done() for future in futures),
+                    "caller_settle_ms": round(settle_ms, 4),
+                    "cleanup": cleanup,
+                }
+            )
     ordered = sorted(latencies)
     return {
         "samples": samples,
@@ -669,6 +739,23 @@ def run_close_samples(samples: int, *, pool_size: int = 4, loaded: bool = False)
         "p95_ms": round(_percentile(ordered, 0.95), 4),
         "p99_ms": round(_percentile(ordered, 0.99), 4),
         "max_ms": round(max(ordered), 4),
+        "completed_results": completed_results,
+        "expected_request_errors": expected_errors,
+        "all_futures_terminal_within_timeout": all(
+            item["futures_terminal_within_timeout"] for item in sample_evidence
+        ),
+        "max_caller_settle_ms": round(max(item["caller_settle_ms"] for item in sample_evidence), 4),
+        "all_tickets_terminal_at_close": all(
+            not cleanup["pending_ticket_present"] and not cleanup["active_ticket_present"]
+            for item in sample_evidence
+            for cleanup in item["cleanup"]
+        ),
+        "all_owned_resources_closed": all(
+            cleanup["all_owned_resources_closed"]
+            for item in sample_evidence
+            for cleanup in item["cleanup"]
+        ),
+        "sample_evidence": sample_evidence,
     }
 
 
@@ -754,9 +841,18 @@ def run_heartbeat_impact(requests: int, *, blocks: int = 4) -> dict[str, Any]:
                 paced_heartbeat_requests = server.heartbeat_responses - paced_heartbeat_before
                 set_interval(pool, None)
                 threading.Event().wait(heartbeat_interval * 1.5)
+                base_order = (
+                    None,
+                    heartbeat_interval,
+                    heartbeat_interval,
+                    None,
+                    heartbeat_interval,
+                    None,
+                    None,
+                    heartbeat_interval,
+                )
                 for block in range(blocks):
-                    order = (None, heartbeat_interval, heartbeat_interval, None,
-                             heartbeat_interval, None, None, heartbeat_interval)
+                    order = base_order if block % 2 == 0 else tuple(reversed(base_order))
                     block_elapsed = {"without_heartbeat": [], "with_heartbeat": []}
                     for phase, interval in enumerate(order):
                         set_interval(pool, None)
@@ -829,6 +925,8 @@ def run_heartbeat_impact(requests: int, *, blocks: int = 4) -> dict[str, Any]:
         "without_heartbeat": baseline,
         "with_heartbeat": active,
         "block_throughput_ratios": block_ratios,
+        "median_block_throughput_ratio": round(statistics.median(block_ratios), 6),
+        "throughput_estimator": "aggregate_elapsed_ratio",
         "throughput_ratio": round(
             sum(raw_elapsed["without_heartbeat"]) / sum(raw_elapsed["with_heartbeat"]),
             6,

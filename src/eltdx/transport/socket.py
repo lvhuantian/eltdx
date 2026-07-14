@@ -238,37 +238,74 @@ class SocketTransport:
                     candidate = self._candidate
                     self._lifecycle.notify_all()
                 items = _unique_runtimes(runtime, candidate)
-                for item in items:
-                    request_actor_stop(item)
+                stop_error = _request_actor_stop_all(items)
                 _mark_failed_closing(items)
-                raise TransportCloseTimeoutError("7709 transport submission did not finish before close deadline")
+                error = TransportCloseTimeoutError("7709 transport submission did not finish before close deadline")
+                if stop_error is not None:
+                    error.__cause__ = stop_error
+                raise error
             retry = False
+            owner_claimed = False
             try:
-                with self._lifecycle:
-                    if self._closing:
-                        retry = True
-                    else:
-                        self._closing = True
-                        self._close_generation += 1
-                        self._epoch += 1
-                        runtime = self._runtime
-                        candidate = self._candidate
-                        self._lifecycle.notify_all()
-            finally:
-                self._submission_gate.release()
+                try:
+                    with self._lifecycle:
+                        if self._closing:
+                            retry = True
+                        else:
+                            self._closing = True
+                            owner_claimed = True
+                            self._close_generation += 1
+                            self._epoch += 1
+                            runtime = self._runtime
+                            candidate = self._candidate
+                            self._lifecycle.notify_all()
+                finally:
+                    self._submission_gate.release()
+            except BaseException:
+                if owner_claimed:
+                    self._abort_close_owner()
+                raise
             if not retry:
                 break
-        for item in _unique_runtimes(runtime, candidate):
-            request_actor_stop(item)
+        try:
+            self._finish_close_owner(deadline, runtime, candidate)
+        except BaseException:
+            self._abort_close_owner()
+            raise
+
+    def _abort_close_owner(self) -> None:
+        with self._lifecycle:
+            self._close_failed = True
+            failed_items = _unique_runtimes(self._runtime, self._candidate)
+        _request_actor_stop_all(failed_items)
+        try:
+            _mark_failed_closing(failed_items)
+        except BaseException:
+            pass
+        with self._lifecycle:
+            self._closing = False
+            try:
+                self._lifecycle.notify_all()
+            except BaseException:
+                pass
+
+    def _finish_close_owner(
+        self,
+        deadline: float,
+        initial_runtime: ActorRuntime | None,
+        initial_candidate: ActorRuntime | None,
+    ) -> None:
+        initial_items = _unique_runtimes(initial_runtime, initial_candidate)
+        close_errors: list[BaseException] = []
+        stop_error = _request_actor_stop_all(initial_items)
+        if stop_error is not None:
+            close_errors.append(stop_error)
         startup_timeout_items: tuple[ActorRuntime, ...] | None = None
         with self._lifecycle:
             while self._starting:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0 or not self._lifecycle.wait(timeout=remaining):
-                    self._close_failed = True
                     startup_timeout_items = _unique_runtimes(self._runtime, self._candidate)
-                    self._closing = False
-                    self._lifecycle.notify_all()
                     break
             if startup_timeout_items is not None:
                 runtime = None
@@ -280,18 +317,69 @@ class SocketTransport:
                 push_buffer = self._push_buffer
         if startup_timeout_items is not None:
             _mark_failed_closing(startup_timeout_items)
-            raise TransportCloseTimeoutError("7709 Actor startup did not finish before close deadline")
-        if push_buffer is not None and self._owns_push_buffer:
-            push_buffer.close()
-        try:
-            for item in _unique_runtimes(runtime, candidate):
+            error = TransportCloseTimeoutError("7709 Actor startup did not finish before close deadline")
+            if close_errors:
+                error.__cause__ = close_errors[0]
+            raise error
+        items = _unique_runtimes(runtime, candidate)
+        newly_owned_items = tuple(
+            item for item in items if all(item is not initial for initial in initial_items)
+        )
+        stop_error = _request_actor_stop_all(newly_owned_items)
+        if stop_error is not None:
+            close_errors.append(stop_error)
+        owned_push_buffers = _unique_owned_push_buffers(
+            push_buffer if self._owns_push_buffer else None,
+            items,
+        )
+        push_close_errors: list[tuple[PushBuffer, BaseException]] = []
+        for owned_push_buffer in owned_push_buffers:
+            push_closed = False
+            try:
+                owned_push_buffer.close()
+            except BaseException as exc:
+                push_close_errors.append((owned_push_buffer, exc))
+            try:
+                push_closed = owned_push_buffer.snapshot().closed
+            except BaseException as exc:
+                push_close_errors.append((owned_push_buffer, exc))
+            else:
+                if not push_closed and not any(item is owned_push_buffer for item, _ in push_close_errors):
+                    push_close_errors.append(
+                        (owned_push_buffer, RuntimeError("7709 owned push buffer did not close"))
+                    )
+            if push_closed:
+                for item in items:
+                    _clear_resolved_push_cleanup(item, owned_push_buffer)
+        for item in items:
+            try:
                 close_actor(item, timeout=max(0.0, deadline - time.monotonic()))
-        except BaseException:
-            with self._lifecycle:
-                self._close_failed = True
-                self._closing = False
-                self._lifecycle.notify_all()
-            raise
+            except BaseException as exc:
+                close_errors.append(exc)
+        unresolved_push_errors: list[BaseException] = []
+        for owned_push_buffer in owned_push_buffers:
+            try:
+                push_closed = owned_push_buffer.snapshot().closed
+            except BaseException as exc:
+                unresolved_push_errors.append(exc)
+                continue
+            if push_closed:
+                for item in items:
+                    _clear_resolved_push_cleanup(item, owned_push_buffer)
+            else:
+                unresolved_push_errors.append(
+                    next(
+                        (error for buffer, error in push_close_errors if buffer is owned_push_buffer),
+                        RuntimeError("7709 owned push buffer did not close"),
+                    )
+                )
+        if unresolved_push_errors:
+            error = TransportCloseTimeoutError("7709 Actor resource cleanup failed")
+            error.__cause__ = unresolved_push_errors[0]
+            close_errors.append(error)
+            _mark_failed_closing(items)
+        if close_errors:
+            raise close_errors[0]
         with self._lifecycle:
             close_failed = self._close_failed
         if close_failed:
@@ -813,6 +901,56 @@ def _unique_runtimes(*items: ActorRuntime | None) -> tuple[ActorRuntime, ...]:
         if item is not None and all(existing is not item for existing in unique):
             unique.append(item)
     return tuple(unique)
+
+
+def _request_actor_stop_all(items: tuple[ActorRuntime, ...]) -> BaseException | None:
+    first_error: BaseException | None = None
+    for item in items:
+        try:
+            request_actor_stop(item)
+        except BaseException as exc:
+            if first_error is None:
+                first_error = exc
+    return first_error
+
+
+def _unique_owned_push_buffers(
+    facade_push_buffer: PushBuffer | None,
+    runtimes: tuple[ActorRuntime, ...],
+) -> tuple[PushBuffer, ...]:
+    unique: list[PushBuffer] = []
+    candidates = [facade_push_buffer]
+    candidates.extend(
+        runtime.push_buffer if runtime.owns_push_buffer else None
+        for runtime in runtimes
+    )
+    for candidate in candidates:
+        if candidate is not None and all(existing is not candidate for existing in unique):
+            unique.append(candidate)
+    return tuple(unique)
+
+
+def _clear_resolved_push_cleanup(runtime: ActorRuntime, push_buffer: PushBuffer) -> None:
+    with runtime.control_lock:
+        if runtime.push_buffer is not push_buffer or runtime.push_cleanup_error is None:
+            return
+        thread = runtime.actor_thread
+        cleanup_complete = (
+            runtime.stopped.is_set()
+            and (thread is None or not thread.is_alive())
+            and runtime.generation is None
+            and runtime.selector is None
+            and runtime.wake_reader is None
+            and runtime.wake_writer is None
+            and runtime.pending_task is None
+            and runtime.active_task is None
+            and not runtime.cancel_requests
+        )
+        if not cleanup_complete:
+            return
+        if runtime.cleanup_error is runtime.push_cleanup_error:
+            runtime.cleanup_error = runtime.deferred_cleanup_error
+        runtime.push_cleanup_error = None
 
 
 def _mark_failed_closing(items: tuple[ActorRuntime, ...]) -> None:

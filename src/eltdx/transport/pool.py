@@ -114,6 +114,7 @@ class LeaseBroker:
         self._waiter_counter = 0
         self._lease_counter = 0
         self._pin_waiters = 0
+        self._pin_waiter_events: set[Any] = set()
         self._closed = False
 
     def acquire(self, deadline: float, *, pinned: bool = False) -> SlotLease:
@@ -196,22 +197,29 @@ class LeaseBroker:
                 and self._active_leases.get(lease.lease_id) is lease
             )
 
-    def reserve_pin_waiter(self) -> None:
+    def reserve_pin_waiter(self, completed: Any = None) -> None:
         with self._condition:
             if self._closed:
                 raise ConnectionClosedError("7709 pool is closed")
             if len(self._waiters) + self._pin_waiters >= self.max_pending_requests:
                 raise PoolBusyError("7709 pool admission queue is full")
             self._pin_waiters += 1
+            if completed is not None:
+                self._pin_waiter_events.add(completed)
             self._condition.notify_all()
 
-    def release_pin_waiter(self) -> None:
+    def release_pin_waiter(self, completed: Any = None) -> None:
         with self._condition:
+            if completed is not None:
+                if completed not in self._pin_waiter_events:
+                    return
+                self._pin_waiter_events.remove(completed)
             if self._pin_waiters > 0:
                 self._pin_waiters -= 1
 
     def close(self) -> None:
         wake: list[AdmissionWaiter] = []
+        pin_wake: tuple[Any, ...] = ()
         with self._condition:
             if self._closed:
                 return
@@ -226,9 +234,13 @@ class LeaseBroker:
             for lease in self._active_leases.values():
                 lease.state = LeaseState.RELEASED
             self._active_leases.clear()
+            pin_wake = tuple(self._pin_waiter_events)
+            self._pin_waiter_events.clear()
             self._pin_waiters = 0
         for waiter in wake:
             waiter.completed.set()
+        for completed in pin_wake:
+            completed.set()
 
     def snapshot(self) -> BrokerSnapshot:
         with self._condition:
@@ -499,7 +511,7 @@ class PinWaiter:
 
 class PinCompletion:
     def __init__(self, proxy: PinnedTransportProxy, call_id: int) -> None:
-        self._proxy_ref = weakref.ref(proxy)
+        self._proxy: PinnedTransportProxy | None = proxy
         self._call_id = call_id
         self._lock = threading.Lock()
         self._done = False
@@ -509,9 +521,12 @@ class PinCompletion:
             if self._done:
                 return
             self._done = True
-        proxy = self._proxy_ref()
-        if proxy is not None:
-            proxy._wire_terminal(self._call_id)
+        proxy = self._proxy
+        try:
+            if proxy is not None:
+                proxy._wire_terminal(self._call_id)
+        finally:
+            self._proxy = None
 
 
 class PinnedTransportProxy:
@@ -614,7 +629,7 @@ class PinnedTransportProxy:
                 waiter.error = ConnectionClosedError("pinned transport closed")
                 if waiter.reserved:
                     waiter.reserved = False
-                    self._broker.release_pin_waiter()
+                    self._broker.release_pin_waiter(waiter.completed)
                 waiter.completed.set()
             active = self._active_call
         try:
@@ -629,9 +644,13 @@ class PinnedTransportProxy:
                         raise TransportCloseTimeoutError("pinned transport did not quiesce")
             self._broker.release(self._lease)
         except BaseException:
+            release_failed_lease = False
             with self._condition:
                 self._state = PinState.FAILED
+                release_failed_lease = self._active_call is None
                 self._condition.notify_all()
+            if release_failed_lease:
+                self._release_failed_lease()
             raise
         with self._condition:
             self._state = PinState.CLOSED
@@ -654,8 +673,9 @@ class PinnedTransportProxy:
             if self._active_call is None and not self._waiters:
                 self._active_call = call_id
                 return call_id
-            self._broker.reserve_pin_waiter()
-            waiter = PinWaiter(call_id, deadline, reserved=True)
+            waiter = PinWaiter(call_id, deadline)
+            self._broker.reserve_pin_waiter(waiter.completed)
+            waiter.reserved = True
             self._waiters.append(waiter)
         if not waiter.completed.wait(max(0.0, deadline - time.monotonic())):
             with self._condition:
@@ -670,53 +690,89 @@ class PinnedTransportProxy:
             if waiter.assigned:
                 waiter.completed.wait()
             if waiter.reserved:
-                self._broker.release_pin_waiter()
+                self._broker.release_pin_waiter(waiter.completed)
                 waiter.reserved = False
+        release_failed_lease = False
         with self._condition:
             if waiter.error is None:
+                lease_valid = self._broker.validate(self._lease)
                 valid = (
                     waiter.assigned
                     and self._active_call == call_id
                     and self._state is PinState.OPEN
-                    and self._broker.validate(self._lease)
+                    and lease_valid
                 )
                 if not valid:
                     waiter.error = ConnectionClosedError("pinned transport closed during admission")
                     waiter.assigned = False
                     if self._active_call == call_id:
                         self._active_call = None
-                        self._condition.notify_all()
+                        release_failed_lease = self._state is PinState.FAILED
+                    if self._state is PinState.OPEN and not lease_valid:
+                        self._state = PinState.CLOSED
+                    if self._state is not PinState.OPEN or not lease_valid:
+                        self._close_waiters_locked()
+                    self._condition.notify_all()
             error = waiter.error
+        if release_failed_lease:
+            self._release_failed_lease()
         if error is not None:
             raise error
         return call_id
 
     def _wire_terminal(self, call_id: int) -> None:
         wake: list[PinWaiter] = []
+        release_failed_lease = False
         with self._condition:
             if self._active_call != call_id:
                 return
             self._active_call = None
-            while self._waiters:
-                candidate = self._waiters.popleft()
-                if candidate.error is None:
-                    if time.monotonic() >= candidate.deadline:
-                        candidate.error = ResponseTimeoutError("7709 response timed out during queue")
+            if self._state is PinState.FAILED:
+                release_failed_lease = True
+            elif self._state is not PinState.OPEN or not self._broker.validate(self._lease):
+                if self._state is PinState.OPEN:
+                    self._state = PinState.CLOSED
+                self._close_waiters_locked()
+            else:
+                while self._waiters:
+                    candidate = self._waiters.popleft()
+                    if candidate.error is None:
+                        if time.monotonic() >= candidate.deadline:
+                            candidate.error = ResponseTimeoutError("7709 response timed out during queue")
+                            if candidate.reserved:
+                                candidate.reserved = False
+                                self._broker.release_pin_waiter(candidate.completed)
+                            wake.append(candidate)
+                            continue
                         if candidate.reserved:
                             candidate.reserved = False
-                            self._broker.release_pin_waiter()
+                            self._broker.release_pin_waiter(candidate.completed)
+                        self._active_call = candidate.call_id
+                        candidate.assigned = True
                         wake.append(candidate)
-                        continue
-                    if candidate.reserved:
-                        candidate.reserved = False
-                        self._broker.release_pin_waiter()
-                    self._active_call = candidate.call_id
-                    candidate.assigned = True
-                    wake.append(candidate)
-                    break
+                        break
             self._condition.notify_all()
         for candidate in wake:
             candidate.completed.set()
+        if release_failed_lease:
+            self._release_failed_lease()
+
+    def _close_waiters_locked(self) -> None:
+        while self._waiters:
+            waiter = self._waiters.popleft()
+            if waiter.error is None:
+                waiter.error = ConnectionClosedError("pinned transport closed during admission")
+            if waiter.reserved:
+                waiter.reserved = False
+                self._broker.release_pin_waiter(waiter.completed)
+            waiter.completed.set()
+
+    def _release_failed_lease(self) -> None:
+        self._broker.release(self._lease)
+        with self._condition:
+            if self._state is PinState.FAILED and self._active_call is None:
+                self._state = PinState.CLOSED
+            self._condition.notify_all()
 
 
 class PooledSocketTransport:

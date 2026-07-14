@@ -24,6 +24,11 @@ def test_one_thousand_generation_changes_keep_one_actor_and_no_resources() -> No
     assert result["cross_request_completions"] == 0
     assert result["cross_generation_completions"] == 0
     assert result["stale_events"] == 0
+    assert result["cleanup"]["saved_selector_present"] is True
+    assert result["cleanup"]["saved_wake_reader_present"] is True
+    assert result["cleanup"]["saved_wake_writer_present"] is True
+    assert result["cleanup"]["saved_generation_present"] is True
+    assert result["cleanup"]["saved_tcp_present"] is True
     assert result["cleanup"]["all_owned_resources_closed"] is True
     assert result["actor_threads_after"] == result["actor_threads_before"]
 
@@ -49,6 +54,9 @@ def test_bounded_mixed_stress_has_exact_pool_concurrency_and_clean_close() -> No
     assert result["cross_request_completions"] == 0
     assert result["cross_generation_completions"] == 0
     assert result["stale_events"] == 0
+    assert result["ledger"]["retried_requests"] > 0
+    assert result["ledger"]["cross_endpoint_retried_requests"] == result["ledger"]["retried_requests"]
+    assert result["ledger"]["same_endpoint_retried_requests"] == 0
     assert result["broker_after_close"] == {
         "idle_slots": 0,
         "waiters": 0,
@@ -56,7 +64,19 @@ def test_bounded_mixed_stress_has_exact_pool_concurrency_and_clean_close() -> No
         "leases": 0,
         "closed": True,
     }
-    assert result["push_after_close"] == {"frames": 0, "bytes": 0, "closed": True}
+    assert result["push_after_close"]["frames"] == 0
+    assert result["push_after_close"]["bytes"] == 0
+    assert result["push_after_close"]["closed"] is True
+    assert result["push_after_close"]["configured_max_frames"] == 1024
+    assert result["push_after_close"]["configured_max_bytes"] == 8 * 1024 * 1024
+    assert result["push_after_close"]["max_frames_observed"] <= 1024
+    assert result["push_after_close"]["max_bytes_observed"] <= 8 * 1024 * 1024
+    assert result["push_after_close"]["dropped_total"] == result["push_dropped"]
+    assert all(item["saved_selector_present"] for item in result["cleanup"])
+    assert all(item["saved_wake_reader_present"] for item in result["cleanup"])
+    assert all(item["saved_wake_writer_present"] for item in result["cleanup"])
+    assert all(item["saved_generation_present"] for item in result["cleanup"])
+    assert all(item["saved_tcp_present"] for item in result["cleanup"])
     assert all(item["all_owned_resources_closed"] for item in result["cleanup"])
     assert result["actor_threads_after"] == 0
 
@@ -79,6 +99,13 @@ def test_close_latency_is_bounded_idle_and_under_load() -> None:
 
     assert idle["p99_ms"] < 100
     assert loaded["p99_ms"] < 250
+    assert idle["all_futures_terminal_within_timeout"] is True
+    assert loaded["all_futures_terminal_within_timeout"] is True
+    assert idle["all_tickets_terminal_at_close"] is True
+    assert loaded["all_tickets_terminal_at_close"] is True
+    assert idle["all_owned_resources_closed"] is True
+    assert loaded["all_owned_resources_closed"] is True
+    assert loaded["completed_results"] + sum(loaded["expected_request_errors"].values()) == 20
 
 
 def test_idle_actor_blocks_and_heartbeat_defers_under_continuous_work() -> None:
@@ -100,4 +127,9 @@ def test_idle_actor_blocks_and_heartbeat_defers_under_continuous_work() -> None:
     assert impact["cross_request_completions"] == 0
     assert impact["cross_generation_completions"] == 0
     assert impact["with_heartbeat"]["heartbeat_requests_total"] == 0
+    expected_phase_positions = [phase for phase in range(8) for _ in range(2)]
+    assert sorted(sample["phase"] for sample in impact["without_heartbeat"]["samples"]) == expected_phase_positions
+    assert sorted(sample["phase"] for sample in impact["with_heartbeat"]["samples"]) == expected_phase_positions
+    assert impact["throughput_estimator"] == "aggregate_elapsed_ratio"
+    assert impact["median_block_throughput_ratio"] > 0
     assert impact["throughput_ratio"] > 0.99
