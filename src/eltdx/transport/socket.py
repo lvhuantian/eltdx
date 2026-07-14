@@ -48,6 +48,26 @@ class TransportDiagnostics:
     push_max_bytes: int
 
 
+class _TerminalCompletion:
+    def __init__(self, callback: Any = None, request_lock: threading.Lock | None = None) -> None:
+        self._callback = callback
+        self._request_lock = request_lock
+        self._guard = threading.Lock()
+        self._done = False
+
+    def __call__(self, ticket: object | None) -> None:
+        with self._guard:
+            if self._done:
+                return
+            self._done = True
+        try:
+            if self._callback is not None:
+                self._callback(ticket)
+        finally:
+            if self._request_lock is not None:
+                self._request_lock.release()
+
+
 class SocketTransport:
     """Synchronous facade for one single-threaded non-blocking Actor."""
 
@@ -141,15 +161,21 @@ class SocketTransport:
         )
 
     def connect(self) -> None:
-        runtime = self._ensure_runtime()
         deadline = time.monotonic() + self._timeout
+        runtime = self._ensure_runtime(deadline)
         if not self._acquire_request_lock(deadline):
             raise ResponseTimeoutError("7709 response timed out during queue")
+        completion = _TerminalCompletion(request_lock=self._request_lock)
+        submitted = False
         try:
             self._require_current_runtime(runtime)
-            wait_ticket(submit_connect(runtime, deadline))
-        finally:
-            self._request_lock.release()
+            ticket = submit_connect(runtime, deadline, completion=completion)
+            submitted = True
+            wait_ticket(ticket)
+        except BaseException:
+            if not submitted:
+                completion(None)
+            raise
 
     def close(self) -> None:
         self._close_with_timeout(1.0)
@@ -198,8 +224,8 @@ class SocketTransport:
 
     def execute(self, command: int, payload: dict[str, Any] | None = None) -> Any:
         request_payload = dict(payload or {})
-        runtime = self._ensure_runtime()
         deadline = time.monotonic() + self._timeout
+        runtime = self._ensure_runtime(deadline)
         return self._execute_with_lease(
             command,
             request_payload,
@@ -223,7 +249,7 @@ class SocketTransport:
         request_payload = dict(payload or {})
         if runtime is None:
             try:
-                runtime = self._ensure_runtime()
+                runtime = self._ensure_runtime(deadline)
             except BaseException:
                 if completion is not None:
                     completion(None)
@@ -234,6 +260,8 @@ class SocketTransport:
                 completion(None)
             raise ResponseTimeoutError("7709 response timed out during queue")
         lock_acquired = lock_slot
+        terminal = _TerminalCompletion(completion, self._request_lock if lock_slot else None)
+        terminal_owned_by_ticket = False
         ticket: RequestTicket | None = None
         try:
             self._require_current_runtime(runtime)
@@ -244,19 +272,19 @@ class SocketTransport:
                 payload=request_payload,
                 deadline=deadline,
                 retry_safe=_retry_safe(command),
-                completion=completion,
+                completion=terminal,
             )
+            terminal_owned_by_ticket = True
             envelope = wait_ticket(ticket)
         except BaseException:
             if ticket is not None and not ticket.completed.is_set():
                 cancel_ticket(runtime, ticket)
-                ticket.completed.wait(max(0.0, deadline - time.monotonic()) + 0.05)
-            elif ticket is None and completion is not None:
-                completion(None)
+            if not terminal_owned_by_ticket:
+                terminal(None)
             raise
         finally:
-            if lock_acquired:
-                self._request_lock.release()
+            if lock_acquired and not terminal_owned_by_ticket:
+                terminal(None)
 
         if not isinstance(envelope, FrameEnvelope):
             raise ConnectionClosedError("7709 Actor returned an invalid response envelope")
@@ -292,7 +320,7 @@ class SocketTransport:
             return [_parse_push(frame) for frame in frames]
         return [frame.response for frame in frames]
 
-    def _ensure_runtime(self) -> ActorRuntime:
+    def _ensure_runtime(self, deadline: float | None = None) -> ActorRuntime:
         while True:
             with self._lifecycle:
                 runtime = self._runtime
@@ -303,7 +331,9 @@ class SocketTransport:
                 if self._closing:
                     raise ConnectionClosedError("7709 transport is closing")
                 if self._starting:
-                    self._lifecycle.wait()
+                    remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+                    if remaining == 0 or not self._lifecycle.wait(timeout=remaining):
+                        raise ResponseTimeoutError("7709 response timed out during Actor startup")
                     continue
                 self._starting = True
                 observed_epoch = self._epoch
@@ -318,6 +348,8 @@ class SocketTransport:
                     self._starting = False
                     self._lifecycle.notify_all()
                     raise ConnectionClosedError("7709 transport changed while resolving endpoints")
+            if deadline is not None and time.monotonic() >= deadline:
+                raise ResponseTimeoutError("7709 response timed out during Actor startup")
             push_buffer = self._shared_push_buffer or PushBuffer(
                 candidate_epoch, max_frames=self._push_queue_size, max_bytes=self._push_queue_bytes
             )
@@ -330,6 +362,7 @@ class SocketTransport:
                 request_timeout=self._timeout,
                 owns_push_buffer=self._owns_push_buffer,
                 fatal_callback=self._actor_fatal_callback,
+                startup_timeout=1.0 if deadline is None else max(0.0, deadline - time.monotonic()),
             )
         except BaseException:
             with self._lifecycle:

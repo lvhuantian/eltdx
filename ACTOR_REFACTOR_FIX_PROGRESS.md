@@ -31,9 +31,9 @@ is the last successful read; it must be refreshed before each pushed checkpoint.
 
 | Checkpoint | State | Exit evidence |
 | --- | --- | --- |
-| F00 baseline, review, regression design | IN PROGRESS | Ledger committed; every A-E defect reproduced by a deterministic regression before its implementation change |
-| F01 receive ordering and boundaries | PENDING | Stale decoded frames cannot complete a later request; receive failures are request-local/generation-local |
-| F02 request identity and build isolation | PENDING | Exact cancel identity; build errors fail one ticket; one absolute deadline |
+| F00 baseline, review, regression design | IN PROGRESS | Ledger committed; A-C defects reproduced; D-E regression set remains to be landed before implementation |
+| F01 receive ordering and boundaries | COMPLETE at next checkpoint | Sequence boundary, full-send gate, pre-send drain, heartbeat gate, partial-tail handling, and unified receive failure path |
+| F02 request identity and build isolation | COMPLETE at next checkpoint | Monotonic request ID, exact cancel, request-local build errors, strict deadline, terminal-owned slot, callback isolation |
 | F03 connect and failover | PENDING | Real Windows refusal and two-host failure paths rotate within one deadline |
 | F04 Broker and pinned leases | PENDING | No Event ABA; pin close/connect state is monotonic and capacity is preserved |
 | F05 lifecycle and shutdown | PENDING | Late registration, start/close/fatal, and concurrent close are fail-closed and leak-free |
@@ -117,6 +117,28 @@ is the last successful read; it must be refreshed before each pushed checkpoint.
 | 2026-07-14 | `git log -1 --oneline --decorate` | `994c49b Make reconnect verification deterministic` |
 | 2026-07-14 | `gh pr view 12 --json ...` | Network timeout to `api.github.com`; no state mutation |
 | 2026-07-14 | Three independent read-only A/B, C, and D/E reviews | All reproduced blocking defects; no files changed |
+| 2026-07-14 | `python -m pytest -q tests/test_transport_actor_regressions.py` on `994c49b` code | **7 failed in 0.51s**, as required before implementation |
+| 2026-07-14 | `python -m pytest -q tests/test_transport_failover_regressions.py` before F03 | **5 failed in 5.13s**, as required before implementation |
+| 2026-07-14 | F01/F02 focused Actor/Socket/Pool/Lifecycle set | **65 passed in 3.28s** |
+| 2026-07-14 | `python -m pytest -q --ignore=tests/test_transport_failover_regressions.py` | **200 passed in 28.45s**; F03 red tests intentionally remain outside the F01/F02 checkpoint |
+
+The seven A/B baseline failures were:
+
+- `test_old_decoded_batch_cannot_complete_next_request_after_64_frame_budget`:
+  B returned normally from the queued `999` frame instead of timing out.
+- `test_handshake_batch_tail_cannot_complete_business_exchange`: the business
+  ticket returned normally from the handshake batch tail instead of timing out.
+- `test_late_cancel_of_completed_ticket_does_not_cancel_next_lease_zero_request`:
+  B raised `ConnectionClosedError: 7709 request cancelled`.
+- All three `test_ready_actor_survives_request_build_errors` cases left the
+  runtime in `FAILED` instead of `RUNNING`.
+- `test_wait_ticket_uses_only_absolute_deadline_no_fixed_grace` observed a
+  `0.25` second Event wait for a `0.20` second absolute deadline.
+
+The five C baseline failures proved that handshake EOF, business EOF, and a
+first response timeout never reached the healthy second loopback server; the
+all-failed case only exercised the first server; and the real Windows closed
+port consumed the full one-second deadline with zero healthy accepts.
 
 Exact pytest node IDs and failure output will be appended before each related
 implementation change. Intentional red tests will not be left as the terminal

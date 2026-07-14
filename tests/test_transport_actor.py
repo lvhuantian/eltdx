@@ -150,6 +150,7 @@ def test_connect_deadline_retires_generation() -> None:
         ticket = submit_connect(runtime, time.monotonic() + 0.02)
         with pytest.raises(Exception, match="timed out during connect"):
             wait_ticket(ticket)
+        assert ticket.completed.wait(timeout=1)
         assert runtime.generation is None
     finally:
         close_actor(runtime)
@@ -367,6 +368,7 @@ def test_response_timeout_reports_stage_and_retires_generation() -> None:
             assert request_received.wait(timeout=2)
             with pytest.raises(ResponseTimeoutError, match="during response"):
                 wait_ticket(ticket)
+            assert ticket.completed.wait(timeout=1)
             assert runtime.generation is None
         finally:
             release.set()
