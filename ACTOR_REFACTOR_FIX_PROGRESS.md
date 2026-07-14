@@ -147,6 +147,9 @@ exact-source performance artifacts remain to be generated after checkpointing.
 | 2026-07-14 | Full suite after F06 implementation | **250 passed in 72.75s** |
 | 2026-07-14 | `python -m build` | Built `eltdx-1.0.2.tar.gz` and `eltdx-1.0.2-py3-none-any.whl` |
 | 2026-07-14 | `python -m mkdocs build --strict` | PASS in 3.69s |
+| 2026-07-15 | Exact clean `0955a8e` heavy stress command | 10,000 generations and 100,000 mixed requests both used two real servers; 110,000/110,000 unique responses; duplicate/missing/unexpected/cross-request/cross-generation all **0**; exact Actor/TCP/selector/wakeup/ticket/Broker/Push cleanup; heartbeat ratio **0.997404** with 32 paced completions and 0 timed heartbeats; close p99 3.1032/2.7951ms; warmed handles **199 x 8** |
+| 2026-07-15 | Heavy artifact evidence audit | Rejected two cold per-function handle pairs (`192 -> 209`, `205 -> 338`): sampling occurred before the worker function frame returned and retained joined Thread objects; the next invocation returned to 168. Removed cold pairs entirely and retained only the outer warmed repeated sampler required by the objective |
+| 2026-07-15 | Resource/generation/mixed regressions after sampler correction | **3 passed in 3.97s** |
 
 F03 preserves the public absolute deadline and assigns only private candidate
 and first-attempt sub-deadlines. Handshake timeout/EOF, partial business send,

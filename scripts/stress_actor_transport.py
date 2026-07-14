@@ -420,7 +420,6 @@ def _runtime_cleanup_snapshot(runtime: Any, owned: tuple[Any, Any, Any, Any]) ->
 
 def run_generation_stress(count: int) -> dict[str, Any]:
     before_threads = _actor_threads()
-    before_resources = _resource_count()
     ledger = StressLedger()
     with (
         StressServer(server_id=1, ledger=ledger, close_every=1, poison_every=31) as first,
@@ -474,8 +473,6 @@ def run_generation_stress(count: int) -> dict[str, Any]:
                 transport.close()
     del first, second
     result.update(
-        resource_before=before_resources,
-        resource_after=_resource_after_gc(),
         actor_threads_before=len(before_threads),
         actor_threads_after=len(_actor_threads()),
     )
@@ -491,7 +488,6 @@ def run_mixed_stress(
     close_every: int = 1000,
     response_delay: float = 0.0005,
 ) -> dict[str, Any]:
-    before_resources = _resource_count()
     ledger = StressLedger()
     first_fail_every = max(2, close_every // 2) if close_every else 0
     with (
@@ -532,6 +528,7 @@ def run_mixed_stress(
             with ThreadPoolExecutor(max_workers=concurrency) as executor:
                 values = list(executor.map(execute, range(requests)))
             elapsed = time.perf_counter() - started
+            del executor
             diagnostics = pool.diagnostics
             gap_reported = False
             try:
@@ -584,7 +581,6 @@ def run_mixed_stress(
                     "closed": push_after.closed,
                 },
                 "cleanup": cleanup,
-                "resource_before": before_resources,
                 **_unique_completion_summary(values, ledger),
             }
         finally:
@@ -592,7 +588,6 @@ def run_mixed_stress(
                 pool.close()
     del first, second
     result["actor_threads_after"] = len(_actor_threads())
-    result["resource_after"] = _resource_after_gc()
     return result
 
 
@@ -611,7 +606,7 @@ def run_warmed_resource_stress(
             {
                 "round": index,
                 "phase": "warmup" if index < warmup_rounds else "measured",
-                "resources": result["resource_after"],
+                "resources": _resource_after_gc(),
                 "actor_threads": result["actor_threads_after"],
                 "cross_request_completions": result["cross_request_completions"],
                 "cross_generation_completions": result["cross_generation_completions"],
