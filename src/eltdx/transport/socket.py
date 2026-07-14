@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from eltdx.exceptions import ConnectionClosedError, ResponseTimeoutError
+from eltdx.exceptions import ConnectionClosedError, ResponseTimeoutError, TransportCloseTimeoutError
 from eltdx.hosts import DEFAULT_HOSTS, ResolvedEndpoint, resolve_hosts, unique_hosts
 from eltdx.protocol.commands import COMMANDS, parse_command_response
 from eltdx.protocol.constants import TYPE_HANDSHAKE, TYPE_HEARTBEAT
@@ -17,6 +17,8 @@ from eltdx.protocol.constants import TYPE_HANDSHAKE, TYPE_HEARTBEAT
 from .actor import (
     ActorRuntime,
     ActorSnapshot,
+    ActorStartupError,
+    ConnectTicket,
     FrameEnvelope,
     RequestTicket,
     RuntimeState,
@@ -101,11 +103,17 @@ class SocketTransport:
 
         self._lifecycle = threading.Condition()
         self._request_lock = threading.Lock()
+        self._submission_gate = threading.Lock()
         self._runtime: ActorRuntime | None = None
+        self._candidate: ActorRuntime | None = None
+        self._candidate_admitted = False
+        self._candidate_registration: Any = None
         self._push_buffer: PushBuffer | None = None
         self._epoch = 0
+        self._close_generation = 0
         self._starting = False
         self._closing = False
+        self._close_failed = False
         self._last_handshake: Any = None
         self._last_heartbeat: Any = None
         self._shared_push_buffer = _shared_push_buffer
@@ -115,6 +123,7 @@ class SocketTransport:
         self._actor_fatal_callback = _actor_fatal_callback
         self._runtime_started_callback = _runtime_started_callback
         self._heartbeat_allowed: Any = None
+        self._pool_runtime_retired = False
         self._finalizer: weakref.finalize | None = None
 
     @property
@@ -163,59 +172,168 @@ class SocketTransport:
     def connect(self) -> None:
         deadline = time.monotonic() + self._timeout
         runtime = self._ensure_runtime(deadline)
-        if not self._acquire_request_lock(deadline):
-            raise ResponseTimeoutError("7709 response timed out during queue")
-        completion = _TerminalCompletion(request_lock=self._request_lock)
-        submitted = False
-        try:
-            self._require_current_runtime(runtime)
-            ticket = submit_connect(runtime, deadline, completion=completion)
-            submitted = True
-            wait_ticket(ticket)
-        except BaseException:
-            if not submitted:
+        self._connect_with_deadline(
+            deadline=deadline,
+            completion=None,
+            runtime=runtime,
+            lock_slot=True,
+        )
+
+    def _connect_with_deadline(
+        self,
+        *,
+        deadline: float,
+        completion: Any,
+        runtime: ActorRuntime | None = None,
+        lock_slot: bool = True,
+        lease_id: int = 0,
+        expected_runtime_epoch: int | None = None,
+    ) -> None:
+        if runtime is None:
+            try:
+                runtime = self._ensure_runtime(deadline, expected_runtime_epoch=expected_runtime_epoch)
+            except BaseException:
+                if completion is not None:
+                    completion(None)
+                raise
+        if lock_slot and not self._acquire_request_lock(deadline):
+            if completion is not None:
                 completion(None)
+            raise ResponseTimeoutError("7709 response timed out during queue")
+        terminal = _TerminalCompletion(completion, self._request_lock if lock_slot else None)
+        terminal_owned_by_ticket = False
+        try:
+            with self._submission_gate:
+                self._require_current_runtime(runtime, expected_runtime_epoch=expected_runtime_epoch)
+                ticket = submit_connect(runtime, deadline, lease_id=lease_id, completion=terminal)
+                terminal_owned_by_ticket = True
+            wait_ticket(ticket)
+            if expected_runtime_epoch is not None and not self._pool_runtime_is_active(expected_runtime_epoch):
+                raise ConnectionClosedError("7709 pool closed during connect")
+        except BaseException:
+            if not terminal_owned_by_ticket:
+                terminal(None)
             raise
 
     def close(self) -> None:
         self._close_with_timeout(1.0)
 
     def _close_with_timeout(self, timeout: float) -> None:
+        deadline = time.monotonic() + max(0.0, timeout)
+        while True:
+            with self._lifecycle:
+                while self._closing:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0 or not self._lifecycle.wait(timeout=remaining):
+                        raise TransportCloseTimeoutError("7709 transport close is already in progress")
+                remaining = deadline - time.monotonic()
+            if remaining <= 0 or not self._submission_gate.acquire(timeout=remaining):
+                with self._lifecycle:
+                    self._close_failed = True
+                    self._close_generation += 1
+                    self._epoch += 1
+                    runtime = self._runtime
+                    candidate = self._candidate
+                    self._lifecycle.notify_all()
+                items = _unique_runtimes(runtime, candidate)
+                for item in items:
+                    request_actor_stop(item)
+                _mark_failed_closing(items)
+                raise TransportCloseTimeoutError("7709 transport submission did not finish before close deadline")
+            retry = False
+            try:
+                with self._lifecycle:
+                    if self._closing:
+                        retry = True
+                    else:
+                        self._closing = True
+                        self._close_generation += 1
+                        self._epoch += 1
+                        runtime = self._runtime
+                        candidate = self._candidate
+                        self._lifecycle.notify_all()
+            finally:
+                self._submission_gate.release()
+            if not retry:
+                break
+        for item in _unique_runtimes(runtime, candidate):
+            request_actor_stop(item)
+        startup_timeout_items: tuple[ActorRuntime, ...] | None = None
         with self._lifecycle:
-            while self._closing:
-                self._lifecycle.wait()
-            self._closing = True
-            self._epoch += 1
-            self._lifecycle.notify_all()
             while self._starting:
-                self._lifecycle.wait()
-            runtime = self._runtime
-            push_buffer = self._push_buffer
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not self._lifecycle.wait(timeout=remaining):
+                    self._close_failed = True
+                    startup_timeout_items = _unique_runtimes(self._runtime, self._candidate)
+                    self._closing = False
+                    self._lifecycle.notify_all()
+                    break
+            if startup_timeout_items is not None:
+                runtime = None
+                candidate = None
+                push_buffer = None
+            else:
+                runtime = self._runtime
+                candidate = self._candidate
+                push_buffer = self._push_buffer
+        if startup_timeout_items is not None:
+            _mark_failed_closing(startup_timeout_items)
+            raise TransportCloseTimeoutError("7709 Actor startup did not finish before close deadline")
         if push_buffer is not None and self._owns_push_buffer:
             push_buffer.close()
         try:
-            if runtime is not None:
-                close_actor(runtime, timeout=timeout)
+            for item in _unique_runtimes(runtime, candidate):
+                close_actor(item, timeout=max(0.0, deadline - time.monotonic()))
         except BaseException:
             with self._lifecycle:
+                self._close_failed = True
                 self._closing = False
                 self._lifecycle.notify_all()
             raise
         with self._lifecycle:
+            close_failed = self._close_failed
+        if close_failed:
+            _mark_failed_closed(_unique_runtimes(runtime, candidate))
+        with self._lifecycle:
+            failed_runtime: ActorRuntime | None = None
             if self._runtime is runtime:
                 if runtime is not None:
                     if runtime.last_handshake is not None:
                         self._last_handshake = runtime.last_handshake
                     if runtime.last_heartbeat is not None:
                         self._last_heartbeat = runtime.last_heartbeat
-                failed_closed = runtime is not None and runtime.state in (
-                    RuntimeState.FAILED,
-                    RuntimeState.FAILED_CLOSING,
-                    RuntimeState.FAILED_CLOSED,
+                failed_closed = runtime is not None and (
+                    self._close_failed
+                    or runtime.state in (
+                        RuntimeState.FAILED,
+                        RuntimeState.FAILED_CLOSING,
+                        RuntimeState.FAILED_CLOSED,
+                    )
                 )
                 if not failed_closed:
                     self._runtime = None
                     self._push_buffer = None
+                else:
+                    failed_runtime = runtime
+            if self._candidate is candidate:
+                candidate_failed = candidate is not None and (
+                    self._close_failed
+                    or candidate.state in (
+                        RuntimeState.FAILED,
+                        RuntimeState.FAILED_CLOSING,
+                        RuntimeState.FAILED_CLOSED,
+                    )
+                )
+                if candidate_failed:
+                    failed_runtime = candidate
+                    if self._runtime is None:
+                        self._runtime = candidate
+                self._candidate = None
+                self._candidate_admitted = False
+                self._candidate_registration = None
+            if failed_runtime is None and self._runtime is None:
+                self._push_buffer = None
+            if self._runtime is None and self._candidate is None:
                 if self._finalizer is not None:
                     self._finalizer.detach()
                     self._finalizer = None
@@ -245,11 +363,17 @@ class SocketTransport:
         completion: Any,
         runtime: ActorRuntime | None = None,
         lock_slot: bool = True,
+        expected_runtime_epoch: int | None = None,
     ) -> Any:
-        request_payload = dict(payload or {})
+        try:
+            request_payload = dict(payload or {})
+        except BaseException:
+            if completion is not None:
+                completion(None)
+            raise
         if runtime is None:
             try:
-                runtime = self._ensure_runtime(deadline)
+                runtime = self._ensure_runtime(deadline, expected_runtime_epoch=expected_runtime_epoch)
             except BaseException:
                 if completion is not None:
                     completion(None)
@@ -264,17 +388,18 @@ class SocketTransport:
         terminal_owned_by_ticket = False
         ticket: RequestTicket | None = None
         try:
-            self._require_current_runtime(runtime)
-            ticket = submit_request(
-                runtime,
-                lease_id=lease_id,
-                command=command,
-                payload=request_payload,
-                deadline=deadline,
-                retry_safe=_retry_safe(command),
-                completion=terminal,
-            )
-            terminal_owned_by_ticket = True
+            with self._submission_gate:
+                self._require_current_runtime(runtime, expected_runtime_epoch=expected_runtime_epoch)
+                ticket = submit_request(
+                    runtime,
+                    lease_id=lease_id,
+                    command=command,
+                    payload=request_payload,
+                    deadline=deadline,
+                    retry_safe=_retry_safe(command),
+                    completion=terminal,
+                )
+                terminal_owned_by_ticket = True
             envelope = wait_ticket(ticket)
         except BaseException:
             if ticket is not None and not ticket.completed.is_set():
@@ -288,6 +413,8 @@ class SocketTransport:
 
         if not isinstance(envelope, FrameEnvelope):
             raise ConnectionClosedError("7709 Actor returned an invalid response envelope")
+        if expected_runtime_epoch is not None and not self._pool_runtime_is_active(expected_runtime_epoch):
+            raise ConnectionClosedError("7709 pool closed before response delivery")
         result = parse_command_response(envelope.command, envelope.response, envelope.request_payload_snapshot)
         if command == TYPE_HANDSHAKE:
             self._last_handshake = result
@@ -320,24 +447,49 @@ class SocketTransport:
             return [_parse_push(frame) for frame in frames]
         return [frame.response for frame in frames]
 
-    def _ensure_runtime(self, deadline: float | None = None) -> ActorRuntime:
+    def _ensure_runtime(
+        self,
+        deadline: float | None = None,
+        *,
+        expected_runtime_epoch: int | None = None,
+    ) -> ActorRuntime:
+        with self._lifecycle:
+            invocation_epoch = self._epoch
+            invocation_close_generation = self._close_generation
         while True:
+            if not self._pool_runtime_is_active(expected_runtime_epoch):
+                raise ConnectionClosedError("7709 pool runtime epoch is no longer active")
             with self._lifecycle:
+                if self._close_generation != invocation_close_generation:
+                    raise ConnectionClosedError("7709 transport closed during Actor startup")
+                if expected_runtime_epoch is not None and self._fixed_runtime_epoch != expected_runtime_epoch:
+                    raise ConnectionClosedError("7709 pool runtime epoch changed")
+                if self._close_failed:
+                    raise ConnectionClosedError("7709 Actor is not usable: FAILED_CLOSED")
+                if self._pool_runtime_retired:
+                    raise ConnectionClosedError("7709 pool runtime epoch is retired")
                 runtime = self._runtime
                 if runtime is not None:
-                    if runtime.state is RuntimeState.RUNNING:
+                    if runtime.state is RuntimeState.RUNNING and (
+                        expected_runtime_epoch is None or runtime.runtime_epoch == expected_runtime_epoch
+                    ):
                         return runtime
                     raise ConnectionClosedError(f"7709 Actor is not usable: {runtime.state.name}")
                 if self._closing:
                     raise ConnectionClosedError("7709 transport is closing")
+                if self._epoch != invocation_epoch:
+                    raise ConnectionClosedError("7709 transport changed during Actor startup")
                 if self._starting:
                     remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
                     if remaining == 0 or not self._lifecycle.wait(timeout=remaining):
                         raise ResponseTimeoutError("7709 response timed out during Actor startup")
                     continue
+                if self._candidate is not None:
+                    raise ConnectionClosedError("7709 transport has an Actor candidate awaiting cleanup")
                 self._starting = True
                 observed_epoch = self._epoch
                 candidate_epoch = self._fixed_runtime_epoch or (observed_epoch + 1)
+                registration = self._runtime_started_callback
                 break
 
         candidate: ActorRuntime | None = None
@@ -350,6 +502,8 @@ class SocketTransport:
                     raise ConnectionClosedError("7709 transport changed while resolving endpoints")
             if deadline is not None and time.monotonic() >= deadline:
                 raise ResponseTimeoutError("7709 response timed out during Actor startup")
+            if not self._pool_runtime_is_active(expected_runtime_epoch):
+                raise ConnectionClosedError("7709 pool runtime epoch is no longer active")
             push_buffer = self._shared_push_buffer or PushBuffer(
                 candidate_epoch, max_frames=self._push_queue_size, max_bytes=self._push_queue_bytes
             )
@@ -362,30 +516,126 @@ class SocketTransport:
                 request_timeout=self._timeout,
                 owns_push_buffer=self._owns_push_buffer,
                 fatal_callback=self._actor_fatal_callback,
+                candidate_callback=lambda runtime: self._own_candidate(runtime, registration),
                 startup_timeout=1.0 if deadline is None else max(0.0, deadline - time.monotonic()),
             )
+        except ActorStartupError as exc:
+            candidate = exc.runtime
+            with self._lifecycle:
+                owned = self._candidate is candidate
+            if not owned:
+                self._own_candidate(candidate, registration)
+            with self._lifecycle:
+                self._starting = False
+                self._lifecycle.notify_all()
+            raise
         except BaseException:
             with self._lifecycle:
                 self._starting = False
                 self._lifecycle.notify_all()
             raise
 
-        publish = False
+        pool_active = self._pool_runtime_is_active(expected_runtime_epoch)
         with self._lifecycle:
-            if self._epoch == observed_epoch and not self._closing and self._runtime is None:
+            publish = (
+                self._candidate is candidate
+                and self._candidate_admitted
+                and self._candidate_registration is registration
+                and pool_active
+                and not self._pool_runtime_retired
+                and self._epoch == observed_epoch
+                and not self._closing
+                and self._runtime is None
+                and candidate.state is RuntimeState.RUNNING
+                and not candidate.stop_requested
+            )
+            if publish:
                 self._epoch = candidate_epoch
                 self._runtime = candidate
+                self._candidate = None
+                self._candidate_admitted = False
+                self._candidate_registration = None
                 self._push_buffer = push_buffer
-                self._finalizer = weakref.finalize(self, abandon_actor, candidate)
-                publish = True
+            closing = self._closing
             self._starting = False
             self._lifecycle.notify_all()
         if not publish:
-            close_actor(candidate)
+            request_actor_stop(candidate)
+            if closing:
+                raise ConnectionClosedError("7709 transport closed during Actor startup")
+            try:
+                remaining = 1.0 if deadline is None else max(0.0, deadline - time.monotonic())
+                close_actor(candidate, timeout=remaining)
+            except BaseException:
+                raise
+            self._discard_candidate(candidate)
             raise ConnectionClosedError("7709 transport changed while resolving endpoints")
-        if self._runtime_started_callback is not None:
-            self._runtime_started_callback(candidate)
         return candidate
+
+    def _own_candidate(self, runtime: ActorRuntime, registration: Any) -> None:
+        with self._lifecycle:
+            if self._candidate is not None and self._candidate is not runtime:
+                raise RuntimeError("7709 transport already owns another Actor candidate")
+            self._candidate = runtime
+            self._candidate_admitted = False
+            self._candidate_registration = registration
+            if self._finalizer is None:
+                self._finalizer = weakref.finalize(self, abandon_actor, runtime)
+            self._lifecycle.notify_all()
+
+        accepted = registration is None
+        try:
+            if registration is not None:
+                result = registration(runtime)
+                accepted = result is not False
+        except BaseException:
+            request_actor_stop(runtime)
+            raise
+
+        with self._lifecycle:
+            current = self._candidate is runtime and self._candidate_registration is registration
+            pool_identity_valid = self._fixed_runtime_epoch is None or registration is self._runtime_started_callback
+            accepted = accepted and current and pool_identity_valid and not self._pool_runtime_retired and not self._closing
+            if current:
+                self._candidate_admitted = accepted
+            self._lifecycle.notify_all()
+        if not accepted:
+            request_actor_stop(runtime)
+
+    def _discard_candidate(self, candidate: ActorRuntime) -> None:
+        with self._lifecycle:
+            if self._candidate is not candidate:
+                return
+            failed = self._close_failed or candidate.state in (
+                RuntimeState.FAILED,
+                RuntimeState.FAILED_CLOSING,
+                RuntimeState.FAILED_CLOSED,
+            )
+            if failed and self._runtime is None:
+                if candidate.state is RuntimeState.STOPPED:
+                    candidate.state = RuntimeState.FAILED_CLOSED
+                self._runtime = candidate
+            self._candidate = None
+            self._candidate_admitted = False
+            self._candidate_registration = None
+            if not failed and self._runtime is None and self._finalizer is not None:
+                self._finalizer.detach()
+                self._finalizer = None
+            self._lifecycle.notify_all()
+
+    def _pool_runtime_is_active(self, expected_runtime_epoch: int | None = None) -> bool:
+        with self._lifecycle:
+            fixed_epoch = self._fixed_runtime_epoch
+            retired = self._pool_runtime_retired
+            registration = self._runtime_started_callback
+        if expected_runtime_epoch is not None and fixed_epoch != expected_runtime_epoch:
+            return False
+        if fixed_epoch is None:
+            return True
+        if retired or registration is None:
+            return False
+        is_active = getattr(registration, "is_active", None)
+        return True if is_active is None else bool(is_active())
 
     def _configure_pool_runtime(
         self,
@@ -398,7 +648,7 @@ class SocketTransport:
         heartbeat_allowed: Any = None,
     ) -> None:
         with self._lifecycle:
-            if self._runtime is not None or self._starting:
+            if self._runtime is not None or self._candidate is not None or self._starting or self._close_failed:
                 raise RuntimeError("cannot reconfigure a running socket transport")
             self._shared_push_buffer = push_buffer
             self._fixed_runtime_epoch = runtime_epoch
@@ -408,12 +658,54 @@ class SocketTransport:
             self._actor_fatal_callback = actor_fatal_callback
             self._runtime_started_callback = runtime_started_callback
             self._heartbeat_allowed = heartbeat_allowed
+            self._pool_runtime_retired = False
+
+    def _retire_pool_runtime(self, registration: Any) -> bool:
+        with self._submission_gate:
+            with self._lifecycle:
+                if registration is not self._runtime_started_callback:
+                    return False
+                self._pool_runtime_retired = True
+                self._lifecycle.notify_all()
+                return True
+
+    def _clear_pool_runtime(
+        self,
+        *,
+        registration: Any,
+        runtime_epoch: int,
+        push_buffer: PushBuffer,
+    ) -> bool:
+        with self._submission_gate:
+            with self._lifecycle:
+                if (
+                    registration is not self._runtime_started_callback
+                    or runtime_epoch != self._fixed_runtime_epoch
+                    or push_buffer is not self._shared_push_buffer
+                    or self._runtime is not None
+                    or self._candidate is not None
+                    or self._starting
+                    or self._closing
+                ):
+                    return False
+                self._shared_push_buffer = None
+                self._fixed_runtime_epoch = None
+                self._resolved_endpoints = None
+                self._owns_push_buffer = True
+                self._actor_fatal_callback = None
+                self._runtime_started_callback = None
+                self._heartbeat_allowed = None
+                self._pool_runtime_retired = False
+                self._push_buffer = None
+                return True
 
     def _request_stop(self) -> None:
         with self._lifecycle:
             runtime = self._runtime
-        if runtime is not None:
-            request_actor_stop(runtime)
+            candidate = self._candidate
+        for item in (runtime, candidate):
+            if item is not None:
+                request_actor_stop(item)
 
     def _cancel_lease(self, lease_id: int) -> None:
         with self._lifecycle:
@@ -422,17 +714,59 @@ class SocketTransport:
             return
         with runtime.control_lock:
             active = runtime.active_task
-        if isinstance(active, RequestTicket) and active.lease_id == lease_id:
-            cancel_ticket(runtime, active)
+            pending = runtime.pending_task
+            if isinstance(active, (ConnectTicket, RequestTicket)) and active.lease_id == lease_id:
+                target = active
+            elif isinstance(pending, (ConnectTicket, RequestTicket)) and pending.lease_id == lease_id:
+                target = pending
+            else:
+                target = None
+        if target is not None:
+            cancel_ticket(runtime, target)
 
-    def _require_current_runtime(self, runtime: ActorRuntime) -> None:
+    def _require_current_runtime(
+        self,
+        runtime: ActorRuntime,
+        *,
+        expected_runtime_epoch: int | None = None,
+    ) -> None:
         with self._lifecycle:
-            if self._runtime is not runtime or self._closing:
+            invalid = (
+                self._runtime is not runtime
+                or self._closing
+                or self._close_failed
+                or self._pool_runtime_retired
+                or (expected_runtime_epoch is not None and runtime.runtime_epoch != expected_runtime_epoch)
+            )
+        if invalid or not self._pool_runtime_is_active(expected_runtime_epoch):
                 raise ConnectionClosedError("7709 transport runtime changed")
 
     def _acquire_request_lock(self, deadline: float) -> bool:
         remaining = max(0.0, deadline - time.monotonic())
         return self._request_lock.acquire(timeout=remaining)
+
+
+def _unique_runtimes(*items: ActorRuntime | None) -> tuple[ActorRuntime, ...]:
+    unique: list[ActorRuntime] = []
+    for item in items:
+        if item is not None and all(existing is not item for existing in unique):
+            unique.append(item)
+    return tuple(unique)
+
+
+def _mark_failed_closing(items: tuple[ActorRuntime, ...]) -> None:
+    for runtime in items:
+        with runtime.control_lock:
+            if runtime.state is not RuntimeState.FAILED_CLOSED:
+                runtime.state = RuntimeState.FAILED_CLOSING
+
+
+def _mark_failed_closed(items: tuple[ActorRuntime, ...]) -> None:
+    for runtime in items:
+        with runtime.control_lock:
+            thread = runtime.actor_thread
+            if thread is None or not thread.is_alive():
+                runtime.state = RuntimeState.FAILED_CLOSED
 
 
 def _retry_safe(command: int) -> bool:

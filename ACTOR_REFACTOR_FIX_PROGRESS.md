@@ -12,12 +12,12 @@ The result document remains historical evidence only until FINAL rewrites it.
 | Baseline HEAD | `994c49b51f47255bdcd9cdc3308a5a554f37588b` |
 | Base | `71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
 | Branch | `actor-transport-refactor` |
-| Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), last confirmed OPEN and draft at `994c49b` |
+| Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), confirmed OPEN and draft at pushed HEAD `2e48be0` |
 | Baseline worktree | Clean (`git status --short --branch`) |
 | Superseded result | Existing `COMPLETE` claim and 183-test evidence |
 
-The GitHub API was unreachable during the latest F00 refresh. The PR state above
-is the last successful read; it must be refreshed before each pushed checkpoint.
+The PR state and exact pushed head must be refreshed before each checkpoint and
+again before FINAL evidence is accepted.
 
 ## Constraints
 
@@ -31,12 +31,12 @@ is the last successful read; it must be refreshed before each pushed checkpoint.
 
 | Checkpoint | State | Exit evidence |
 | --- | --- | --- |
-| F00 baseline, review, regression design | IN PROGRESS | Ledger committed; A-C defects reproduced; D-E regression set remains to be landed before implementation |
-| F01 receive ordering and boundaries | COMPLETE at next checkpoint | Sequence boundary, full-send gate, pre-send drain, heartbeat gate, partial-tail handling, and unified receive failure path |
-| F02 request identity and build isolation | COMPLETE at next checkpoint | Monotonic request ID, exact cancel, request-local build errors, strict deadline, terminal-owned slot, callback isolation |
-| F03 connect and failover | COMPLETE at next checkpoint | Candidate/attempt budgets, next-endpoint retry, Windows peer verification, non-busy rearm, and seven real/fault-injected regressions |
-| F04 Broker and pinned leases | PENDING | No Event ABA; pin close/connect state is monotonic and capacity is preserved |
-| F05 lifecycle and shutdown | PENDING | Late registration, start/close/fatal, and concurrent close are fail-closed and leak-free |
+| F00 baseline, review, regression design | COMPLETE (`05a5e9b`) | Ledger and deterministic A-E failing baselines recorded before implementation |
+| F01 receive ordering and boundaries | COMPLETE (`8aa089d`) | Sequence boundary, full-send gate, pre-send drain, heartbeat gate, partial-tail handling, and unified receive failure path |
+| F02 request identity and build isolation | COMPLETE (`8aa089d`) | Monotonic request ID, exact cancel, request-local build errors, strict deadline, terminal-owned slot, callback isolation |
+| F03 connect and failover | COMPLETE (`2e48be0`) | Candidate/attempt budgets, next-endpoint retry, Windows peer verification, non-busy rearm, and seven real/fault-injected regressions |
+| F04 Broker and pinned leases | COMPLETE in this checkpoint | Per-waiter Event, exact lease/ticket cancellation, FIFO admission, monotonic pinned close, and capacity preservation |
+| F05 lifecycle and shutdown | COMPLETE in this checkpoint | Candidate ownership, epoch guard, submission/retire gate, single shutdown attempt, rollback ownership, and monotonic failed-close states |
 | F06 stress, performance, resources, compatibility | PENDING | Unique response stress, two servers, warmed resources, performance and heartbeat thresholds |
 | FINAL independent review and CI | PENDING | Two clean adversarial reviews; local matrix/build/docs and exact-HEAD CI/Pages green |
 
@@ -123,6 +123,15 @@ is the last successful read; it must be refreshed before each pushed checkpoint.
 | 2026-07-14 | `python -m pytest -q --ignore=tests/test_transport_failover_regressions.py` | **200 passed in 28.45s**; F03 red tests intentionally remain outside the F01/F02 checkpoint |
 | 2026-07-14 | F03 regressions repeated five consecutive rounds | Every round **7 passed**; 11.72 s aggregate latest run |
 | 2026-07-14 | Full suite after F03 and two read-only reviews | **207 passed in 32.33s** |
+| 2026-07-14 | `python -m pytest -q tests/test_transport_pool_regressions.py tests/test_transport_lifecycle_regressions.py` before F04/F05 | **9 failed, 1 passed in 0.63s**, as required before implementation |
+| 2026-07-14 | F04/F05 focused regressions after implementation | **54 passed in 2.03s** |
+| 2026-07-14 | Actor/Socket/Pool/lifecycle/resources matrix | **124 passed in 6.87s** |
+| 2026-07-14 | First full suite after the final lifecycle changes | **247 passed, 1 failed in 32.11s**; only `test_idle_actor_blocks_and_heartbeat_defers_under_continuous_work`, ratio `0.93921 < 0.95` |
+| 2026-07-14 | `run_heartbeat_impact(5000, trials=7)` alternating-order diagnosis | Median ratio **0.981680**; heartbeat samples sent 0/4/0/0/2/0/0 and the two slowest active samples sent zero, showing substantial scheduling variance rather than wire-heartbeat load; strict FINAL 0.99 gate remains open for F06 |
+| 2026-07-14 | Three independent F04/F05 adversarial reviews | Clean: F04 Actor/Broker/pin, F05 Socket/guard, and F05 pool shutdown found no remaining correctness blocker |
+| 2026-07-14 | `python -m compileall -q src tests` | PASS |
+| 2026-07-14 | `python -m pytest -q tests/test_transport_pool_regressions.py tests/test_transport_lifecycle_regressions.py tests/test_transport_pool.py tests/test_resources.py` | **66 passed in 1.77s** |
+| 2026-07-14 | Full suite after heartbeat diagnosis, same worktree | **248 passed in 30.11s** |
 
 F03 preserves the public absolute deadline and assigns only private candidate
 and first-attempt sub-deadlines. Handshake timeout/EOF, partial business send,
@@ -132,6 +141,25 @@ the healthy loopback within the same deadline. An anomalous ready socket whose
 `SO_ERROR` remains in progress is unregistered and rearmed on a 10 ms selector
 timer; the 20 ms regression observes at most four `SO_ERROR` reads instead of
 the reviewed 5,221-call busy loop.
+
+The nine D/E baseline failures cover the delayed-Event ABA wake, pinned close
+capacity loss, pinned connect releasing a live slot, missing pinned snapshot
+properties, fatal/old-epoch late registration, unpublished candidate cleanup,
+concurrent close overwriting `FAILED_CLOSING`, and pool connect waiting for a
+blocked sibling before requesting stop.
+
+F04 now gives each admission its own terminal Event and exact reservation,
+decrements pin reservations before wakeup, preserves call-order FIFO, and never
+releases a pinned lease until its active or pending Connect/Request ticket is
+terminal. Notify failure atomically withdraws and terminalizes the exact ticket.
+
+F05 installs each Actor candidate before `Thread.start()`, retains the exact
+runtime on startup failure, and serializes pool epoch validation with mailbox
+submission. The pool guard is identity-bound and seals an epoch before stop.
+Concurrent close and FIRST_EXCEPTION rollback share one `ShutdownAttempt` from
+admission retirement through cleanup; an old attempt cannot stop a reopened
+broker epoch. Startup cleanup is best-effort per stage and its failure is
+consumed by shutdown instead of publishing a false `STOPPED` state.
 
 The seven A/B baseline failures were:
 
@@ -157,7 +185,10 @@ state of a pushed correction checkpoint.
 
 ## Exact Next Action
 
-Finish the F00 deterministic regression set. Start with the greater-than-64
-decoded-frame collision where A succeeds, the server receives B but does not
-respond, and B must never return stale value `999`. Preserve the baseline failure
-output here, then implement F01 and run the focused plus full transport suites.
+Create and push the F04/F05 checkpoint, then perform the F06 evidence audit.
+Replace constant-value stress responses with unique request/generation values,
+exercise failover with two real loopback servers, run 10,000 generations, and
+replace the noisy heartbeat comparison with a counterbalanced measurement whose
+CI gate proves less than one percent impact. Add warmed repeated Windows resource
+evidence, pool-size-one and concurrent-100 p50/p99 comparisons, artifact/docs
+builds, and the required CI matrix before rewriting the formal result.

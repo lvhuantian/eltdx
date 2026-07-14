@@ -7,7 +7,7 @@ import time
 import weakref
 from collections import deque
 from collections.abc import Sequence
-from concurrent.futures import ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum, auto
@@ -57,6 +57,19 @@ class LeaseState(Enum):
     RELEASED = auto()
 
 
+class PinState(Enum):
+    OPEN = auto()
+    CLOSING = auto()
+    FAILED = auto()
+    CLOSED = auto()
+
+
+class GuardState(Enum):
+    INACTIVE = auto()
+    ACTIVE = auto()
+    SEALED = auto()
+
+
 @dataclass(slots=True)
 class SlotLease:
     pool_epoch: int
@@ -102,7 +115,6 @@ class LeaseBroker:
         self._lease_counter = 0
         self._pin_waiters = 0
         self._closed = False
-        self._waiter_local = threading.local()
 
     def acquire(self, deadline: float, *, pinned: bool = False) -> SlotLease:
         with self._condition:
@@ -113,12 +125,7 @@ class LeaseBroker:
             if len(self._waiters) + self._pin_waiters >= self.max_pending_requests:
                 raise PoolBusyError("7709 pool admission queue is full")
             self._waiter_counter += 1
-            completed = getattr(self._waiter_local, "completed", None)
-            if completed is None:
-                completed = threading.Event()
-                self._waiter_local.completed = completed
-            else:
-                completed.clear()
+            completed = threading.Event()
             waiter = AdmissionWaiter(self.pool_epoch, self._waiter_counter, deadline, pinned, completed=completed)
             self._waiters.append(waiter)
             self._condition.notify_all()
@@ -280,6 +287,8 @@ class PoolRuntimeGuard:
         self._push_buffer: PushBuffer | None = None
         self._runtimes: list[ActorRuntime] = []
         self._fatal_error: BaseException | None = None
+        self._epoch: int | None = None
+        self._state = GuardState.INACTIVE
 
     def configure(self, broker: LeaseBroker, push_buffer: PushBuffer) -> None:
         with self._lock:
@@ -287,30 +296,92 @@ class PoolRuntimeGuard:
             self._push_buffer = push_buffer
             self._runtimes = []
             self._fatal_error = None
+            self._epoch = broker.pool_epoch
+            self._state = GuardState.ACTIVE
 
-    def add_runtime(self, runtime: ActorRuntime) -> None:
+    def is_active(self, *, pool_epoch: int, broker: LeaseBroker | None) -> bool:
         with self._lock:
-            if all(item is not runtime for item in self._runtimes):
-                self._runtimes.append(runtime)
+            return (
+                self._state is GuardState.ACTIVE
+                and self._fatal_error is None
+                and broker is not None
+                and broker is self._broker
+                and pool_epoch == self._epoch
+            )
 
-    def fail(self, runtime: ActorRuntime, error: BaseException) -> None:
+    def add_runtime(
+        self,
+        runtime: ActorRuntime,
+        *,
+        pool_epoch: int,
+        broker: LeaseBroker | None = None,
+    ) -> bool:
         with self._lock:
-            if self._fatal_error is None:
-                self._fatal_error = error
-            if all(item is not runtime for item in self._runtimes):
+            accepted = (
+                self._state is GuardState.ACTIVE
+                and self._fatal_error is None
+                and self._broker is not None
+                and runtime.runtime_epoch == self._epoch
+                and pool_epoch == self._epoch
+                and broker is self._broker
+            )
+            if accepted and all(item is not runtime for item in self._runtimes):
                 self._runtimes.append(runtime)
-            broker = self._broker
-            push_buffer = self._push_buffer
-            runtimes = tuple(self._runtimes)
-        if broker is not None:
-            broker.close()
+        if not accepted:
+            request_actor_stop(runtime)
+        return accepted
+
+    def fail(
+        self,
+        runtime: ActorRuntime,
+        error: BaseException,
+        *,
+        pool_epoch: int,
+        broker: LeaseBroker | None = None,
+    ) -> None:
+        with self._lock:
+            accepted = (
+                self._state in (GuardState.ACTIVE, GuardState.SEALED)
+                and self._broker is not None
+                and runtime.runtime_epoch == self._epoch
+                and pool_epoch == self._epoch
+                and broker is self._broker
+            )
+            if accepted:
+                if self._fatal_error is None:
+                    self._fatal_error = error
+                if all(item is not runtime for item in self._runtimes):
+                    self._runtimes.append(runtime)
+                current_broker = self._broker
+                push_buffer = self._push_buffer
+                runtimes = tuple(self._runtimes)
+            else:
+                current_broker = None
+                push_buffer = None
+                runtimes = (runtime,)
+        if current_broker is not None:
+            current_broker.close()
         if push_buffer is not None:
             push_buffer.close(error)
         for item in runtimes:
             request_actor_stop(item)
 
+    def seal(self, *, pool_epoch: int, broker: LeaseBroker | None) -> bool:
+        with self._lock:
+            if (
+                self._state not in (GuardState.ACTIVE, GuardState.SEALED)
+                or broker is None
+                or broker is not self._broker
+                or pool_epoch != self._epoch
+            ):
+                return False
+            self._state = GuardState.SEALED
+            return True
+
     def abandon(self) -> None:
         with self._lock:
+            if self._state is GuardState.ACTIVE:
+                self._state = GuardState.SEALED
             broker = self._broker
             push_buffer = self._push_buffer
             runtimes = tuple(self._runtimes)
@@ -325,32 +396,53 @@ class PoolRuntimeGuard:
         with self._lock:
             return self._fatal_error
 
-    def finish_epoch(self) -> None:
+    def finish_epoch(self, *, pool_epoch: int, broker: LeaseBroker) -> BaseException | None:
         with self._lock:
+            if broker is not self._broker or pool_epoch != self._epoch:
+                return self._fatal_error
+            error = self._fatal_error
+            if error is not None:
+                self._state = GuardState.SEALED
+                return error
             self._broker = None
             self._push_buffer = None
             self._runtimes = []
             self._fatal_error = None
+            self._epoch = None
+            self._state = GuardState.INACTIVE
+            return None
 
 
 @dataclass(frozen=True, slots=True)
 class ActorFatalHandle:
     guard_ref: weakref.ReferenceType[PoolRuntimeGuard]
+    pool_epoch: int
+    broker_ref: weakref.ReferenceType[LeaseBroker]
 
     def __call__(self, runtime: ActorRuntime, error: BaseException) -> None:
         guard = self.guard_ref()
-        if guard is not None:
-            guard.fail(runtime, error)
+        if guard is None:
+            request_actor_stop(runtime)
+            return
+        guard.fail(runtime, error, pool_epoch=self.pool_epoch, broker=self.broker_ref())
 
 
 @dataclass(frozen=True, slots=True)
 class RuntimeRegistration:
     guard_ref: weakref.ReferenceType[PoolRuntimeGuard]
+    pool_epoch: int
+    broker_ref: weakref.ReferenceType[LeaseBroker]
 
-    def __call__(self, runtime: ActorRuntime) -> None:
+    def __call__(self, runtime: ActorRuntime) -> bool:
         guard = self.guard_ref()
-        if guard is not None:
-            guard.add_runtime(runtime)
+        if guard is None:
+            request_actor_stop(runtime)
+            return False
+        return guard.add_runtime(runtime, pool_epoch=self.pool_epoch, broker=self.broker_ref())
+
+    def is_active(self) -> bool:
+        guard = self.guard_ref()
+        return guard is not None and guard.is_active(pool_epoch=self.pool_epoch, broker=self.broker_ref())
 
 
 def _abandon_pool(guard: PoolRuntimeGuard) -> None:
@@ -366,6 +458,15 @@ class PoolDiagnostics:
     push_frames: int
     push_bytes: int
     push_dropped: int
+
+
+@dataclass(slots=True)
+class ShutdownAttempt:
+    generation: int
+    broker: LeaseBroker | None = None
+    push_buffer: PushBuffer | None = None
+    completed: threading.Event = field(default_factory=threading.Event)
+    error: BaseException | None = None
 
 
 @dataclass(slots=True)
@@ -413,7 +514,7 @@ class PinnedTransportProxy:
         self._waiters: deque[PinWaiter] = deque()
         self._call_counter = 0
         self._active_call: int | None = None
-        self._closed = False
+        self._state = PinState.OPEN
 
     @property
     def connected_host(self) -> str | None:
@@ -421,32 +522,49 @@ class PinnedTransportProxy:
         return self._slot.connected_host
 
     @property
+    def last_handshake(self) -> Any:
+        self._validate()
+        return self._slot.last_handshake
+
+    @property
+    def last_heartbeat(self) -> Any:
+        self._validate()
+        return self._slot.last_heartbeat
+
+    @property
     def pending_push_count(self) -> int:
         self._validate()
         return self._push_buffer.pending_count
 
     def connect(self) -> None:
-        self._validate()
-        self._slot.connect()
+        deadline = time.monotonic() + self._timeout
+        call_id = self._admit(deadline)
+        completion = PinCompletion(self, call_id)
+        runtime = self._slot._runtime
+        self._slot._connect_with_deadline(
+            deadline=deadline,
+            completion=completion,
+            runtime=runtime,
+            lock_slot=False,
+            lease_id=self._lease.lease_id,
+            expected_runtime_epoch=self._lease.pool_epoch,
+        )
 
     def execute(self, command: int, payload: dict[str, Any] | None = None) -> Any:
         deadline = time.monotonic() + self._timeout
         call_id = self._admit(deadline)
         completion = PinCompletion(self, call_id)
         runtime = self._slot._runtime
-        try:
-            return self._slot._execute_with_lease(
-                command,
-                payload,
-                lease_id=self._lease.lease_id,
-                deadline=deadline,
-                completion=completion,
-                runtime=runtime,
-                lock_slot=False,
-            )
-        except BaseException:
-            completion(None)
-            raise
+        return self._slot._execute_with_lease(
+            command,
+            payload,
+            lease_id=self._lease.lease_id,
+            deadline=deadline,
+            completion=completion,
+            runtime=runtime,
+            lock_slot=False,
+            expected_runtime_epoch=self._lease.pool_epoch,
+        )
 
     def request(self, command: str) -> str:
         self._validate()
@@ -467,61 +585,58 @@ class PinnedTransportProxy:
         return [_parse_push(item) for item in items] if parse else [item.response for item in items]
 
     def close(self) -> None:
-        wake: list[PinWaiter] = []
         with self._condition:
-            if self._closed:
+            while self._state is PinState.CLOSING:
+                self._condition.wait()
+            if self._state is PinState.CLOSED:
                 return
-            self._closed = True
+            self._state = PinState.CLOSING
             while self._waiters:
                 waiter = self._waiters.popleft()
                 waiter.error = ConnectionClosedError("pinned transport closed")
-                wake.append(waiter)
+                if waiter.reserved:
+                    waiter.reserved = False
+                    self._broker.release_pin_waiter()
+                waiter.completed.set()
             active = self._active_call
-        for waiter in wake:
-            if waiter.reserved:
-                self._broker.release_pin_waiter()
-            waiter.completed.set()
-        if active is not None:
-            self._slot._cancel_lease(self._lease.lease_id)
-            deadline = time.monotonic() + min(1.0, self._timeout)
+        try:
+            if active is not None:
+                self._slot._cancel_lease(self._lease.lease_id)
+                deadline = time.monotonic() + min(1.0, self._timeout)
+                with self._condition:
+                    if not self._condition.wait_for(
+                        lambda: self._active_call is None,
+                        timeout=max(0.0, deadline - time.monotonic()),
+                    ):
+                        raise TransportCloseTimeoutError("pinned transport did not quiesce")
+            self._broker.release(self._lease)
+        except BaseException:
             with self._condition:
-                if not self._condition.wait_for(lambda: self._active_call is None, timeout=max(0.0, deadline - time.monotonic())):
-                    raise TransportCloseTimeoutError("pinned transport did not quiesce")
-        self._broker.release(self._lease)
+                self._state = PinState.FAILED
+                self._condition.notify_all()
+            raise
+        with self._condition:
+            self._state = PinState.CLOSED
+            self._condition.notify_all()
 
     def _validate(self) -> None:
         with self._condition:
-            closed = self._closed
-        if closed or not self._broker.validate(self._lease):
+            open_state = self._state is PinState.OPEN
+        if not open_state or not self._broker.validate(self._lease):
             raise ConnectionClosedError("pinned transport lease is no longer valid")
 
     def _admit(self, deadline: float) -> int:
-        self._validate()
         with self._condition:
+            if self._state is not PinState.OPEN or not self._broker.validate(self._lease):
+                raise ConnectionClosedError("pinned transport lease is no longer valid")
             self._call_counter += 1
             call_id = self._call_counter
             if self._active_call is None and not self._waiters:
                 self._active_call = call_id
                 return call_id
-        self._broker.reserve_pin_waiter()
-        waiter = PinWaiter(call_id, deadline, reserved=True)
-        release_reservation = False
-        with self._condition:
-            if self._closed:
-                release_reservation = True
-                waiter.error = ConnectionClosedError("pinned transport closed")
-            elif self._active_call is None and not self._waiters:
-                self._active_call = call_id
-                release_reservation = True
-                waiter.completed.set()
-            else:
-                self._waiters.append(waiter)
-        if release_reservation:
-            self._broker.release_pin_waiter()
-        if waiter.error is not None:
-            raise waiter.error
-        if waiter.completed.is_set():
-            return call_id
+            self._broker.reserve_pin_waiter()
+            waiter = PinWaiter(call_id, deadline, reserved=True)
+            self._waiters.append(waiter)
         if not waiter.completed.wait(max(0.0, deadline - time.monotonic())):
             with self._condition:
                 if waiter.assigned:
@@ -542,7 +657,6 @@ class PinnedTransportProxy:
         return call_id
 
     def _wire_terminal(self, call_id: int) -> None:
-        next_waiter: PinWaiter | None = None
         with self._condition:
             if self._active_call != call_id:
                 return
@@ -550,16 +664,14 @@ class PinnedTransportProxy:
             while self._waiters:
                 candidate = self._waiters.popleft()
                 if candidate.error is None:
-                    next_waiter = candidate
+                    if candidate.reserved:
+                        candidate.reserved = False
+                        self._broker.release_pin_waiter()
                     self._active_call = candidate.call_id
                     candidate.assigned = True
                     candidate.completed.set()
                     break
             self._condition.notify_all()
-        if next_waiter is not None:
-            if next_waiter.reserved:
-                self._broker.release_pin_waiter()
-                next_waiter.reserved = False
 
 
 class PooledSocketTransport:
@@ -599,8 +711,13 @@ class PooledSocketTransport:
         self._state = PoolState.STOPPED
         self._epoch = 0
         self._startup_active = False
+        self._startup_cleanup_error: BaseException | None = None
+        self._shutdown_active = False
+        self._shutdown_generation = 0
+        self._shutdown_attempt: ShutdownAttempt | None = None
         self._broker: LeaseBroker | None = None
         self._push_buffer: PushBuffer | None = None
+        self._registrations: tuple[RuntimeRegistration, ...] = ()
         self._runtime_guard = PoolRuntimeGuard()
         self._finalizer = weakref.finalize(self, _abandon_pool, self._runtime_guard)
 
@@ -668,14 +785,65 @@ class PooledSocketTransport:
         )
 
     def connect(self) -> None:
-        self._ensure_started()
+        broker, push_buffer = self._ensure_started()
+        first_error: BaseException | None = None
+        stopped_early = False
+        shutdown_attempt: ShutdownAttempt | None = None
+        shutdown_owner = False
+        rollback_errors: list[BaseException] = []
+        shutdown_error: BaseException | None = None
+        connect_deadline = time.monotonic() + self._timeout
         with ThreadPoolExecutor(max_workers=self._pool_size, thread_name_prefix="eltdx-pool-connect") as executor:
-            futures = [executor.submit(transport.connect) for transport in self._transports]
+            futures = [
+                executor.submit(
+                    transport._connect_with_deadline,
+                    deadline=connect_deadline,
+                    completion=None,
+                    runtime=transport._runtime,
+                    lock_slot=True,
+                    lease_id=0,
+                    expected_runtime_epoch=broker.pool_epoch,
+                )
+                for transport in self._transports
+            ]
+            done, _ = wait(futures, return_when=FIRST_EXCEPTION)
+            first_error = next((future.exception() for future in done if future.exception() is not None), None)
+            if first_error is not None:
+                shutdown_attempt, shutdown_owner = self._claim_shutdown_attempt(
+                    expected_broker=broker,
+                    expected_push_buffer=push_buffer,
+                )
+                if shutdown_owner:
+                    try:
+                        self._begin_connect_rollback(broker, push_buffer)
+                    except BaseException as exc:
+                        rollback_errors.append(exc)
+                    stopped_early = True
+                    for transport in self._transports:
+                        try:
+                            transport._request_stop()
+                        except BaseException as exc:
+                            rollback_errors.append(exc)
+                            stopped_early = False
+                    try:
+                        self._run_shutdown_attempt(
+                            shutdown_attempt,
+                            already_requested_stop=stopped_early,
+                            initial_errors=rollback_errors,
+                        )
+                    except BaseException as exc:
+                        shutdown_error = exc
             wait(futures)
+            if shutdown_attempt is not None and not shutdown_owner:
+                try:
+                    self._wait_shutdown_attempt(shutdown_attempt)
+                except BaseException as exc:
+                    shutdown_error = exc
         errors = [future.exception() for future in futures if future.exception() is not None]
         if errors:
-            self._shutdown(normal=True)
-            raise errors[0]
+            if shutdown_error is not None:
+                raise shutdown_error
+            raise first_error or errors[0]
 
     def close(self) -> None:
         self._shutdown(normal=True)
@@ -686,6 +854,9 @@ class PooledSocketTransport:
         lease = broker.acquire(deadline)
         completion = LeaseCompletion(broker, lease)
         transport = self._transports[lease.slot_id]
+        if not broker.validate(lease):
+            completion(None)
+            raise ConnectionClosedError("7709 pool lease expired before slot entry")
         return transport._execute_with_lease(
             command,
             payload,
@@ -694,6 +865,7 @@ class PooledSocketTransport:
             completion=completion,
             runtime=transport._runtime,
             lock_slot=False,
+            expected_runtime_epoch=lease.pool_epoch,
         )
 
     @contextmanager
@@ -750,6 +922,7 @@ class PooledSocketTransport:
                     self._condition.wait()
                     continue
                 self._startup_active = True
+                self._startup_cleanup_error = None
                 self._state = PoolState.STARTING
                 observed_epoch = self._epoch
                 candidate_epoch = observed_epoch + 1
@@ -757,6 +930,7 @@ class PooledSocketTransport:
 
         broker: LeaseBroker | None = None
         push_buffer: PushBuffer | None = None
+        configured: list[tuple[SocketTransport, RuntimeRegistration]] = []
         try:
             endpoint_sets = [resolve_hosts(_rotate_hosts(self._hosts, index)) for index in range(self._pool_size)]
             with self._condition:
@@ -771,25 +945,36 @@ class PooledSocketTransport:
             heartbeat_allowed = HeartbeatAdmissionGuard(broker)
             self._runtime_guard.configure(broker, push_buffer)
             guard_ref = weakref.ref(self._runtime_guard)
+            broker_ref = weakref.ref(broker)
             for transport, endpoints in zip(self._transports, endpoint_sets):
+                registration = RuntimeRegistration(guard_ref, candidate_epoch, broker_ref)
                 transport._configure_pool_runtime(
                     push_buffer=push_buffer,
                     runtime_epoch=candidate_epoch,
                     endpoints=endpoints,
-                    actor_fatal_callback=ActorFatalHandle(guard_ref),
-                    runtime_started_callback=RuntimeRegistration(guard_ref),
+                    actor_fatal_callback=ActorFatalHandle(guard_ref, candidate_epoch, broker_ref),
+                    runtime_started_callback=registration,
                     heartbeat_allowed=heartbeat_allowed,
                 )
+                configured.append((transport, registration))
         except BaseException:
-            if broker is not None:
-                broker.close()
-            if push_buffer is not None:
-                push_buffer.close()
-            self._runtime_guard.finish_epoch()
+            cleanup_errors = self._cleanup_unpublished_pool_epoch(
+                broker=broker,
+                push_buffer=push_buffer,
+                runtime_epoch=candidate_epoch,
+                configured=configured,
+            )
             with self._condition:
-                self._startup_active = False
-                if self._state is PoolState.STARTING:
+                if cleanup_errors:
+                    self._broker = broker
+                    self._push_buffer = push_buffer
+                    self._registrations = tuple(registration for _, registration in configured)
+                    self._startup_cleanup_error = cleanup_errors[0]
+                    self._epoch = max(self._epoch, candidate_epoch)
+                    self._state = PoolState.FAILED_CLOSING
+                elif self._state is PoolState.STARTING:
                     self._state = PoolState.STOPPED
+                self._startup_active = False
                 self._condition.notify_all()
             raise
 
@@ -800,66 +985,282 @@ class PooledSocketTransport:
                 self._epoch = candidate_epoch
                 self._broker = broker
                 self._push_buffer = push_buffer
+                self._registrations = tuple(registration for _, registration in configured)
                 self._state = PoolState.RUNNING
                 publish = True
-            self._startup_active = False
-            self._condition.notify_all()
+            if publish:
+                self._startup_active = False
+                self._condition.notify_all()
         if not publish:
-            broker.close()
-            push_buffer.close()
-            self._runtime_guard.finish_epoch()
+            cleanup_errors: list[BaseException] = []
+            try:
+                cleanup_errors = self._cleanup_unpublished_pool_epoch(
+                    broker=broker,
+                    push_buffer=push_buffer,
+                    runtime_epoch=candidate_epoch,
+                    configured=configured,
+                )
+            finally:
+                with self._condition:
+                    if cleanup_errors:
+                        self._broker = broker
+                        self._push_buffer = push_buffer
+                        self._registrations = tuple(registration for _, registration in configured)
+                        self._startup_cleanup_error = cleanup_errors[0]
+                        self._epoch = max(self._epoch, candidate_epoch)
+                        self._state = PoolState.FAILED_CLOSING
+                    self._startup_active = False
+                    self._condition.notify_all()
+            if cleanup_errors:
+                raise cleanup_errors[0]
             raise ConnectionClosedError("7709 pool changed while resolving endpoints")
         return broker, push_buffer
 
-    def _shutdown(self, *, normal: bool) -> None:
+    def _cleanup_unpublished_pool_epoch(
+        self,
+        *,
+        broker: LeaseBroker | None,
+        push_buffer: PushBuffer | None,
+        runtime_epoch: int,
+        configured: Sequence[tuple[SocketTransport, RuntimeRegistration]],
+    ) -> list[BaseException]:
+        errors: list[BaseException] = []
+        for transport, registration in configured:
+            try:
+                transport._retire_pool_runtime(registration)
+            except BaseException as exc:
+                errors.append(exc)
+        if broker is not None:
+            try:
+                self._runtime_guard.seal(pool_epoch=runtime_epoch, broker=broker)
+            except BaseException as exc:
+                errors.append(exc)
+            try:
+                broker.close()
+            except BaseException as exc:
+                errors.append(exc)
+        if push_buffer is not None:
+            try:
+                push_buffer.close()
+            except BaseException as exc:
+                errors.append(exc)
+
+        all_cleared = broker is not None and push_buffer is not None
+        if broker is not None and push_buffer is not None:
+            for transport, registration in configured:
+                try:
+                    cleared = transport._clear_pool_runtime(
+                        registration=registration,
+                        runtime_epoch=runtime_epoch,
+                        push_buffer=push_buffer,
+                    )
+                    if not cleared:
+                        all_cleared = False
+                        errors.append(RuntimeError("7709 pool startup slot configuration was not cleared"))
+                except BaseException as exc:
+                    all_cleared = False
+                    errors.append(exc)
+        if all_cleared and broker is not None:
+            try:
+                finish_error = self._runtime_guard.finish_epoch(pool_epoch=runtime_epoch, broker=broker)
+                if finish_error is not None:
+                    errors.append(finish_error)
+            except BaseException as exc:
+                errors.append(exc)
+        return errors
+
+    def _begin_connect_rollback(self, broker: LeaseBroker, push_buffer: PushBuffer) -> None:
         with self._condition:
-            cancelled_startup = self._startup_active
-            if self._startup_active:
+            if self._broker is not broker or self._push_buffer is not push_buffer:
+                return
+            if self._state is PoolState.RUNNING:
                 self._state = PoolState.CLOSING
                 self._epoch += 1
                 self._condition.notify_all()
-            while self._startup_active:
-                self._condition.wait()
-            if self._state is PoolState.STOPPED:
-                return
-            if self._state is PoolState.FAILED_CLOSED:
-                return
-            failed_before_close = self._runtime_guard.failure() is not None or self._state in (
-                PoolState.FAILED,
-                PoolState.FAILED_CLOSING,
-            )
-            self._state = PoolState.CLOSING
-            if not cancelled_startup:
-                self._epoch += 1
-            broker = self._broker
-            push_buffer = self._push_buffer
-            transports = tuple(self._transports)
-        if broker is not None:
-            broker.close()
-        if push_buffer is not None:
-            push_buffer.close()
-        for transport in transports:
-            transport._request_stop()
-        deadline = time.monotonic() + 1.0
-        errors: list[BaseException] = []
-        for transport in transports:
-            try:
-                transport._close_with_timeout(max(0.0, deadline - time.monotonic()))
-            except BaseException as exc:
-                errors.append(exc)
+            registrations = self._registrations
+        for transport, registration in zip(self._transports, registrations):
+            transport._retire_pool_runtime(registration)
+        self._runtime_guard.seal(pool_epoch=broker.pool_epoch, broker=broker)
+        broker.close()
+        push_buffer.close()
+
+    def _shutdown(self, *, normal: bool, already_requested_stop: bool = False) -> None:
+        del normal
+        attempt, owner = self._claim_shutdown_attempt()
+        if attempt is None:
+            return
+        if not owner:
+            self._wait_shutdown_attempt(attempt)
+            return
+        self._run_shutdown_attempt(attempt, already_requested_stop=already_requested_stop)
+
+    def _claim_shutdown_attempt(
+        self,
+        *,
+        expected_broker: LeaseBroker | None = None,
+        expected_push_buffer: PushBuffer | None = None,
+    ) -> tuple[ShutdownAttempt | None, bool]:
         with self._condition:
-            if errors:
-                self._state = PoolState.FAILED_CLOSING
-            elif failed_before_close:
-                self._state = PoolState.FAILED_CLOSED
-            else:
-                self._state = PoolState.STOPPED
-                self._broker = None
-                self._push_buffer = None
-                self._runtime_guard.finish_epoch()
-            self._condition.notify_all()
-        if errors:
-            raise errors[0]
+            current_attempt = self._shutdown_attempt
+            if current_attempt is not None and not current_attempt.completed.is_set():
+                if expected_broker is not None and (
+                    current_attempt.broker is not expected_broker
+                    or current_attempt.push_buffer is not expected_push_buffer
+                ):
+                    return None, False
+                return current_attempt, False
+            if expected_broker is not None and (
+                self._broker is not expected_broker
+                or self._push_buffer is not expected_push_buffer
+                or self._state is not PoolState.RUNNING
+            ):
+                return None, False
+            if self._state in (PoolState.STOPPED, PoolState.FAILED_CLOSED):
+                return None, False
+            self._shutdown_generation += 1
+            attempt = ShutdownAttempt(self._shutdown_generation, self._broker, self._push_buffer)
+            self._shutdown_attempt = attempt
+            self._shutdown_active = True
+            return attempt, True
+
+    @staticmethod
+    def _wait_shutdown_attempt(attempt: ShutdownAttempt) -> None:
+        attempt.completed.wait()
+        if attempt.error is not None:
+            raise attempt.error
+
+    def _run_shutdown_attempt(
+        self,
+        attempt: ShutdownAttempt,
+        *,
+        already_requested_stop: bool,
+        initial_errors: Sequence[BaseException] = (),
+    ) -> None:
+
+        deadline = time.monotonic() + 1.0
+        errors = list(initial_errors)
+        failed_before_close = False
+        broker: LeaseBroker | None = None
+        push_buffer: PushBuffer | None = None
+        registrations: tuple[RuntimeRegistration, ...] = ()
+        transports = tuple(self._transports)
+        normal_cleanup = False
+        failed_closed = False
+
+        try:
+            with self._condition:
+                already_retired = self._state in (PoolState.CLOSING, PoolState.FAILED_CLOSING)
+                failed_before_close = self._runtime_guard.failure() is not None or self._state in (
+                    PoolState.FAILED,
+                    PoolState.FAILED_CLOSING,
+                )
+                if failed_before_close:
+                    self._state = PoolState.FAILED_CLOSING
+                elif self._state is not PoolState.CLOSING:
+                    self._state = PoolState.CLOSING
+                if not already_retired:
+                    self._epoch += 1
+                self._condition.notify_all()
+                while self._startup_active:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0 or not self._condition.wait(timeout=remaining):
+                        errors.append(TransportCloseTimeoutError("7709 pool startup did not finish before close deadline"))
+                        break
+                if not self._startup_active:
+                    if self._startup_cleanup_error is not None:
+                        errors.append(self._startup_cleanup_error)
+                        self._startup_cleanup_error = None
+                    failed_before_close = failed_before_close or self._runtime_guard.failure() is not None or self._state in (
+                        PoolState.FAILED,
+                        PoolState.FAILED_CLOSING,
+                    )
+                    if failed_before_close:
+                        self._state = PoolState.FAILED_CLOSING
+                broker = self._broker
+                push_buffer = self._push_buffer
+                registrations = self._registrations
+
+            for transport, registration in zip(transports, registrations):
+                try:
+                    transport._retire_pool_runtime(registration)
+                except BaseException as exc:
+                    errors.append(exc)
+            if broker is not None:
+                try:
+                    self._runtime_guard.seal(pool_epoch=broker.pool_epoch, broker=broker)
+                except BaseException as exc:
+                    errors.append(exc)
+                try:
+                    broker.close()
+                except BaseException as exc:
+                    errors.append(exc)
+            if push_buffer is not None:
+                try:
+                    push_buffer.close()
+                except BaseException as exc:
+                    errors.append(exc)
+
+            if not already_requested_stop:
+                for transport in transports:
+                    try:
+                        transport._request_stop()
+                    except BaseException as exc:
+                        errors.append(exc)
+            for transport in transports:
+                try:
+                    transport._close_with_timeout(max(0.0, deadline - time.monotonic()))
+                except BaseException as exc:
+                    errors.append(exc)
+
+            late_failure = self._runtime_guard.failure()
+            failed_closed = failed_before_close or late_failure is not None
+            if not errors and not failed_closed:
+                cleared = True
+                if broker is not None and push_buffer is not None:
+                    for transport, registration in zip(transports, registrations):
+                        try:
+                            cleared = transport._clear_pool_runtime(
+                                registration=registration,
+                                runtime_epoch=broker.pool_epoch,
+                                push_buffer=push_buffer,
+                            ) and cleared
+                        except BaseException as exc:
+                            errors.append(exc)
+                            cleared = False
+                    if cleared and not errors:
+                        finish_error = self._runtime_guard.finish_epoch(
+                            pool_epoch=broker.pool_epoch,
+                            broker=broker,
+                        )
+                        if finish_error is not None:
+                            failed_closed = True
+                if cleared and not errors and not failed_closed:
+                    normal_cleanup = True
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            with self._condition:
+                if errors:
+                    self._state = PoolState.FAILED_CLOSING
+                elif failed_closed:
+                    self._state = PoolState.FAILED_CLOSED
+                elif normal_cleanup:
+                    self._state = PoolState.STOPPED
+                    self._broker = None
+                    self._push_buffer = None
+                    self._registrations = ()
+                else:
+                    self._state = PoolState.FAILED_CLOSING
+                    errors.append(TransportCloseTimeoutError("7709 pool shutdown did not reach a terminal state"))
+                attempt.error = errors[0] if errors else None
+                attempt.broker = None
+                attempt.push_buffer = None
+                self._shutdown_active = False
+                attempt.completed.set()
+                self._condition.notify_all()
+
+        if attempt.error is not None:
+            raise attempt.error
 
     def _new_transport(self, index: int) -> SocketTransport:
         return SocketTransport(

@@ -193,9 +193,13 @@ def test_partial_pool_connect_failure_stops_and_closes_every_slot(monkeypatch) -
 
     for index, transport in enumerate(pool._transports):
         if index == 1:
-            monkeypatch.setattr(transport, "connect", lambda: (_ for _ in ()).throw(ConnectionClosedError("slot failed")))
+            monkeypatch.setattr(
+                transport,
+                "_connect_with_deadline",
+                lambda **kwargs: (_ for _ in ()).throw(ConnectionClosedError("slot failed")),
+            )
         else:
-            monkeypatch.setattr(transport, "connect", lambda: None)
+            monkeypatch.setattr(transport, "_connect_with_deadline", lambda **kwargs: None)
         monkeypatch.setattr(transport, "_request_stop", lambda index=index: stopped.append(index))
         monkeypatch.setattr(transport, "_close_with_timeout", lambda timeout, index=index: closed.append(index))
 

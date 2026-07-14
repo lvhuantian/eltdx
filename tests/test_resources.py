@@ -63,7 +63,18 @@ def test_download_file_pins_pooled_transport(monkeypatch) -> None:
     payloads = [b"abcdefgh", b"ABCDEFGH"]
 
     for index, item in enumerate(transport._transports):
-        def execute(command, payload=None, *, lease_id, deadline, completion, runtime=None, lock_slot=False, index=index):
+        def execute(
+            command,
+            payload=None,
+            *,
+            lease_id,
+            deadline,
+            completion,
+            runtime=None,
+            lock_slot=False,
+            expected_runtime_epoch=None,
+            index=index,
+        ):
             assert command == TYPE_FILE_CONTENT
             request = dict(payload or {})
             calls[index].append(request)

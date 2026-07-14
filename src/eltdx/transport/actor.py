@@ -30,6 +30,13 @@ from .push import PushBuffer, PushFrame
 
 SelectorFactory = Callable[[], selectors.BaseSelector]
 SocketFactory = Callable[[int, int, int], socket.socket]
+CandidateCallback = Callable[["ActorRuntime"], None]
+
+
+class ActorStartupError(TransportError):
+    def __init__(self, message: str, runtime: ActorRuntime) -> None:
+        super().__init__(message)
+        self.runtime = runtime
 
 
 class RuntimeState(Enum):
@@ -67,6 +74,8 @@ TERMINAL_REQUEST_STATES = frozenset((RequestState.SUCCESS, RequestState.FAILED, 
 class ConnectTicket:
     runtime_epoch: int
     deadline: float
+    lease_id: int = 0
+    request_id: int = 0
     completion: Callable[[ConnectTicket | None], None] | None = None
     state: RequestState = RequestState.ADMITTED
     connected_host: str | None = None
@@ -263,6 +272,7 @@ def start_actor(
     request_timeout: float = 8.0,
     owns_push_buffer: bool = True,
     fatal_callback: Callable[[ActorRuntime, BaseException], None] | None = None,
+    candidate_callback: CandidateCallback | None = None,
     startup_timeout: float = 1.0,
 ) -> ActorRuntime:
     runtime = ActorRuntime(
@@ -284,29 +294,43 @@ def start_actor(
         daemon=True,
     )
     runtime.actor_thread = thread
-    thread.start()
+    try:
+        if candidate_callback is not None:
+            candidate_callback(runtime)
+        thread.start()
+    except BaseException as exc:
+        _fail_actor_startup(runtime, exc)
+        raise ActorStartupError("7709 Actor failed before thread startup", runtime) from exc
     if not runtime.started.wait(startup_timeout):
         request_actor_stop(runtime)
-        raise TransportError("7709 Actor failed to start")
+        raise ActorStartupError("7709 Actor failed to start", runtime)
     if runtime.fatal_error is not None:
-        raise TransportError("7709 Actor failed during startup") from runtime.fatal_error
+        raise ActorStartupError("7709 Actor failed during startup", runtime) from runtime.fatal_error
     return runtime
 
 
 def submit_connect(
     runtime: ActorRuntime,
     deadline: float,
+    lease_id: int = 0,
     completion: Callable[[ConnectTicket | None], None] | None = None,
 ) -> ConnectTicket:
-    ticket = ConnectTicket(runtime_epoch=runtime.runtime_epoch, deadline=deadline, completion=completion)
     with runtime.control_lock:
         if runtime.state is not RuntimeState.RUNNING or runtime.stop_requested:
             raise ConnectionClosedError(f"7709 Actor is not running: {runtime.state.name}")
         if runtime.pending_task is not None:
             raise TransportError("7709 Actor mailbox is full")
+        runtime.request_id_counter += 1
+        ticket = ConnectTicket(
+            runtime_epoch=runtime.runtime_epoch,
+            deadline=deadline,
+            lease_id=lease_id,
+            request_id=runtime.request_id_counter,
+            completion=completion,
+        )
         runtime.pending_task = ticket
         writer = runtime.wake_writer
-    _notify_actor(runtime, writer)
+    _notify_submitted_ticket(runtime, ticket, writer)
     return ticket
 
 
@@ -338,11 +362,11 @@ def submit_request(
         )
         runtime.pending_task = ticket
         writer = runtime.wake_writer
-    _notify_actor(runtime, writer)
+    _notify_submitted_ticket(runtime, ticket, writer)
     return ticket
 
 
-def cancel_ticket(runtime: ActorRuntime, ticket: RequestTicket) -> None:
+def cancel_ticket(runtime: ActorRuntime, ticket: ConnectTicket | RequestTicket) -> None:
     with runtime.control_lock:
         if ticket.runtime_epoch != runtime.runtime_epoch or (
             ticket is not runtime.active_task and ticket is not runtime.pending_task
@@ -400,7 +424,7 @@ def close_actor(runtime: ActorRuntime, timeout: float = 1.0) -> None:
         )
     request_actor_stop(runtime)
     thread = runtime.actor_thread
-    if thread is not None and thread is not threading.current_thread():
+    if thread is not None and thread.ident is not None and thread is not threading.current_thread():
         thread.join(max(0.0, timeout))
     if thread is not None and thread.is_alive():
         with runtime.control_lock:
@@ -451,7 +475,8 @@ def _run_actor(runtime: ActorRuntime) -> None:
             runtime.wake_reader = wake_reader
             runtime.wake_writer = wake_writer
             if runtime.stop_requested:
-                runtime.state = RuntimeState.CLOSING
+                if runtime.state is not RuntimeState.FAILED_CLOSING:
+                    runtime.state = RuntimeState.CLOSING
             else:
                 runtime.state = RuntimeState.RUNNING
             runtime.started.set()
@@ -557,24 +582,32 @@ def _apply_cancel(runtime: ActorRuntime, cancel: CancelToken) -> None:
     if cancel.runtime_epoch != runtime.runtime_epoch:
         return
     ticket = runtime.active_task
-    if isinstance(ticket, RequestTicket) and ticket.request_id == cancel.request_id:
+    if isinstance(ticket, (ConnectTicket, RequestTicket)) and (
+        ticket.request_id == cancel.request_id and ticket.lease_id == cancel.lease_id
+    ):
         generation = runtime.generation
-        exchange = generation.active_exchange if generation is not None else None
-        if exchange is not None and exchange.ticket is ticket:
-            if exchange.sent_any:
-                _drop_generation(runtime, ConnectionClosedError("7709 request cancelled after send"))
-            else:
-                generation.active_exchange = None
-                generation.tx_bytes = b""
-                generation.tx_offset = 0
-                generation.state = TcpState.CONNECTED_UNHANDSHAKEN if exchange.handshake else TcpState.READY
-                _set_generation_interest(runtime, generation, selectors.EVENT_READ)
+        if isinstance(ticket, ConnectTicket):
+            if generation is not None and generation.state is TcpState.CONNECTING:
+                _drop_generation(runtime, ConnectionClosedError("7709 connect cancelled"))
+        else:
+            exchange = generation.active_exchange if generation is not None else None
+            if exchange is not None and exchange.ticket is ticket:
+                if exchange.sent_any:
+                    _drop_generation(runtime, ConnectionClosedError("7709 request cancelled after send"))
+                else:
+                    generation.active_exchange = None
+                    generation.tx_bytes = b""
+                    generation.tx_offset = 0
+                    generation.state = TcpState.CONNECTED_UNHANDSHAKEN if exchange.handshake else TcpState.READY
+                    _set_generation_interest(runtime, generation, selectors.EVENT_READ)
         _complete_ticket(ticket, RequestState.CANCELLED, error=ConnectionClosedError("7709 request cancelled"))
         runtime.active_task = None
         return
     with runtime.control_lock:
         pending = runtime.pending_task
-        if isinstance(pending, RequestTicket) and pending.request_id == cancel.request_id:
+        if isinstance(pending, (ConnectTicket, RequestTicket)) and (
+            pending.request_id == cancel.request_id and pending.lease_id == cancel.lease_id
+        ):
             runtime.pending_task = None
         else:
             pending = None
@@ -1171,6 +1204,35 @@ def _notify_actor(runtime: ActorRuntime, writer: socket.socket | None = None) ->
     except OSError:
         if not runtime.stop_requested:
             raise
+
+
+def _notify_submitted_ticket(
+    runtime: ActorRuntime,
+    ticket: ConnectTicket | RequestTicket,
+    writer: socket.socket | None,
+) -> None:
+    try:
+        _notify_actor(runtime, writer)
+    except BaseException as exc:
+        with runtime.control_lock:
+            withdrawn = runtime.pending_task is ticket
+            if withdrawn:
+                runtime.pending_task = None
+        if withdrawn:
+            _complete_ticket(ticket, RequestState.FAILED, error=exc)
+
+
+def _fail_actor_startup(runtime: ActorRuntime, error: BaseException) -> None:
+    with runtime.control_lock:
+        runtime.fatal_error = error
+        runtime.last_error = error
+        runtime.state = RuntimeState.FAILED
+        runtime.started.set()
+        runtime.stopped.set()
+    if runtime.push_buffer is not None and runtime.owns_push_buffer:
+        runtime.push_buffer.close(error)
+    if runtime.fatal_callback is not None:
+        runtime.fatal_callback(runtime, error)
 
 
 def _finish_runtime(runtime: ActorRuntime) -> None:
