@@ -158,7 +158,7 @@ class ActorSnapshot:
     last_error: str | None
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, eq=False)
 class ActorRuntime:
     runtime_epoch: int
     endpoints: tuple[ResolvedEndpoint, ...]
@@ -168,6 +168,7 @@ class ActorRuntime:
     heartbeat_interval: float | None = None
     request_timeout: float = 8.0
     owns_push_buffer: bool = True
+    fatal_callback: Callable[[ActorRuntime, BaseException], None] | None = None
     control_lock: threading.Lock = field(default_factory=threading.Lock)
     state: RuntimeState = RuntimeState.STARTING
     stop_requested: bool = False
@@ -223,6 +224,7 @@ def start_actor(
     heartbeat_interval: float | None = None,
     request_timeout: float = 8.0,
     owns_push_buffer: bool = True,
+    fatal_callback: Callable[[ActorRuntime, BaseException], None] | None = None,
     startup_timeout: float = 1.0,
 ) -> ActorRuntime:
     runtime = ActorRuntime(
@@ -234,6 +236,7 @@ def start_actor(
         heartbeat_interval=heartbeat_interval,
         request_timeout=request_timeout,
         owns_push_buffer=owns_push_buffer,
+        fatal_callback=fatal_callback,
     )
     thread = threading.Thread(
         target=_run_actor,
@@ -318,12 +321,21 @@ def wait_ticket(ticket: ConnectTicket | RequestTicket) -> Any:
 def request_actor_stop(runtime: ActorRuntime) -> None:
     with runtime.control_lock:
         runtime.stop_requested = True
-        if runtime.state in (RuntimeState.STARTING, RuntimeState.RUNNING, RuntimeState.FAILED):
+        thread = runtime.actor_thread
+        if runtime.state in (RuntimeState.STARTING, RuntimeState.RUNNING) or (
+            runtime.state is RuntimeState.FAILED and thread is not None and thread.is_alive()
+        ):
             runtime.state = RuntimeState.CLOSING
     _notify_actor(runtime)
 
 
 def close_actor(runtime: ActorRuntime, timeout: float = 1.0) -> None:
+    with runtime.control_lock:
+        failed_before_close = runtime.fatal_error is not None or runtime.state in (
+            RuntimeState.FAILED,
+            RuntimeState.FAILED_CLOSING,
+            RuntimeState.FAILED_CLOSED,
+        )
     request_actor_stop(runtime)
     thread = runtime.actor_thread
     if thread is not None and thread is not threading.current_thread():
@@ -333,8 +345,14 @@ def close_actor(runtime: ActorRuntime, timeout: float = 1.0) -> None:
             runtime.state = RuntimeState.FAILED_CLOSING
         raise TransportCloseTimeoutError("7709 Actor did not stop within 1 second")
     with runtime.control_lock:
-        if runtime.state is RuntimeState.FAILED_CLOSING:
+        if failed_before_close or runtime.state is RuntimeState.FAILED_CLOSING:
             runtime.state = RuntimeState.FAILED_CLOSED
+
+
+def abandon_actor(runtime: ActorRuntime) -> None:
+    """Best-effort non-blocking finalizer callback for one exact runtime."""
+
+    request_actor_stop(runtime)
 
 
 def actor_snapshot(runtime: ActorRuntime) -> ActorSnapshot:
@@ -401,6 +419,8 @@ def _run_actor(runtime: ActorRuntime) -> None:
             runtime.fatal_error = exc
             runtime.last_error = exc
             runtime.state = RuntimeState.FAILED
+        if runtime.fatal_callback is not None:
+            runtime.fatal_callback(runtime, exc)
     finally:
         _finish_runtime(runtime)
 

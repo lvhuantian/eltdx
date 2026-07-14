@@ -29,14 +29,14 @@ Implement the complete per-slot, single-threaded, non-blocking 7709 `ConnectionA
 | Status | ACTIVE |
 | Spec revision | 1.0 |
 | Spec SHA256 | `C13F9F551CDE202B48B3C1CD7307C2CD31B65DBBA255247D822A444B813CDF61` revalidated 2026-07-14 12:52 +08:00 |
-| Current checkpoint | A07 (starts after A06 commit/push) |
-| Last completed | A06 locally verified; commit/push next |
-| Next exact action | Harden normal reopen, close-timeout failed states, Actor fatal pool fail-closed behavior, standalone/pooled finalizers, old-runtime isolation, and immutable diagnostics. |
+| Current checkpoint | A08 (starts after A07 commit/push) |
+| Last completed | A07 locally verified; commit/push next |
+| Next exact action | Complete the deterministic fault matrix, add bounded stress/soak/resource/performance tooling, run Windows stress and fixed old/new benchmarks, and expand CI to Ubuntu 3.10-3.13 plus Windows 3.11/3.13. |
 | Branch | `actor-transport-refactor` (created locally from verified base) |
 | Base SHA | `71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
-| Local HEAD | `5f82000` before A06 |
-| Remote HEAD | work branch `5f82000`; `origin/main=71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
-| Push state | A05 pushed normally |
+| Local HEAD | `e7d8fca` before A07 |
+| Remote HEAD | work branch `e7d8fca`; `origin/main=71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
+| Push state | A06 pushed normally |
 | Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), OPEN and draft |
 | CI state | run `29307148534` queued/running for Ubuntu CPython 3.10-3.13 at A00 head; Pages run `29307148575` in progress |
 | Current owner | active Goal thread `019f5ef5-6ebb-7291-89ed-6b55c6bb5992` |
@@ -64,7 +64,7 @@ Implement the complete per-slot, single-threaded, non-blocking 7709 `ConnectionA
 | A04 | A03 | DONE | Wire request lifecycle, retry, cancel, generations |
 | A05 | A04 | DONE | Socket facade, heartbeat, push, API compatibility |
 | A06 | A05 | DONE | FIFO pool leases, pin, rollback, shared push |
-| A07 | A06 | PENDING | Reopen, fatal, finalizer, diagnostics |
+| A07 | A06 | DONE | Reopen, fatal, finalizer, diagnostics |
 | A08 | A07 | PENDING | Cross-platform matrix, stress, soak, performance |
 | A09 | A08 | PENDING | Docs, cleanup, full verification, FINAL delivery |
 
@@ -135,6 +135,15 @@ Allowed status values: `PENDING`, `IN_PROGRESS`, `DONE`, `BLOCKED`. At most one 
 - Commit: this A06 checkpoint commit
 - Trailer: `Actor-Checkpoint: A06`
 
+### A07
+
+- Status: `DONE`
+- Owned files: Actor/socket/pool lifecycle and diagnostics, standalone/pool/client finalizers, deterministic lifecycle tests, and this ledger
+- Required commands: lifecycle/fatal/finalizer/resource tests, GC weak-reference tests, close-timeout state tests, full suite and resource scans
+- Acceptance evidence: lifecycle/finalizer targeted 23 passed in 0.44s; broader transport targeted 47 passed in 0.94s; full suite 178 passed in 1.11s; no skips or xfails; no remaining task pytest or Actor process
+- Commit: this A07 checkpoint commit
+- Trailer: `Actor-Checkpoint: A07`
+
 ## A01 Baseline Evidence
 
 All signatures are anchored to base commit `71089c0`; no intentionally failing test, skip, or xfail was added.
@@ -178,6 +187,8 @@ Benchmark environment: Windows 11 10.0.26200 AMD64, CPython 3.12.6, Intel i5-134
 | 2026-07-14 13:42 +08:00 | Windows 11 10.0.26200 AMD64 | CPython 3.12.6 | A05 | `python -m pytest -q` | PASS: 158 passed in 0.95s | No skips or xfails reported. |
 | 2026-07-14 14:03 +08:00 | Windows 11 10.0.26200 AMD64 | CPython 3.12.6 | A06 | pool/socket/client/resource targeted matrix | PASS: 60 passed in 0.51s | FIFO, exact-once release, slow-slot first-idle, queue bounds/timeout/close, pin exclusivity/local FIFO, parser release, rollback, stale proxy, shared push. |
 | 2026-07-14 14:03 +08:00 | Windows 11 10.0.26200 AMD64 | CPython 3.12.6 | A06 | `python -m pytest -q` | PASS: 166 passed in 1.06s | No skips or xfails reported. |
+| 2026-07-14 14:25 +08:00 | Windows 11 10.0.26200 AMD64 | CPython 3.12.6 | A07 | lifecycle/finalizer and pool targeted matrices | PASS: 23 passed in 0.44s; broader transport 47 passed in 0.94s | Reopen, failed-close, fatal fail-closed, DNS epoch, immutable diagnostics, standalone/pool idle/connected/waiting GC. |
+| 2026-07-14 14:25 +08:00 | Windows 11 10.0.26200 AMD64 | CPython 3.12.6 | A07 | `python -m pytest -q` | PASS: 178 passed in 1.11s | No skips or xfails reported. |
 
 ## Open Decisions
 
@@ -209,6 +220,7 @@ Bootstrap inspection found no additional dirty repository paths. Pre-existing Py
 | `schannel: failed to receive handshake, SSL/TLS connection failed` on A01 push | 1 | 2026-07-14 13:02 +08:00 | first push failed; 5-second retry succeeded without history rewrite | resolved |
 | real closed-loopback port produced no Windows selector event and `SO_ERROR=0` until deadline | 1 | 2026-07-14 13:12 +08:00 | isolated with direct `connect_ex`/selector probe; firewall drops refusal | use selectable real fd with injected `ECONNREFUSED` for deterministic SO_ERROR branch, plus separate real loopback success test; resolved |
 | legacy tests monkeypatched obsolete slot `execute()` instead of lease-aware wire entry | 2 | 2026-07-14 13:53-14:00 +08:00 | pool and resource tests failed against intentional scheduler replacement | replaced with Broker/real-socket behavior tests and lease-aware resource stub; resolved |
+| initial A07 lifecycle pytest produced no output and outlived tool timeout | 1 | 2026-07-14 14:15 +08:00 | verbose replay localized missing pool runtime-guard initialization; timed-out child PID 18124 was explicitly terminated | fixed guard placement, reran deterministic suite green, and process audit found no pytest/Actor residue |
 
 ## Remote Synchronization
 

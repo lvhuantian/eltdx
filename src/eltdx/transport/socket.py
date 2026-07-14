@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import threading
 import time
+import weakref
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from eltdx.exceptions import ConnectionClosedError, ResponseTimeoutError
@@ -14,9 +16,12 @@ from eltdx.protocol.constants import TYPE_HANDSHAKE, TYPE_HEARTBEAT
 
 from .actor import (
     ActorRuntime,
+    ActorSnapshot,
     FrameEnvelope,
     RequestTicket,
     RuntimeState,
+    abandon_actor,
+    actor_snapshot,
     cancel_ticket,
     close_actor,
     request_actor_stop,
@@ -30,6 +35,17 @@ from .push import PushBuffer, PushFrame
 DEFAULT_HEARTBEAT_INTERVAL = 30.0
 DEFAULT_PUSH_QUEUE_SIZE = 1024
 DEFAULT_PUSH_QUEUE_BYTES = 8 * 1024 * 1024
+
+
+@dataclass(frozen=True, slots=True)
+class TransportDiagnostics:
+    epoch: int
+    actor: ActorSnapshot | None
+    push_frames: int
+    push_bytes: int
+    push_dropped: int
+    push_max_frames: int
+    push_max_bytes: int
 
 
 class SocketTransport:
@@ -46,6 +62,8 @@ class SocketTransport:
         _shared_push_buffer: PushBuffer | None = None,
         _runtime_epoch: int | None = None,
         _resolved_endpoints: tuple[ResolvedEndpoint, ...] | None = None,
+        _actor_fatal_callback: Any = None,
+        _runtime_started_callback: Any = None,
     ) -> None:
         self._hosts = unique_hosts(list(hosts or DEFAULT_HOSTS))
         if not self._hosts:
@@ -74,6 +92,9 @@ class SocketTransport:
         self._fixed_runtime_epoch = _runtime_epoch
         self._resolved_endpoints = _resolved_endpoints
         self._owns_push_buffer = _shared_push_buffer is None
+        self._actor_fatal_callback = _actor_fatal_callback
+        self._runtime_started_callback = _runtime_started_callback
+        self._finalizer: weakref.finalize | None = None
 
     @property
     def connected_host(self) -> str | None:
@@ -101,6 +122,23 @@ class SocketTransport:
             push_buffer = self._push_buffer
         return push_buffer.pending_count if push_buffer is not None else 0
 
+    @property
+    def diagnostics(self) -> TransportDiagnostics:
+        with self._lifecycle:
+            runtime = self._runtime
+            push_buffer = self._push_buffer
+            epoch = self._epoch
+        push = push_buffer.snapshot() if push_buffer is not None else None
+        return TransportDiagnostics(
+            epoch=epoch,
+            actor=actor_snapshot(runtime) if runtime is not None else None,
+            push_frames=push.frame_count if push is not None else 0,
+            push_bytes=push.byte_count if push is not None else 0,
+            push_dropped=push.dropped_total if push is not None else 0,
+            push_max_frames=push.max_frames_observed if push is not None else 0,
+            push_max_bytes=push.max_bytes_observed if push is not None else 0,
+        )
+
     def connect(self) -> None:
         runtime = self._ensure_runtime()
         deadline = time.monotonic() + self._timeout
@@ -121,6 +159,7 @@ class SocketTransport:
                 self._lifecycle.wait()
             self._closing = True
             self._epoch += 1
+            self._lifecycle.notify_all()
             while self._starting:
                 self._lifecycle.wait()
             runtime = self._runtime
@@ -142,8 +181,17 @@ class SocketTransport:
                         self._last_handshake = runtime.last_handshake
                     if runtime.last_heartbeat is not None:
                         self._last_heartbeat = runtime.last_heartbeat
-                self._runtime = None
-                self._push_buffer = None
+                failed_closed = runtime is not None and runtime.state in (
+                    RuntimeState.FAILED,
+                    RuntimeState.FAILED_CLOSING,
+                    RuntimeState.FAILED_CLOSED,
+                )
+                if not failed_closed:
+                    self._runtime = None
+                    self._push_buffer = None
+                if self._finalizer is not None:
+                    self._finalizer.detach()
+                    self._finalizer = None
             self._closing = False
             self._lifecycle.notify_all()
 
@@ -260,6 +308,11 @@ class SocketTransport:
         candidate: ActorRuntime | None = None
         try:
             endpoints = self._resolved_endpoints or resolve_hosts(self._hosts)
+            with self._lifecycle:
+                if self._epoch != observed_epoch or self._closing:
+                    self._starting = False
+                    self._lifecycle.notify_all()
+                    raise ConnectionClosedError("7709 transport changed while resolving endpoints")
             push_buffer = self._shared_push_buffer or PushBuffer(
                 candidate_epoch, max_frames=self._push_queue_size, max_bytes=self._push_queue_bytes
             )
@@ -270,6 +323,7 @@ class SocketTransport:
                 heartbeat_interval=self._heartbeat_interval,
                 request_timeout=self._timeout,
                 owns_push_buffer=self._owns_push_buffer,
+                fatal_callback=self._actor_fatal_callback,
             )
         except BaseException:
             with self._lifecycle:
@@ -283,12 +337,15 @@ class SocketTransport:
                 self._epoch = candidate_epoch
                 self._runtime = candidate
                 self._push_buffer = push_buffer
+                self._finalizer = weakref.finalize(self, abandon_actor, candidate)
                 publish = True
             self._starting = False
             self._lifecycle.notify_all()
         if not publish:
             close_actor(candidate)
             raise ConnectionClosedError("7709 transport changed while resolving endpoints")
+        if self._runtime_started_callback is not None:
+            self._runtime_started_callback(candidate)
         return candidate
 
     def _configure_pool_runtime(
@@ -297,6 +354,8 @@ class SocketTransport:
         push_buffer: PushBuffer,
         runtime_epoch: int,
         endpoints: tuple[ResolvedEndpoint, ...],
+        actor_fatal_callback: Any = None,
+        runtime_started_callback: Any = None,
     ) -> None:
         with self._lifecycle:
             if self._runtime is not None or self._starting:
@@ -306,6 +365,8 @@ class SocketTransport:
             self._resolved_endpoints = endpoints
             self._owns_push_buffer = False
             self._push_buffer = push_buffer
+            self._actor_fatal_callback = actor_fatal_callback
+            self._runtime_started_callback = runtime_started_callback
 
     def _request_stop(self) -> None:
         with self._lifecycle:

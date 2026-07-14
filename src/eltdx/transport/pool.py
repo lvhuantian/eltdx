@@ -22,6 +22,7 @@ from eltdx.exceptions import (
 from eltdx.hosts import DEFAULT_HOSTS, DEFAULT_PROBE_TIMEOUT, DEFAULT_PROBE_WORKERS, resolve_hosts, sort_hosts_by_latency, unique_hosts
 
 from .push import PushBuffer
+from .actor import ActorRuntime, ActorSnapshot, actor_snapshot, request_actor_stop
 from .socket import (
     DEFAULT_HEARTBEAT_INTERVAL,
     DEFAULT_PUSH_QUEUE_BYTES,
@@ -242,6 +243,103 @@ class LeaseCompletion:
         broker = self._broker_ref()
         if broker is not None:
             broker.release(self._lease)
+
+
+class PoolRuntimeGuard:
+    """Facade-independent runtime group used by fatal paths and finalization."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._broker: LeaseBroker | None = None
+        self._push_buffer: PushBuffer | None = None
+        self._runtimes: list[ActorRuntime] = []
+        self._fatal_error: BaseException | None = None
+
+    def configure(self, broker: LeaseBroker, push_buffer: PushBuffer) -> None:
+        with self._lock:
+            self._broker = broker
+            self._push_buffer = push_buffer
+            self._runtimes = []
+            self._fatal_error = None
+
+    def add_runtime(self, runtime: ActorRuntime) -> None:
+        with self._lock:
+            if all(item is not runtime for item in self._runtimes):
+                self._runtimes.append(runtime)
+
+    def fail(self, runtime: ActorRuntime, error: BaseException) -> None:
+        with self._lock:
+            if self._fatal_error is None:
+                self._fatal_error = error
+            if all(item is not runtime for item in self._runtimes):
+                self._runtimes.append(runtime)
+            broker = self._broker
+            push_buffer = self._push_buffer
+            runtimes = tuple(self._runtimes)
+        if broker is not None:
+            broker.close()
+        if push_buffer is not None:
+            push_buffer.close(error)
+        for item in runtimes:
+            request_actor_stop(item)
+
+    def abandon(self) -> None:
+        with self._lock:
+            broker = self._broker
+            push_buffer = self._push_buffer
+            runtimes = tuple(self._runtimes)
+        if broker is not None:
+            broker.close()
+        if push_buffer is not None:
+            push_buffer.close()
+        for runtime in runtimes:
+            request_actor_stop(runtime)
+
+    def failure(self) -> BaseException | None:
+        with self._lock:
+            return self._fatal_error
+
+    def finish_epoch(self) -> None:
+        with self._lock:
+            self._broker = None
+            self._push_buffer = None
+            self._runtimes = []
+            self._fatal_error = None
+
+
+@dataclass(frozen=True, slots=True)
+class ActorFatalHandle:
+    guard_ref: weakref.ReferenceType[PoolRuntimeGuard]
+
+    def __call__(self, runtime: ActorRuntime, error: BaseException) -> None:
+        guard = self.guard_ref()
+        if guard is not None:
+            guard.fail(runtime, error)
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeRegistration:
+    guard_ref: weakref.ReferenceType[PoolRuntimeGuard]
+
+    def __call__(self, runtime: ActorRuntime) -> None:
+        guard = self.guard_ref()
+        if guard is not None:
+            guard.add_runtime(runtime)
+
+
+def _abandon_pool(guard: PoolRuntimeGuard) -> None:
+    guard.abandon()
+
+
+@dataclass(frozen=True, slots=True)
+class PoolDiagnostics:
+    epoch: int
+    state: PoolState
+    broker: BrokerSnapshot | None
+    actors: tuple[ActorSnapshot, ...]
+    push_frames: int
+    push_bytes: int
+    push_dropped: int
 
 
 @dataclass(slots=True)
@@ -474,6 +572,8 @@ class PooledSocketTransport:
         self._startup_active = False
         self._broker: LeaseBroker | None = None
         self._push_buffer: PushBuffer | None = None
+        self._runtime_guard = PoolRuntimeGuard()
+        self._finalizer = weakref.finalize(self, _abandon_pool, self._runtime_guard)
 
     @property
     def hosts(self) -> tuple[str, ...]:
@@ -512,6 +612,31 @@ class PooledSocketTransport:
         with self._condition:
             push_buffer = self._push_buffer
         return push_buffer.pending_count if push_buffer is not None else 0
+
+    @property
+    def diagnostics(self) -> PoolDiagnostics:
+        with self._condition:
+            state = self._state
+            epoch = self._epoch
+            broker = self._broker
+            push_buffer = self._push_buffer
+        if self._runtime_guard.failure() is not None and state is PoolState.RUNNING:
+            state = PoolState.FAILED
+        push = push_buffer.snapshot() if push_buffer is not None else None
+        actors = tuple(
+            actor_snapshot(runtime)
+            for transport in self._transports
+            if (runtime := transport._runtime) is not None
+        )
+        return PoolDiagnostics(
+            epoch=epoch,
+            state=state,
+            broker=broker.snapshot() if broker is not None else None,
+            actors=actors,
+            push_frames=push.frame_count if push is not None else 0,
+            push_bytes=push.byte_count if push is not None else 0,
+            push_dropped=push.dropped_total if push is not None else 0,
+        )
 
     def connect(self) -> None:
         self._ensure_started()
@@ -582,6 +707,10 @@ class PooledSocketTransport:
         while True:
             with self._condition:
                 if self._state is PoolState.RUNNING and self._broker is not None and self._push_buffer is not None:
+                    failure = self._runtime_guard.failure()
+                    if failure is not None:
+                        self._state = PoolState.FAILED
+                        raise ConnectionClosedError("7709 pool failed because an Actor terminated") from failure
                     return self._broker, self._push_buffer
                 if self._state in (PoolState.CLOSING, PoolState.FAILED, PoolState.FAILED_CLOSING, PoolState.FAILED_CLOSED):
                     raise ConnectionClosedError(f"7709 pool is not usable: {self._state.name}")
@@ -594,24 +723,39 @@ class PooledSocketTransport:
                 candidate_epoch = observed_epoch + 1
                 break
 
+        broker: LeaseBroker | None = None
+        push_buffer: PushBuffer | None = None
         try:
             endpoint_sets = [resolve_hosts(_rotate_hosts(self._hosts, index)) for index in range(self._pool_size)]
+            with self._condition:
+                if self._epoch != observed_epoch or self._state is not PoolState.STARTING:
+                    raise ConnectionClosedError("7709 pool changed while resolving endpoints")
             push_buffer = PushBuffer(
                 candidate_epoch,
                 max_frames=self._push_queue_size,
                 max_bytes=self._push_queue_bytes,
             )
             broker = LeaseBroker(candidate_epoch, self._pool_size, self._max_pending_requests)
+            self._runtime_guard.configure(broker, push_buffer)
+            guard_ref = weakref.ref(self._runtime_guard)
             for transport, endpoints in zip(self._transports, endpoint_sets):
                 transport._configure_pool_runtime(
                     push_buffer=push_buffer,
                     runtime_epoch=candidate_epoch,
                     endpoints=endpoints,
+                    actor_fatal_callback=ActorFatalHandle(guard_ref),
+                    runtime_started_callback=RuntimeRegistration(guard_ref),
                 )
         except BaseException:
+            if broker is not None:
+                broker.close()
+            if push_buffer is not None:
+                push_buffer.close()
+            self._runtime_guard.finish_epoch()
             with self._condition:
                 self._startup_active = False
-                self._state = PoolState.STOPPED
+                if self._state is PoolState.STARTING:
+                    self._state = PoolState.STOPPED
                 self._condition.notify_all()
             raise
 
@@ -629,17 +773,30 @@ class PooledSocketTransport:
         if not publish:
             broker.close()
             push_buffer.close()
+            self._runtime_guard.finish_epoch()
             raise ConnectionClosedError("7709 pool changed while resolving endpoints")
         return broker, push_buffer
 
     def _shutdown(self, *, normal: bool) -> None:
         with self._condition:
+            cancelled_startup = self._startup_active
+            if self._startup_active:
+                self._state = PoolState.CLOSING
+                self._epoch += 1
+                self._condition.notify_all()
             while self._startup_active:
                 self._condition.wait()
             if self._state is PoolState.STOPPED:
                 return
+            if self._state is PoolState.FAILED_CLOSED:
+                return
+            failed_before_close = self._runtime_guard.failure() is not None or self._state in (
+                PoolState.FAILED,
+                PoolState.FAILED_CLOSING,
+            )
             self._state = PoolState.CLOSING
-            self._epoch += 1
+            if not cancelled_startup:
+                self._epoch += 1
             broker = self._broker
             push_buffer = self._push_buffer
             transports = tuple(self._transports)
@@ -659,10 +816,13 @@ class PooledSocketTransport:
         with self._condition:
             if errors:
                 self._state = PoolState.FAILED_CLOSING
+            elif failed_before_close:
+                self._state = PoolState.FAILED_CLOSED
             else:
                 self._state = PoolState.STOPPED
                 self._broker = None
                 self._push_buffer = None
+                self._runtime_guard.finish_epoch()
             self._condition.notify_all()
         if errors:
             raise errors[0]
