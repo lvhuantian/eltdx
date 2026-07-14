@@ -14,12 +14,15 @@ from typing import Any
 
 from eltdx.exceptions import (
     ConnectionClosedError,
+    ProtocolError,
     ResponseTimeoutError,
     TransportCloseTimeoutError,
     TransportError,
 )
 from eltdx.hosts import ResolvedEndpoint
-from eltdx.protocol.frame import ResponseFrameDecoder
+from eltdx.protocol.commands import build_command_frame, parse_command_response
+from eltdx.protocol.constants import TYPE_HANDSHAKE
+from eltdx.protocol.frame import ResponseFrame, ResponseFrameDecoder
 
 
 SelectorFactory = Callable[[], selectors.BaseSelector]
@@ -76,6 +79,7 @@ class RequestTicket:
     request_payload_snapshot: object
     deadline: float
     retry_safe: bool
+    completion: Callable[[RequestTicket], None] | None = None
     attempts: int = 0
     state: RequestState = RequestState.ADMITTED
     result: object | None = None
@@ -93,9 +97,40 @@ class TcpGeneration:
     decoder: ResponseFrameDecoder = field(default_factory=ResponseFrameDecoder)
     tx_bytes: bytes = b""
     tx_offset: int = 0
-    active_exchange: object | None = None
+    active_exchange: WireExchange | None = None
     connected_at: float = 0.0
     last_activity_at: float = 0.0
+
+
+@dataclass(slots=True)
+class WireExchange:
+    ticket: RequestTicket
+    command: int
+    msg_id: int
+    msg_type: int
+    frame: bytes
+    handshake: bool
+    sent_any: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class CancelToken:
+    runtime_epoch: int
+    tcp_generation: int
+    lease_id: int
+
+
+@dataclass(frozen=True, slots=True)
+class FrameEnvelope:
+    runtime_epoch: int
+    tcp_generation: int
+    lease_id: int
+    msg_id: int
+    msg_type: int
+    command: int
+    connected_host: str
+    request_payload_snapshot: object
+    response: ResponseFrame
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +151,7 @@ class ActorSnapshot:
     actor_alive: bool
     pending_depth: int
     reconnect_count: int
+    stale_event_count: int
     last_error: str | None
 
 
@@ -129,7 +165,7 @@ class ActorRuntime:
     state: RuntimeState = RuntimeState.STARTING
     stop_requested: bool = False
     pending_task: ConnectTicket | RequestTicket | None = None
-    cancel_request: object | None = None
+    cancel_request: CancelToken | None = None
     started: threading.Event = field(default_factory=threading.Event)
     stopped: threading.Event = field(default_factory=threading.Event)
     generation_started: threading.Event = field(default_factory=threading.Event)
@@ -145,6 +181,9 @@ class ActorRuntime:
     reconnect_count: int = 0
     connected_host: str | None = None
     last_error: BaseException | None = None
+    msg_id_counter: int = 0
+    stale_event_count: int = 0
+    last_handshake: object | None = None
 
 
 _SUCCESS_CONNECT_CODES = frozenset(
@@ -208,6 +247,46 @@ def submit_connect(runtime: ActorRuntime, deadline: float) -> ConnectTicket:
     return ticket
 
 
+def submit_request(
+    runtime: ActorRuntime,
+    *,
+    lease_id: int,
+    command: int,
+    payload: object,
+    deadline: float,
+    retry_safe: bool,
+    completion: Callable[[RequestTicket], None] | None = None,
+) -> RequestTicket:
+    ticket = RequestTicket(
+        runtime_epoch=runtime.runtime_epoch,
+        lease_id=lease_id,
+        command=command,
+        request_payload_snapshot=payload,
+        deadline=deadline,
+        retry_safe=retry_safe,
+        completion=completion,
+    )
+    with runtime.control_lock:
+        if runtime.state is not RuntimeState.RUNNING or runtime.stop_requested:
+            raise ConnectionClosedError(f"7709 Actor is not running: {runtime.state.name}")
+        if runtime.pending_task is not None:
+            raise TransportError("7709 Actor mailbox is full")
+        runtime.pending_task = ticket
+    _notify_actor(runtime)
+    return ticket
+
+
+def cancel_ticket(runtime: ActorRuntime, ticket: RequestTicket) -> None:
+    with runtime.control_lock:
+        generation = runtime.generation
+        runtime.cancel_request = CancelToken(
+            runtime_epoch=runtime.runtime_epoch,
+            tcp_generation=generation.generation_id if generation is not None else 0,
+            lease_id=ticket.lease_id,
+        )
+    _notify_actor(runtime)
+
+
 def wait_ticket(ticket: ConnectTicket | RequestTicket) -> Any:
     remaining = max(0.0, ticket.deadline - time.monotonic())
     ticket.completed.wait(remaining + 0.05)
@@ -255,6 +334,7 @@ def actor_snapshot(runtime: ActorRuntime) -> ActorSnapshot:
             actor_alive=thread is not None and thread.is_alive(),
             pending_depth=int(runtime.pending_task is not None) + int(runtime.active_task is not None),
             reconnect_count=runtime.reconnect_count,
+            stale_event_count=runtime.stale_event_count,
             last_error=str(runtime.last_error) if runtime.last_error is not None else None,
         )
 
@@ -310,6 +390,11 @@ def _run_actor(runtime: ActorRuntime) -> None:
 
 def _drain_control(runtime: ActorRuntime) -> None:
     with runtime.control_lock:
+        cancel = runtime.cancel_request
+        runtime.cancel_request = None
+    if cancel is not None:
+        _apply_cancel(runtime, cancel)
+    with runtime.control_lock:
         if runtime.stop_requested or runtime.active_task is not None:
             return
         task = runtime.pending_task
@@ -319,24 +404,95 @@ def _drain_control(runtime: ActorRuntime) -> None:
         return
     if isinstance(task, ConnectTicket):
         generation = runtime.generation
-        if generation is not None and generation.state is TcpState.CONNECTED_UNHANDSHAKEN:
+        if generation is not None and generation.state in (TcpState.CONNECTED_UNHANDSHAKEN, TcpState.READY):
             _complete_ticket(task, RequestState.SUCCESS, connected_host=generation.endpoint.host)
             runtime.active_task = None
             return
         runtime.endpoint_index = 0
         _start_next_endpoint(runtime)
         return
-    _complete_ticket(task, RequestState.FAILED, error=TransportError("request wire lifecycle is not active yet"))
-    runtime.active_task = None
+    if isinstance(task, RequestTicket):
+        _start_request_attempt(runtime)
+
+
+def _apply_cancel(runtime: ActorRuntime, cancel: CancelToken) -> None:
+    if cancel.runtime_epoch != runtime.runtime_epoch:
+        return
+    ticket = runtime.active_task
+    if isinstance(ticket, RequestTicket) and ticket.lease_id == cancel.lease_id:
+        generation = runtime.generation
+        if generation is not None and cancel.tcp_generation not in (0, generation.generation_id):
+            runtime.stale_event_count += 1
+            return
+        exchange = generation.active_exchange if generation is not None else None
+        if exchange is not None and exchange.sent_any:
+            _drop_generation(runtime, ConnectionClosedError("7709 request cancelled after send"))
+        _complete_ticket(ticket, RequestState.CANCELLED, error=ConnectionClosedError("7709 request cancelled"))
+        runtime.active_task = None
+        return
+    with runtime.control_lock:
+        pending = runtime.pending_task
+        if isinstance(pending, RequestTicket) and pending.lease_id == cancel.lease_id:
+            runtime.pending_task = None
+        else:
+            pending = None
+    if pending is not None:
+        _complete_ticket(pending, RequestState.CANCELLED, error=ConnectionClosedError("7709 request cancelled"))
+
+
+def _start_request_attempt(runtime: ActorRuntime) -> None:
+    ticket = runtime.active_task
+    if not isinstance(ticket, RequestTicket):
+        return
+    if time.monotonic() >= ticket.deadline:
+        _complete_ticket(ticket, RequestState.FAILED, error=ResponseTimeoutError("7709 response timed out before connect"))
+        runtime.active_task = None
+        return
+    ticket.attempts += 1
+    generation = runtime.generation
+    if generation is None:
+        runtime.endpoint_index = 0
+        _start_next_endpoint(runtime)
+        return
+    if generation.state is TcpState.CONNECTED_UNHANDSHAKEN and ticket.command != TYPE_HANDSHAKE:
+        _begin_exchange(runtime, ticket, TYPE_HANDSHAKE, handshake=True)
+        return
+    _begin_exchange(runtime, ticket, ticket.command, handshake=False)
+
+
+def _begin_exchange(runtime: ActorRuntime, ticket: RequestTicket, command: int, *, handshake: bool) -> None:
+    generation = runtime.generation
+    if generation is None:
+        raise RuntimeError("cannot start wire exchange without a TCP generation")
+    runtime.msg_id_counter = 1 if runtime.msg_id_counter >= 0xFFFFFFFF else runtime.msg_id_counter + 1
+    payload = {} if handshake else ticket.request_payload_snapshot
+    if not isinstance(payload, dict):
+        payload = dict(payload)  # type: ignore[arg-type]
+    request = build_command_frame(command, payload, runtime.msg_id_counter)
+    frame = request.to_bytes()
+    generation.tx_bytes = frame
+    generation.tx_offset = 0
+    generation.active_exchange = WireExchange(
+        ticket=ticket,
+        command=command,
+        msg_id=request.msg_id,
+        msg_type=request.msg_type,
+        frame=frame,
+        handshake=handshake,
+    )
+    generation.state = TcpState.HANDSHAKING if handshake else TcpState.READY
+    if not handshake:
+        ticket.state = RequestState.SENDING
+    _set_generation_interest(runtime, generation, selectors.EVENT_READ | selectors.EVENT_WRITE)
 
 
 def _start_next_endpoint(runtime: ActorRuntime) -> None:
     ticket = runtime.active_task
-    if not isinstance(ticket, ConnectTicket):
+    if not isinstance(ticket, (ConnectTicket, RequestTicket)):
         return
     while runtime.endpoint_index < len(runtime.endpoints):
         if time.monotonic() >= ticket.deadline:
-            _fail_connect_task(runtime, ResponseTimeoutError("7709 response timed out during connect"))
+            _fail_active_task(runtime, ResponseTimeoutError("7709 response timed out during connect"), retryable=False)
             return
         endpoint = runtime.endpoints[runtime.endpoint_index]
         runtime.endpoint_index += 1
@@ -370,7 +526,7 @@ def _start_next_endpoint(runtime: ActorRuntime) -> None:
     error = ConnectionClosedError("unable to connect to any 7709 host")
     if runtime.last_error is not None:
         error.__cause__ = runtime.last_error
-    _fail_connect_task(runtime, error)
+    _fail_active_task(runtime, error, retryable=True)
 
 
 def _register_connecting(runtime: ActorRuntime, generation: TcpGeneration) -> None:
@@ -384,6 +540,17 @@ def _register_connecting(runtime: ActorRuntime, generation: TcpGeneration) -> No
     )
 
 
+def _set_generation_interest(runtime: ActorRuntime, generation: TcpGeneration, events: int) -> None:
+    selector = runtime.selector
+    if selector is None:
+        raise RuntimeError("Actor selector is unavailable")
+    token = SelectorToken("tcp", runtime.runtime_epoch, generation.generation_id, generation.sock)
+    try:
+        selector.modify(generation.sock, events, token)
+    except KeyError:
+        selector.register(generation.sock, events, token)
+
+
 def _handle_tcp_event(runtime: ActorRuntime, token: SelectorToken, mask: int) -> None:
     generation = runtime.generation
     if (
@@ -392,8 +559,18 @@ def _handle_tcp_event(runtime: ActorRuntime, token: SelectorToken, mask: int) ->
         or token.tcp_generation != generation.generation_id
         or token.sock is not generation.sock
     ):
+        runtime.stale_event_count += 1
         return
     if generation.state is not TcpState.CONNECTING:
+        try:
+            if mask & selectors.EVENT_WRITE:
+                _send_generation(runtime, generation)
+            if runtime.generation is generation and mask & selectors.EVENT_READ:
+                _receive_generation(runtime, generation)
+        except ProtocolError as exc:
+            _handle_wire_failure(runtime, exc, retryable=False)
+        except (OSError, ConnectionClosedError) as exc:
+            _handle_wire_failure(runtime, exc, retryable=True)
         return
     error_code = generation.sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
     if error_code == 0:
@@ -405,6 +582,100 @@ def _handle_tcp_event(runtime: ActorRuntime, token: SelectorToken, mask: int) ->
     runtime.last_error = error
     _drop_generation(runtime, error)
     _start_next_endpoint(runtime)
+
+
+def _send_generation(runtime: ActorRuntime, generation: TcpGeneration) -> None:
+    exchange = generation.active_exchange
+    if exchange is None or generation.tx_offset >= len(generation.tx_bytes):
+        return
+    try:
+        sent = generation.sock.send(memoryview(generation.tx_bytes)[generation.tx_offset:])
+    except BlockingIOError:
+        return
+    if sent == 0:
+        raise ConnectionClosedError("7709 socket closed during send")
+    exchange.sent_any = True
+    generation.tx_offset += sent
+    generation.last_activity_at = time.monotonic()
+    if generation.tx_offset < len(generation.tx_bytes):
+        return
+    if not exchange.handshake:
+        exchange.ticket.state = RequestState.WAITING_RESPONSE
+    _set_generation_interest(runtime, generation, selectors.EVENT_READ)
+
+
+def _receive_generation(runtime: ActorRuntime, generation: TcpGeneration) -> None:
+    bytes_read = 0
+    frames_read = 0
+    while bytes_read < 256 * 1024 and frames_read < 64:
+        try:
+            chunk = generation.sock.recv(min(64 * 1024, 256 * 1024 - bytes_read))
+        except BlockingIOError:
+            return
+        if not chunk:
+            generation.decoder.finish()
+            raise ConnectionClosedError("7709 socket closed by remote peer")
+        bytes_read += len(chunk)
+        generation.last_activity_at = time.monotonic()
+        frames = generation.decoder.feed(chunk)
+        for response in frames:
+            frames_read += 1
+            _route_frame(runtime, generation, response)
+            if runtime.generation is not generation or frames_read >= 64:
+                return
+
+
+def _route_frame(runtime: ActorRuntime, generation: TcpGeneration, response: ResponseFrame) -> None:
+    exchange = generation.active_exchange
+    active = runtime.active_task
+    if (
+        exchange is None
+        or exchange.ticket is not active
+        or exchange.ticket.runtime_epoch != runtime.runtime_epoch
+        or response.msg_id != exchange.msg_id
+        or response.msg_type != exchange.msg_type
+    ):
+        runtime.stale_event_count += 1
+        return
+
+    ticket = exchange.ticket
+    if exchange.handshake:
+        runtime.last_handshake = parse_command_response(TYPE_HANDSHAKE, response, {})
+        generation.active_exchange = None
+        generation.tx_bytes = b""
+        generation.tx_offset = 0
+        generation.state = TcpState.READY
+        if ticket.command != TYPE_HANDSHAKE:
+            _begin_exchange(runtime, ticket, ticket.command, handshake=False)
+            return
+    elif ticket.command == TYPE_HANDSHAKE:
+        runtime.last_handshake = parse_command_response(TYPE_HANDSHAKE, response, {})
+    envelope = FrameEnvelope(
+        runtime_epoch=runtime.runtime_epoch,
+        tcp_generation=generation.generation_id,
+        lease_id=ticket.lease_id,
+        msg_id=response.msg_id,
+        msg_type=response.msg_type,
+        command=ticket.command,
+        connected_host=generation.endpoint.host,
+        request_payload_snapshot=ticket.request_payload_snapshot,
+        response=response,
+    )
+    generation.active_exchange = None
+    generation.tx_bytes = b""
+    generation.tx_offset = 0
+    generation.state = TcpState.READY
+    runtime.active_task = None
+    _set_generation_interest(runtime, generation, selectors.EVENT_READ)
+    _complete_ticket(ticket, RequestState.SUCCESS, result=envelope)
+
+
+def _handle_wire_failure(runtime: ActorRuntime, error: BaseException, *, retryable: bool) -> None:
+    generation = runtime.generation
+    exchange = generation.active_exchange if generation is not None else None
+    sent_business = bool(exchange is not None and not exchange.handshake and exchange.sent_any)
+    _drop_generation(runtime, error)
+    _fail_active_task(runtime, error, retryable=retryable, sent_business=sent_business)
 
 
 def _finish_connect(runtime: ActorRuntime, generation: TcpGeneration) -> None:
@@ -422,15 +693,32 @@ def _finish_connect(runtime: ActorRuntime, generation: TcpGeneration) -> None:
     ticket = runtime.active_task
     if isinstance(ticket, ConnectTicket):
         _complete_ticket(ticket, RequestState.SUCCESS, connected_host=generation.endpoint.host)
-    runtime.active_task = None
+        runtime.active_task = None
+    elif isinstance(ticket, RequestTicket):
+        if ticket.command == TYPE_HANDSHAKE:
+            _begin_exchange(runtime, ticket, TYPE_HANDSHAKE, handshake=False)
+        else:
+            _begin_exchange(runtime, ticket, TYPE_HANDSHAKE, handshake=True)
 
 
 def _expire_active_task(runtime: ActorRuntime) -> None:
     ticket = runtime.active_task
     if ticket is None or time.monotonic() < ticket.deadline:
         return
-    _drop_generation(runtime, ResponseTimeoutError("7709 response timed out during connect"))
-    _fail_connect_task(runtime, ResponseTimeoutError("7709 response timed out during connect"))
+    generation = runtime.generation
+    exchange = generation.active_exchange if generation is not None else None
+    if generation is None or generation.state is TcpState.CONNECTING:
+        stage = "connect"
+    elif exchange is not None and exchange.handshake:
+        stage = "handshake"
+    elif exchange is not None and generation.tx_offset < len(generation.tx_bytes):
+        stage = "send"
+    else:
+        stage = "response"
+    error = ResponseTimeoutError(f"7709 response timed out during {stage}")
+    sent_business = bool(exchange is not None and not exchange.handshake and exchange.sent_any)
+    _drop_generation(runtime, error)
+    _fail_active_task(runtime, error, retryable=True, sent_business=sent_business)
 
 
 def _selector_timeout(runtime: ActorRuntime) -> float | None:
@@ -440,11 +728,41 @@ def _selector_timeout(runtime: ActorRuntime) -> float | None:
     return max(0.0, ticket.deadline - time.monotonic())
 
 
-def _fail_connect_task(runtime: ActorRuntime, error: BaseException) -> None:
+def _fail_active_task(
+    runtime: ActorRuntime,
+    error: BaseException,
+    *,
+    retryable: bool,
+    sent_business: bool = False,
+) -> None:
     ticket = runtime.active_task
     if isinstance(ticket, ConnectTicket):
         _complete_ticket(ticket, RequestState.FAILED, error=error)
-    runtime.active_task = None
+        runtime.active_task = None
+        return
+    if isinstance(ticket, RequestTicket):
+        with runtime.control_lock:
+            cancel = runtime.cancel_request
+            if cancel is not None and cancel.runtime_epoch == runtime.runtime_epoch and cancel.lease_id == ticket.lease_id:
+                runtime.cancel_request = None
+            else:
+                cancel = None
+        if cancel is not None:
+            _complete_ticket(ticket, RequestState.CANCELLED, error=ConnectionClosedError("7709 request cancelled"))
+            runtime.active_task = None
+            return
+        can_retry = (
+            retryable
+            and ticket.attempts < 2
+            and time.monotonic() < ticket.deadline
+            and (ticket.retry_safe or not sent_business)
+        )
+        if can_retry:
+            ticket.state = RequestState.ADMITTED
+            _start_request_attempt(runtime)
+            return
+        _complete_ticket(ticket, RequestState.FAILED, error=error)
+        runtime.active_task = None
 
 
 def _complete_ticket(
@@ -464,7 +782,11 @@ def _complete_ticket(
             ticket.connected_host = connected_host
         else:
             ticket.result = result
-    ticket.completed.set()
+    try:
+        if isinstance(ticket, RequestTicket) and ticket.completion is not None:
+            ticket.completion(ticket)
+    finally:
+        ticket.completed.set()
     return True
 
 

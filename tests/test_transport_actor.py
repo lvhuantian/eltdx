@@ -7,16 +7,22 @@ import time
 
 import pytest
 
-from actor_support import Scripted7709Server
-from eltdx.exceptions import ConnectionClosedError
+from actor_support import Scripted7709Server, handshake_payload, read_request, response_bytes
+from eltdx.exceptions import ConnectionClosedError, ResponseTimeoutError
 from eltdx.hosts import resolve_host, resolve_hosts
+from eltdx.protocol.commands import parse_command_response
+from eltdx.protocol.constants import TYPE_HANDSHAKE, TYPE_SECURITY_COUNT
 from eltdx.transport.actor import (
+    FrameEnvelope,
     RuntimeState,
     TcpState,
     actor_snapshot,
     close_actor,
+    cancel_ticket,
+    request_actor_stop,
     start_actor,
     submit_connect,
+    submit_request,
     wait_ticket,
 )
 from eltdx.transport import actor as actor_module
@@ -202,6 +208,267 @@ def test_many_submitters_never_overwrite_the_single_mailbox() -> None:
         assert actor_snapshot(runtime).pending_depth == 0
     finally:
         close_actor(runtime)
+
+
+def test_wire_request_auto_handshakes_and_returns_envelope_for_caller_parser() -> None:
+    release = threading.Event()
+
+    def handler(conn: socket.socket) -> None:
+        msg_id, msg_type, _ = read_request(conn)
+        assert msg_type == TYPE_HANDSHAKE
+        conn.sendall(response_bytes(msg_id, msg_type, handshake_payload()))
+        msg_id, msg_type, _ = read_request(conn)
+        assert msg_type == TYPE_SECURITY_COUNT
+        raw = response_bytes(msg_id, msg_type, (321).to_bytes(2, "little"))
+        for value in raw:
+            conn.sendall(bytes((value,)))
+        release.wait(timeout=2)
+
+    with Scripted7709Server([handler]) as server:
+        runtime = start_actor(12, resolve_hosts([server.host]))
+        try:
+            ticket = submit_request(
+                runtime,
+                lease_id=44,
+                command=TYPE_SECURITY_COUNT,
+                payload={"market": "sz"},
+                deadline=time.monotonic() + 2,
+                retry_safe=True,
+            )
+            envelope = wait_ticket(ticket)
+            assert isinstance(envelope, FrameEnvelope)
+            assert (envelope.runtime_epoch, envelope.tcp_generation, envelope.lease_id) == (12, 1, 44)
+            assert envelope.msg_type == TYPE_SECURITY_COUNT
+            assert parse_command_response(envelope.command, envelope.response, envelope.request_payload_snapshot) == 321
+            assert runtime.last_handshake is not None
+        finally:
+            release.set()
+            close_actor(runtime)
+
+
+def test_retry_safe_eof_uses_new_generation_and_ignores_old_identity_frame() -> None:
+    release = threading.Event()
+    first_request_id = 0
+
+    def first(conn: socket.socket) -> None:
+        nonlocal first_request_id
+        msg_id, msg_type, _ = read_request(conn)
+        conn.sendall(response_bytes(msg_id, msg_type, handshake_payload()))
+        first_request_id, msg_type, _ = read_request(conn)
+
+    def second(conn: socket.socket) -> None:
+        msg_id, msg_type, _ = read_request(conn)
+        conn.sendall(response_bytes(msg_id, msg_type, handshake_payload()))
+        msg_id, msg_type, _ = read_request(conn)
+        conn.sendall(response_bytes(first_request_id, msg_type, (111).to_bytes(2, "little")))
+        conn.sendall(response_bytes(msg_id, msg_type, (777).to_bytes(2, "little")))
+        release.wait(timeout=2)
+
+    with Scripted7709Server([first, second]) as server:
+        runtime = start_actor(13, resolve_hosts([server.host]))
+        try:
+            ticket = submit_request(
+                runtime,
+                lease_id=45,
+                command=TYPE_SECURITY_COUNT,
+                payload={"market": "sz"},
+                deadline=time.monotonic() + 2,
+                retry_safe=True,
+            )
+            envelope = wait_ticket(ticket)
+            assert parse_command_response(envelope.command, envelope.response, envelope.request_payload_snapshot) == 777
+            assert ticket.attempts == 2
+            assert envelope.tcp_generation == 2
+            assert runtime.stale_event_count == 1
+        finally:
+            release.set()
+            close_actor(runtime)
+
+
+def test_non_retry_safe_request_does_not_replay_after_sending_bytes() -> None:
+    def handler(conn: socket.socket) -> None:
+        msg_id, msg_type, _ = read_request(conn)
+        conn.sendall(response_bytes(msg_id, msg_type, handshake_payload()))
+        read_request(conn)
+
+    with Scripted7709Server([handler]) as server:
+        runtime = start_actor(17, resolve_hosts([server.host]))
+        try:
+            ticket = submit_request(
+                runtime,
+                lease_id=49,
+                command=TYPE_SECURITY_COUNT,
+                payload={"market": "sz"},
+                deadline=time.monotonic() + 1,
+                retry_safe=False,
+            )
+            with pytest.raises(ConnectionClosedError, match="remote peer"):
+                wait_ticket(ticket)
+            assert ticket.attempts == 1
+            assert runtime.generation_counter == 1
+        finally:
+            close_actor(runtime)
+
+
+def test_cancel_after_send_retires_generation_and_completes_once() -> None:
+    request_received = threading.Event()
+    release = threading.Event()
+
+    def handler(conn: socket.socket) -> None:
+        msg_id, msg_type, _ = read_request(conn)
+        conn.sendall(response_bytes(msg_id, msg_type, handshake_payload()))
+        read_request(conn)
+        request_received.set()
+        release.wait(timeout=2)
+
+    with Scripted7709Server([handler]) as server:
+        runtime = start_actor(14, resolve_hosts([server.host]))
+        ticket = submit_request(
+            runtime,
+            lease_id=46,
+            command=TYPE_SECURITY_COUNT,
+            payload={"market": "sz"},
+            deadline=time.monotonic() + 2,
+            retry_safe=True,
+        )
+        try:
+            assert request_received.wait(timeout=2)
+            cancel_ticket(runtime, ticket)
+            with pytest.raises(ConnectionClosedError, match="cancelled"):
+                wait_ticket(ticket)
+            assert runtime.generation is None
+        finally:
+            release.set()
+            close_actor(runtime)
+
+
+def test_response_timeout_reports_stage_and_retires_generation() -> None:
+    request_received = threading.Event()
+    release = threading.Event()
+
+    def handler(conn: socket.socket) -> None:
+        msg_id, msg_type, _ = read_request(conn)
+        conn.sendall(response_bytes(msg_id, msg_type, handshake_payload()))
+        read_request(conn)
+        request_received.set()
+        release.wait(timeout=2)
+
+    with Scripted7709Server([handler]) as server:
+        runtime = start_actor(15, resolve_hosts([server.host]))
+        ticket = submit_request(
+            runtime,
+            lease_id=47,
+            command=TYPE_SECURITY_COUNT,
+            payload={"market": "sz"},
+            deadline=time.monotonic() + 0.2,
+            retry_safe=False,
+        )
+        try:
+            assert request_received.wait(timeout=2)
+            with pytest.raises(ResponseTimeoutError, match="during response"):
+                wait_ticket(ticket)
+            assert runtime.generation is None
+        finally:
+            release.set()
+            close_actor(runtime)
+
+
+def test_terminal_hook_observes_success_before_cancel_close_and_caller_wakeup() -> None:
+    terminal = threading.Event()
+    publish = threading.Event()
+    release_server = threading.Event()
+
+    def handler(conn: socket.socket) -> None:
+        msg_id, msg_type, _ = read_request(conn)
+        conn.sendall(response_bytes(msg_id, msg_type, handshake_payload()))
+        msg_id, msg_type, _ = read_request(conn)
+        conn.sendall(response_bytes(msg_id, msg_type, (9).to_bytes(2, "little")))
+        release_server.wait(timeout=2)
+
+    def completion(ticket) -> None:
+        assert ticket.state.name == "SUCCESS"
+        assert not ticket.completed.is_set()
+        terminal.set()
+        assert publish.wait(timeout=2)
+
+    with Scripted7709Server([handler]) as server:
+        runtime = start_actor(16, resolve_hosts([server.host]))
+        ticket = submit_request(
+            runtime,
+            lease_id=48,
+            command=TYPE_SECURITY_COUNT,
+            payload={"market": "sz"},
+            deadline=time.monotonic() + 2,
+            retry_safe=True,
+            completion=completion,
+        )
+        try:
+            assert terminal.wait(timeout=2)
+            cancel_ticket(runtime, ticket)
+            request_actor_stop(runtime)
+            publish.set()
+            envelope = wait_ticket(ticket)
+            assert parse_command_response(envelope.command, envelope.response, envelope.request_payload_snapshot) == 9
+        finally:
+            publish.set()
+            release_server.set()
+            close_actor(runtime)
+
+
+class PartialSocket:
+    def __init__(self, outcomes) -> None:
+        self.outcomes = list(outcomes)
+
+    def send(self, data) -> int:
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return min(outcome, len(data))
+
+
+class InterestSelector:
+    def __init__(self) -> None:
+        self.events = []
+
+    def modify(self, sock, events, data) -> None:
+        self.events.append(events)
+
+
+def test_partial_send_preserves_every_offset_and_blocking_error() -> None:
+    endpoint = resolve_hosts(["127.0.0.1:9"])[0]
+    ticket = actor_module.RequestTicket(1, 1, TYPE_SECURITY_COUNT, {}, time.monotonic() + 1, True)
+    sock = PartialSocket([BlockingIOError(), 1, 2, 3])
+    generation = actor_module.TcpGeneration(1, sock, endpoint, TcpState.READY)
+    generation.tx_bytes = b"abcdef"
+    generation.active_exchange = actor_module.WireExchange(ticket, TYPE_SECURITY_COUNT, 1, TYPE_SECURITY_COUNT, b"abcdef", False)
+    runtime = actor_module.ActorRuntime(1, (endpoint,))
+    runtime.selector = InterestSelector()
+
+    observed = []
+    for _ in range(4):
+        actor_module._send_generation(runtime, generation)
+        observed.append(generation.tx_offset)
+
+    assert observed == [0, 1, 3, 6]
+    assert generation.active_exchange.sent_any
+    assert runtime.selector.events == [actor_module.selectors.EVENT_READ]
+
+
+def test_send_zero_is_connection_closed_and_old_socket_token_is_stale() -> None:
+    endpoint = resolve_hosts(["127.0.0.1:9"])[0]
+    ticket = actor_module.RequestTicket(1, 1, TYPE_SECURITY_COUNT, {}, time.monotonic() + 1, True)
+    sock = PartialSocket([0])
+    generation = actor_module.TcpGeneration(1, sock, endpoint, TcpState.READY)
+    generation.tx_bytes = b"abc"
+    generation.active_exchange = actor_module.WireExchange(ticket, TYPE_SECURITY_COUNT, 1, TYPE_SECURITY_COUNT, b"abc", False)
+    runtime = actor_module.ActorRuntime(1, (endpoint,))
+    runtime.generation = generation
+    with pytest.raises(ConnectionClosedError, match="during send"):
+        actor_module._send_generation(runtime, generation)
+
+    old_token = actor_module.SelectorToken("tcp", 1, 1, object())
+    actor_module._handle_tcp_event(runtime, old_token, actor_module.selectors.EVENT_WRITE)
+    assert runtime.stale_event_count == 1
 
 
 def test_close_during_connect_is_woken_and_only_actor_closes_tcp_socket() -> None:
