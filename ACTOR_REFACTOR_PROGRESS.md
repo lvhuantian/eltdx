@@ -29,9 +29,9 @@ Implement the complete per-slot, single-threaded, non-blocking 7709 `ConnectionA
 | Status | ACTIVE |
 | Spec revision | 1.0 |
 | Spec SHA256 | `C13F9F551CDE202B48B3C1CD7307C2CD31B65DBBA255247D822A444B813CDF61` revalidated 2026-07-14 12:52 +08:00 |
-| Current checkpoint | A01 |
-| Last completed | A00: `f0168688f8d1ac26f00291e69bb4717b3d3aed77` |
-| Next exact action | Read the current transport/protocol/client implementation and tests, then add the deterministic scripted-server/fault-injection harness and fixed baseline benchmark workload. |
+| Current checkpoint | A02 (starts after A01 commit/push) |
+| Last completed | A01 locally verified; commit/push next |
+| Next exact action | Implement bounded incremental `ResponseFrameDecoder` and safe zlib decoding with byte-boundary, resync, malformed-stream, and limit tests. |
 | Branch | `actor-transport-refactor` (created locally from verified base) |
 | Base SHA | `71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
 | Local HEAD | `f0168688f8d1ac26f00291e69bb4717b3d3aed77` before this additive A00 synchronization record |
@@ -58,7 +58,7 @@ Implement the complete per-slot, single-threaded, non-blocking 7709 `ConnectionA
 | ID | Depends On | Status | Acceptance Summary |
 | --- | --- | --- | --- |
 | A00 | none | DONE | Baseline, branch, ledger, tests; remote/PR sync immediately follows commit |
-| A01 | A00 | IN_PROGRESS | Deterministic fault-injection harness and reproducible baseline evidence |
+| A01 | A00 | DONE | Deterministic fault-injection harness and reproducible baseline evidence |
 | A02 | A01 | PENDING | Incremental frame decoder and bounded zlib |
 | A03 | A02 | PENDING | Runtime, wakeup, selector, non-blocking connect, close |
 | A04 | A03 | PENDING | Wire request lifecycle, retry, cancel, generations |
@@ -83,18 +83,46 @@ Allowed status values: `PENDING`, `IN_PROGRESS`, `DONE`, `BLOCKED`. At most one 
 
 ### A01
 
-- Status: `IN_PROGRESS`
+- Status: `DONE`
 - Owned files: deterministic test support, A01 compatibility tests, benchmark script/data summary, and this ledger
-- Required commands: inspect first; exact targeted tests and fixed benchmark command will be recorded before commit
-- Acceptance evidence: pending
-- Commit: not created
+- Required commands: `python -m pytest -q tests/test_actor_support.py tests/test_socket_transport.py tests/test_transport_pool.py`; `python scripts/benchmark_actor_transport.py --label baseline-71089c0 --requests 1000 --delay-ms 1 --output artifacts/actor_baseline_71089c0.json`; `python -m pytest -q`
+- Acceptance evidence: targeted 8 passed in 0.28s; full suite 103 passed in 0.53s; fixed nine-case benchmark completed
+- Commit: this A01 checkpoint commit
 - Trailer: `Actor-Checkpoint: A01`
+
+## A01 Baseline Evidence
+
+All signatures are anchored to base commit `71089c0`; no intentionally failing test, skip, or xfail was added.
+
+| Legacy failure | Reproducible source signature | Expected Actor regression |
+| --- | --- | --- |
+| reader/heartbeat duplication | `socket.py::_close_socket` clears thread references after `join(timeout=0.2)` even if alive; `_ensure_socket` later clears the shared stop Events | one stable Actor identity; old runtime cannot revive |
+| partial-frame timeout loss | `frame.py::read_exact` owns a local `bytearray`; a timeout unwinds and discards already-read bytes | generation-owned incremental decoder retains partial input |
+| pool partial-connect leak | `pool.py::connect` loops through transports without rollback | parallel connect failure stops and joins every slot |
+| `pin()` not exclusive | `pool.py::pin` only yields `_pick_transport()` and holds no lease | epoch-scoped pinned lease excludes ordinary work |
+
+Benchmark environment: Windows 11 10.0.26200 AMD64, CPython 3.12.6, Intel i5-13400F, fixed 1ms loopback server delay, 1,000 measured requests per case. Workload SHA256 is `27F80ADE31216BC5EB4879B26EA013FDD1C70DB8C828C26679B3E65458523960`. Ignored raw artifact `artifacts/actor_baseline_71089c0.json` SHA256 is `6F1266F7AB0341218C477CEAD26697003486BE9364E4C41DED32BE929DE99CF9`.
+
+| Pool | Concurrency | Throughput req/s | p50 ms | p99 ms | Server max active |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 1 | 639.032 | 1.4447 | 2.0215 | 1 |
+| 1 | 10 | 644.768 | 15.3860 | 40.5835 | 1 |
+| 1 | 100 | 644.252 | 152.6391 | 306.6007 | 1 |
+| 2 | 1 | 639.086 | 1.4381 | 2.0694 | 2 |
+| 2 | 10 | 1276.942 | 7.5542 | 17.2896 | 2 |
+| 2 | 100 | 1246.133 | 77.3471 | 150.0309 | 2 |
+| 4 | 1 | 640.770 | 1.4420 | 1.9942 | 2 |
+| 4 | 10 | 2239.707 | 4.5818 | 9.6554 | 4 |
+| 4 | 100 | 2276.394 | 40.4381 | 55.3382 | 4 |
 
 ## Test Evidence
 
 | Time | Platform | Python | Checkpoint | Command | Result | Evidence/Notes |
 | --- | --- | --- | --- | --- | --- | --- |
 | 2026-07-14 12:54 +08:00 | Windows 11 10.0.26200 AMD64, Intel i5-13400F (16 logical CPUs) | CPython 3.12.6 (`C:\Users\ax\AppData\Local\Programs\Python\Python312\python.exe`) | A00 | `python -m pytest -q` | PASS: 102 passed in 1.04s (wall 2.6s) | Baseline process handle count observed as 563 for the inspection shell; no test failures or skips reported. |
+| 2026-07-14 12:59 +08:00 | Windows 11 10.0.26200 AMD64 | CPython 3.12.6 | A01 | targeted Actor support and legacy transport tests | PASS: 8 passed in 0.28s | Barrier/Event loopback harness; no timing sleeps in fault control. |
+| 2026-07-14 13:00 +08:00 | Windows 11 10.0.26200 AMD64 | CPython 3.12.6 | A01 | fixed old-transport benchmark, nine cases | PASS: 11.5s wall | Raw artifact/hash and full table recorded above. |
+| 2026-07-14 13:01 +08:00 | Windows 11 10.0.26200 AMD64 | CPython 3.12.6 | A01 | `python -m pytest -q` | PASS: 103 passed in 0.53s | No skips or xfails reported. |
 
 ## Open Decisions
 
