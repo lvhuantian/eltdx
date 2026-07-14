@@ -150,8 +150,14 @@ def resolve_host(host: str) -> tuple[ResolvedEndpoint, ...]:
 
 def resolve_hosts(hosts: list[str] | tuple[str, ...]) -> tuple[ResolvedEndpoint, ...]:
     endpoints: list[ResolvedEndpoint] = []
+    last_error: OSError | None = None
     for host in unique_hosts(list(hosts)):
-        endpoints.extend(resolve_host(host))
+        try:
+            endpoints.extend(resolve_host(host))
+        except OSError as exc:
+            last_error = exc
+    if not endpoints and last_error is not None:
+        raise OSError("unable to resolve any configured host") from last_error
     return tuple(endpoints)
 
 

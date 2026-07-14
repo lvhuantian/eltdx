@@ -124,6 +124,7 @@ class SocketTransport:
         self._runtime_started_callback = _runtime_started_callback
         self._heartbeat_allowed: Any = None
         self._pool_runtime_retired = False
+        self._resolver_claim: tuple[int, int] | None = None
         self._finalizer: weakref.finalize | None = None
 
     @property
@@ -170,8 +171,9 @@ class SocketTransport:
         )
 
     def connect(self) -> None:
+        _, close_generation = self._preflight_endpoints()
         deadline = time.monotonic() + self._timeout
-        runtime = self._ensure_runtime(deadline)
+        runtime = self._ensure_runtime(deadline, expected_close_generation=close_generation)
         self._connect_with_deadline(
             deadline=deadline,
             completion=None,
@@ -342,8 +344,9 @@ class SocketTransport:
 
     def execute(self, command: int, payload: dict[str, Any] | None = None) -> Any:
         request_payload = dict(payload or {})
+        _, close_generation = self._preflight_endpoints()
         deadline = time.monotonic() + self._timeout
-        runtime = self._ensure_runtime(deadline)
+        runtime = self._ensure_runtime(deadline, expected_close_generation=close_generation)
         return self._execute_with_lease(
             command,
             request_payload,
@@ -447,15 +450,74 @@ class SocketTransport:
             return [_parse_push(frame) for frame in frames]
         return [frame.response for frame in frames]
 
+    def _preflight_endpoints(self) -> tuple[tuple[ResolvedEndpoint, ...], int]:
+        with self._lifecycle:
+            invocation_close_generation = self._close_generation
+            invocation_epoch = self._epoch
+        claim = (invocation_close_generation, invocation_epoch)
+        while True:
+            with self._lifecycle:
+                if self._close_generation != invocation_close_generation:
+                    raise ConnectionClosedError("7709 transport closed during endpoint resolution")
+                if self._epoch != invocation_epoch:
+                    raise ConnectionClosedError("7709 transport changed during endpoint resolution")
+                if self._close_failed:
+                    raise ConnectionClosedError("7709 Actor is not usable: FAILED_CLOSED")
+                if self._pool_runtime_retired or self._closing:
+                    raise ConnectionClosedError("7709 transport is not available for endpoint resolution")
+                if self._resolved_endpoints is not None:
+                    return self._resolved_endpoints, invocation_close_generation
+                if self._resolver_claim == claim:
+                    self._lifecycle.wait()
+                    continue
+                self._resolver_claim = claim
+                break
+        try:
+            endpoints = resolve_hosts(self._hosts)
+        except BaseException as exc:
+            with self._lifecycle:
+                if self._resolver_claim == claim:
+                    self._resolver_claim = None
+                self._lifecycle.notify_all()
+            if isinstance(exc, OSError):
+                raise ConnectionClosedError("7709 unable to resolve any configured host") from exc
+            raise
+        with self._lifecycle:
+            valid = (
+                self._resolver_claim == claim
+                and self._close_generation == invocation_close_generation
+                and self._epoch == invocation_epoch
+                and not self._close_failed
+                and not self._pool_runtime_retired
+                and not self._closing
+            )
+            if valid and self._resolved_endpoints is None:
+                self._resolved_endpoints = endpoints
+            resolved = self._resolved_endpoints
+            if self._resolver_claim == claim:
+                self._resolver_claim = None
+            self._lifecycle.notify_all()
+        if not valid or resolved is None:
+            raise ConnectionClosedError("7709 transport changed during endpoint resolution")
+        return resolved, invocation_close_generation
+
     def _ensure_runtime(
         self,
         deadline: float | None = None,
         *,
         expected_runtime_epoch: int | None = None,
+        expected_close_generation: int | None = None,
     ) -> ActorRuntime:
+        endpoints, preflight_close_generation = self._preflight_endpoints()
+        if expected_close_generation is None:
+            expected_close_generation = preflight_close_generation
+        elif expected_close_generation != preflight_close_generation:
+            raise ConnectionClosedError("7709 transport closed after endpoint resolution")
         with self._lifecycle:
             invocation_epoch = self._epoch
-            invocation_close_generation = self._close_generation
+            invocation_close_generation = expected_close_generation
+            if self._close_generation != invocation_close_generation:
+                raise ConnectionClosedError("7709 transport closed after endpoint resolution")
         while True:
             if not self._pool_runtime_is_active(expected_runtime_epoch):
                 raise ConnectionClosedError("7709 pool runtime epoch is no longer active")
@@ -494,7 +556,6 @@ class SocketTransport:
 
         candidate: ActorRuntime | None = None
         try:
-            endpoints = self._resolved_endpoints or resolve_hosts(self._hosts)
             with self._lifecycle:
                 if self._epoch != observed_epoch or self._closing:
                     self._starting = False

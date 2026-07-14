@@ -120,6 +120,8 @@ class LeaseBroker:
         with self._condition:
             if self._closed:
                 raise ConnectionClosedError("7709 pool is closed")
+            if time.monotonic() >= deadline:
+                raise ResponseTimeoutError("7709 response timed out during queue")
             if self._idle_slots and not self._waiters:
                 return self._new_lease_locked(self._idle_slots.popleft(), pinned)
             if len(self._waiters) + self._pin_waiters >= self.max_pending_requests:
@@ -139,14 +141,25 @@ class LeaseBroker:
                         pass
                     waiter.state = AdmissionState.TIMED_OUT
                     waiter.error = ResponseTimeoutError("7709 response timed out during queue")
-        if waiter.state is AdmissionState.ASSIGNED and waiter.assigned_lease is not None:
-            return waiter.assigned_lease
-        if waiter.error is not None:
-            raise waiter.error
+        with self._condition:
+            if waiter.state is AdmissionState.ASSIGNED and waiter.assigned_lease is not None:
+                lease = waiter.assigned_lease
+                valid = (
+                    not self._closed
+                    and lease.state is LeaseState.ACTIVE
+                    and self._active_leases.get(lease.lease_id) is lease
+                )
+                if valid:
+                    return lease
+                waiter.state = AdmissionState.CLOSED
+                waiter.error = ConnectionClosedError("7709 pool closed during admission")
+            error = waiter.error
+        if error is not None:
+            raise error
         raise ResponseTimeoutError("7709 response timed out during queue")
 
     def release(self, lease: SlotLease) -> bool:
-        wake: AdmissionWaiter | None = None
+        wake: list[AdmissionWaiter] = []
         with self._condition:
             current = self._active_leases.get(lease.lease_id)
             if current is not lease or lease.state is LeaseState.RELEASED:
@@ -159,14 +172,19 @@ class LeaseBroker:
                 waiter = self._waiters.popleft()
                 if waiter.state is not AdmissionState.WAITING or waiter.pool_epoch != self.pool_epoch:
                     continue
+                if time.monotonic() >= waiter.deadline:
+                    waiter.state = AdmissionState.TIMED_OUT
+                    waiter.error = ResponseTimeoutError("7709 response timed out during queue")
+                    wake.append(waiter)
+                    continue
                 waiter.assigned_lease = self._new_lease_locked(lease.slot_id, waiter.pinned)
                 waiter.state = AdmissionState.ASSIGNED
-                wake = waiter
+                wake.append(waiter)
                 break
             else:
                 self._idle_slots.append(lease.slot_id)
-        if wake is not None:
-            wake.completed.set()
+        for waiter in wake:
+            waiter.completed.set()
         return True
 
     def validate(self, lease: SlotLease) -> bool:
@@ -629,6 +647,8 @@ class PinnedTransportProxy:
         with self._condition:
             if self._state is not PinState.OPEN or not self._broker.validate(self._lease):
                 raise ConnectionClosedError("pinned transport lease is no longer valid")
+            if time.monotonic() >= deadline:
+                raise ResponseTimeoutError("7709 response timed out during queue")
             self._call_counter += 1
             call_id = self._call_counter
             if self._active_call is None and not self._waiters:
@@ -652,11 +672,27 @@ class PinnedTransportProxy:
             if waiter.reserved:
                 self._broker.release_pin_waiter()
                 waiter.reserved = False
-        if waiter.error is not None:
-            raise waiter.error
+        with self._condition:
+            if waiter.error is None:
+                valid = (
+                    waiter.assigned
+                    and self._active_call == call_id
+                    and self._state is PinState.OPEN
+                    and self._broker.validate(self._lease)
+                )
+                if not valid:
+                    waiter.error = ConnectionClosedError("pinned transport closed during admission")
+                    waiter.assigned = False
+                    if self._active_call == call_id:
+                        self._active_call = None
+                        self._condition.notify_all()
+            error = waiter.error
+        if error is not None:
+            raise error
         return call_id
 
     def _wire_terminal(self, call_id: int) -> None:
+        wake: list[PinWaiter] = []
         with self._condition:
             if self._active_call != call_id:
                 return
@@ -664,14 +700,23 @@ class PinnedTransportProxy:
             while self._waiters:
                 candidate = self._waiters.popleft()
                 if candidate.error is None:
+                    if time.monotonic() >= candidate.deadline:
+                        candidate.error = ResponseTimeoutError("7709 response timed out during queue")
+                        if candidate.reserved:
+                            candidate.reserved = False
+                            self._broker.release_pin_waiter()
+                        wake.append(candidate)
+                        continue
                     if candidate.reserved:
                         candidate.reserved = False
                         self._broker.release_pin_waiter()
                     self._active_call = candidate.call_id
                     candidate.assigned = True
-                    candidate.completed.set()
+                    wake.append(candidate)
                     break
             self._condition.notify_all()
+        for candidate in wake:
+            candidate.completed.set()
 
 
 class PooledSocketTransport:
@@ -712,6 +757,7 @@ class PooledSocketTransport:
         self._epoch = 0
         self._startup_active = False
         self._startup_cleanup_error: BaseException | None = None
+        self._connect_broker: LeaseBroker | None = None
         self._shutdown_active = False
         self._shutdown_generation = 0
         self._shutdown_attempt: ShutdownAttempt | None = None
@@ -786,64 +832,87 @@ class PooledSocketTransport:
 
     def connect(self) -> None:
         broker, push_buffer = self._ensure_started()
-        first_error: BaseException | None = None
-        stopped_early = False
-        shutdown_attempt: ShutdownAttempt | None = None
-        shutdown_owner = False
-        rollback_errors: list[BaseException] = []
-        shutdown_error: BaseException | None = None
         connect_deadline = time.monotonic() + self._timeout
-        with ThreadPoolExecutor(max_workers=self._pool_size, thread_name_prefix="eltdx-pool-connect") as executor:
-            futures = [
-                executor.submit(
-                    transport._connect_with_deadline,
-                    deadline=connect_deadline,
-                    completion=None,
-                    runtime=transport._runtime,
-                    lock_slot=True,
-                    lease_id=0,
-                    expected_runtime_epoch=broker.pool_epoch,
-                )
-                for transport in self._transports
-            ]
-            done, _ = wait(futures, return_when=FIRST_EXCEPTION)
-            first_error = next((future.exception() for future in done if future.exception() is not None), None)
-            if first_error is not None:
-                shutdown_attempt, shutdown_owner = self._claim_shutdown_attempt(
-                    expected_broker=broker,
-                    expected_push_buffer=push_buffer,
-                )
-                if shutdown_owner:
-                    try:
-                        self._begin_connect_rollback(broker, push_buffer)
-                    except BaseException as exc:
-                        rollback_errors.append(exc)
-                    stopped_early = True
-                    for transport in self._transports:
+        with self._condition:
+            while self._connect_broker is broker:
+                if self._state is not PoolState.RUNNING or self._broker is not broker:
+                    raise ConnectionClosedError("7709 pool changed while waiting to connect")
+                remaining = max(0.0, connect_deadline - time.monotonic())
+                if remaining == 0 or not self._condition.wait(timeout=remaining):
+                    raise ResponseTimeoutError("7709 response timed out during queue")
+            if self._state is not PoolState.RUNNING or self._broker is not broker:
+                raise ConnectionClosedError("7709 pool changed before connect admission")
+            self._connect_broker = broker
+
+        leases: list[SlotLease] = []
+        try:
+            for _ in range(self._pool_size):
+                leases.append(broker.acquire(connect_deadline))
+            lease_by_slot = {lease.slot_id: lease for lease in leases}
+            first_error: BaseException | None = None
+            stopped_early = False
+            shutdown_attempt: ShutdownAttempt | None = None
+            shutdown_owner = False
+            rollback_errors: list[BaseException] = []
+            shutdown_error: BaseException | None = None
+            with ThreadPoolExecutor(max_workers=self._pool_size, thread_name_prefix="eltdx-pool-connect") as executor:
+                futures = [
+                    executor.submit(
+                        transport._connect_with_deadline,
+                        deadline=connect_deadline,
+                        completion=None,
+                        runtime=transport._runtime,
+                        lock_slot=False,
+                        lease_id=lease_by_slot[index].lease_id,
+                        expected_runtime_epoch=broker.pool_epoch,
+                    )
+                    for index, transport in enumerate(self._transports)
+                ]
+                done, _ = wait(futures, return_when=FIRST_EXCEPTION)
+                first_error = next((future.exception() for future in done if future.exception() is not None), None)
+                if first_error is not None:
+                    shutdown_attempt, shutdown_owner = self._claim_shutdown_attempt(
+                        expected_broker=broker,
+                        expected_push_buffer=push_buffer,
+                    )
+                    if shutdown_owner:
                         try:
-                            transport._request_stop()
+                            self._begin_connect_rollback(broker, push_buffer)
                         except BaseException as exc:
                             rollback_errors.append(exc)
-                            stopped_early = False
+                        stopped_early = True
+                        for transport in self._transports:
+                            try:
+                                transport._request_stop()
+                            except BaseException as exc:
+                                rollback_errors.append(exc)
+                                stopped_early = False
+                        try:
+                            self._run_shutdown_attempt(
+                                shutdown_attempt,
+                                already_requested_stop=stopped_early,
+                                initial_errors=rollback_errors,
+                            )
+                        except BaseException as exc:
+                            shutdown_error = exc
+                wait(futures)
+                if shutdown_attempt is not None and not shutdown_owner:
                     try:
-                        self._run_shutdown_attempt(
-                            shutdown_attempt,
-                            already_requested_stop=stopped_early,
-                            initial_errors=rollback_errors,
-                        )
+                        self._wait_shutdown_attempt(shutdown_attempt)
                     except BaseException as exc:
                         shutdown_error = exc
-            wait(futures)
-            if shutdown_attempt is not None and not shutdown_owner:
-                try:
-                    self._wait_shutdown_attempt(shutdown_attempt)
-                except BaseException as exc:
-                    shutdown_error = exc
-        errors = [future.exception() for future in futures if future.exception() is not None]
-        if errors:
-            if shutdown_error is not None:
-                raise shutdown_error
-            raise first_error or errors[0]
+            errors = [future.exception() for future in futures if future.exception() is not None]
+            if errors:
+                if shutdown_error is not None:
+                    raise shutdown_error
+                raise first_error or errors[0]
+        finally:
+            for lease in leases:
+                broker.release(lease)
+            with self._condition:
+                if self._connect_broker is broker:
+                    self._connect_broker = None
+                self._condition.notify_all()
 
     def close(self) -> None:
         self._shutdown(normal=True)
@@ -932,7 +1001,10 @@ class PooledSocketTransport:
         push_buffer: PushBuffer | None = None
         configured: list[tuple[SocketTransport, RuntimeRegistration]] = []
         try:
-            endpoint_sets = [resolve_hosts(_rotate_hosts(self._hosts, index)) for index in range(self._pool_size)]
+            try:
+                endpoint_sets = [resolve_hosts(_rotate_hosts(self._hosts, index)) for index in range(self._pool_size)]
+            except OSError as exc:
+                raise ConnectionClosedError("7709 unable to resolve any configured host") from exc
             with self._condition:
                 if self._epoch != observed_epoch or self._state is not PoolState.STARTING:
                     raise ConnectionClosedError("7709 pool changed while resolving endpoints")

@@ -17,7 +17,7 @@ class CommandSpec:
     method: str
     required_for_1_0: bool
     document: str
-    retry_safe: bool
+    retry_safe: bool = False
 
     @property
     def hex(self) -> str:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import selectors
 import socket
 import threading
 import time
@@ -13,6 +14,7 @@ from eltdx.hosts import resolve_host, resolve_hosts
 from eltdx.protocol.commands import parse_command_response
 from eltdx.protocol.constants import TYPE_HANDSHAKE, TYPE_SECURITY_COUNT
 from eltdx.transport.actor import (
+    ActorStartupError,
     FrameEnvelope,
     RuntimeState,
     TcpState,
@@ -63,6 +65,52 @@ def test_numeric_endpoint_resolution_never_calls_blocking_dns(monkeypatch) -> No
     endpoint = resolve_host("127.0.0.1:7709")[0]
 
     assert endpoint.sockaddr == ("127.0.0.1", 7709)
+
+
+def test_actor_startup_register_failure_closes_selector_and_wakeup_pair(monkeypatch) -> None:
+    selectors_created: list[FailingRegisterSelector] = []
+    sockets_created: list[socket.socket] = []
+    real_socketpair = socket.socketpair
+
+    class FailingRegisterSelector(selectors.SelectSelector):
+        def __init__(self) -> None:
+            super().__init__()
+            self.close_calls = 0
+            selectors_created.append(self)
+
+        def register(self, *args, **kwargs):
+            raise RuntimeError("deterministic selector registration failure")
+
+        def close(self) -> None:
+            self.close_calls += 1
+            super().close()
+
+    def observed_socketpair():
+        pair = real_socketpair()
+        sockets_created.extend(pair)
+        return pair
+
+    monkeypatch.setattr(actor_module.socket, "socketpair", observed_socketpair)
+
+    with pytest.raises(ActorStartupError, match="failed during startup") as raised:
+        start_actor(
+            18,
+            resolve_hosts(["127.0.0.1:9"]),
+            selector_factory=FailingRegisterSelector,
+        )
+
+    runtime = raised.value.runtime
+    assert runtime.actor_thread is not None
+    runtime.actor_thread.join(timeout=2)
+    assert len(selectors_created) == 1 and selectors_created[0].close_calls == 1
+    assert not selectors_created[0].get_map()
+    assert len(sockets_created) == 2 and all(item.fileno() == -1 for item in sockets_created)
+    assert runtime.selector is None
+    assert runtime.wake_reader is None and runtime.wake_writer is None
+    assert runtime.stopped.is_set() and runtime.state is RuntimeState.FAILED
+    assert isinstance(runtime.fatal_error, RuntimeError)
+    assert str(runtime.fatal_error) == "deterministic selector registration failure"
+    assert not runtime.actor_thread.is_alive()
 
 
 def test_actor_uses_so_error_and_fails_over_to_next_host() -> None:

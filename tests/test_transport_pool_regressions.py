@@ -14,7 +14,7 @@ from eltdx.transport import socket as socket_module
 from eltdx.transport.actor import cancel_ticket
 from eltdx.transport import actor as actor_module
 from eltdx.transport import pool as pool_module
-from eltdx.transport.pool import LeaseBroker, PinnedTransportProxy, PooledSocketTransport
+from eltdx.transport.pool import LeaseBroker, PinWaiter, PinnedTransportProxy, PooledSocketTransport
 from eltdx.transport.push import PushBuffer
 
 
@@ -58,6 +58,24 @@ class DelayedSetEvent:
 
     def clear(self) -> None:
         self._event.clear()
+
+    def is_set(self) -> bool:
+        return self._event.is_set()
+
+
+class BlockingSetEvent:
+    def __init__(self, set_entered: threading.Event, allow_set: threading.Event) -> None:
+        self._event = threading.Event()
+        self._set_entered = set_entered
+        self._allow_set = allow_set
+
+    def wait(self, timeout: float | None = None) -> bool:
+        return self._event.wait(timeout)
+
+    def set(self) -> None:
+        self._set_entered.set()
+        assert self._allow_set.wait(timeout=2)
+        self._event.set()
 
     def is_set(self) -> bool:
         return self._event.is_set()
@@ -121,6 +139,178 @@ def test_admission_waiter_late_set_cannot_wake_next_acquire(monkeypatch) -> None
     assert not woke_from_old_set
     assert result == ["second acquired"]
     assert (snapshot.idle_slots, snapshot.waiter_count, snapshot.active_leases) == (1, 0, 0)
+
+
+def test_broker_release_cannot_assign_waiter_after_deadline() -> None:
+    broker = LeaseBroker(1, pool_size=1, max_pending_requests=2)
+    initial = broker.acquire(time.monotonic() + 1)
+    deadline = time.monotonic() + 0.05
+    results: list[object] = []
+
+    def acquire() -> None:
+        try:
+            results.append(broker.acquire(deadline))
+        except BaseException as exc:
+            results.append(exc)
+
+    waiter = threading.Thread(target=acquire)
+
+    waiter.start()
+    assert broker.wait_for_waiters(1)
+    with broker._condition:
+        broker._waiters[0].deadline = time.monotonic() - 1
+        assert broker.release(initial)
+    waiter.join(timeout=2)
+
+    assert not waiter.is_alive()
+    assert len(results) == 1 and isinstance(results[0], ResponseTimeoutError)
+    snapshot = broker.snapshot()
+    assert (snapshot.idle_slots, snapshot.waiter_count, snapshot.active_leases) == (1, 0, 0)
+
+
+def test_broker_close_before_assignment_wakeup_rejects_released_lease(monkeypatch) -> None:
+    broker = LeaseBroker(1, pool_size=1, max_pending_requests=2)
+    initial = broker.acquire(time.monotonic() + 1)
+    set_entered = threading.Event()
+    allow_set = threading.Event()
+    completed = BlockingSetEvent(set_entered, allow_set)
+    results: list[object] = []
+
+    def acquire() -> None:
+        try:
+            results.append(broker.acquire(time.monotonic() + 1))
+        except BaseException as exc:
+            results.append(exc)
+
+    waiter = threading.Thread(target=acquire)
+    releaser = threading.Thread(target=lambda: broker.release(initial))
+    monkeypatch.setattr(pool_module.threading, "Event", lambda: completed)
+    waiter.start()
+    assert broker.wait_for_waiters(1)
+    releaser.start()
+    assert set_entered.wait(timeout=2)
+    broker.close()
+    allow_set.set()
+    waiter.join(timeout=2)
+    releaser.join(timeout=2)
+
+    assert not waiter.is_alive() and not releaser.is_alive()
+    assert len(results) == 1 and isinstance(results[0], ConnectionClosedError)
+    snapshot = broker.snapshot()
+    assert snapshot.closed and snapshot.active_leases == 0 and snapshot.idle_slots == 0
+
+
+def test_pool_connect_holds_broker_slot_against_concurrent_execute(monkeypatch) -> None:
+    pool = PooledSocketTransport(["127.0.0.1:9"], pool_size=1, timeout=1, heartbeat_interval=None)
+    broker, _ = pool._ensure_started()
+    slot = pool._transports[0]
+    connect_entered = threading.Event()
+    execute_entered = threading.Event()
+    allow_connect = threading.Event()
+    connect_results: list[object] = []
+    execute_results: list[object] = []
+
+    def connect(**_kwargs) -> None:
+        connect_entered.set()
+        assert allow_connect.wait(timeout=2)
+
+    def execute(*_args, completion, **_kwargs) -> int:
+        execute_entered.set()
+        completion(None)
+        return 73
+
+    def run_connect() -> None:
+        try:
+            connect_results.append(pool.connect())
+        except BaseException as exc:
+            connect_results.append(exc)
+
+    def run_execute() -> None:
+        try:
+            execute_results.append(pool.execute(TYPE_SECURITY_COUNT, {"market": "sz"}))
+        except BaseException as exc:
+            execute_results.append(exc)
+
+    monkeypatch.setattr(slot, "_connect_with_deadline", connect)
+    monkeypatch.setattr(slot, "_execute_with_lease", execute)
+    connector = threading.Thread(target=run_connect)
+    executor = threading.Thread(target=run_execute)
+    connector.start()
+    try:
+        assert connect_entered.wait(timeout=2)
+        executor.start()
+        assert broker.wait_for_waiters(1)
+        assert not execute_entered.is_set()
+    finally:
+        allow_connect.set()
+    connector.join(timeout=2)
+    executor.join(timeout=2)
+
+    assert not connector.is_alive() and not executor.is_alive()
+    assert connect_results == [None]
+    assert execute_results == [73]
+    snapshot = broker.snapshot()
+    assert (snapshot.idle_slots, snapshot.waiter_count, snapshot.active_leases) == (1, 0, 0)
+    pool.close()
+
+
+def test_old_pool_connect_cannot_block_or_clear_reopened_epoch(monkeypatch) -> None:
+    pool = PooledSocketTransport(["127.0.0.1:9"], pool_size=1, timeout=1, heartbeat_interval=None)
+    old_broker, _ = pool._ensure_started()
+    old_epoch = old_broker.pool_epoch
+    slot = pool._transports[0]
+    old_entered = threading.Event()
+    new_entered = threading.Event()
+    allow_old = threading.Event()
+    allow_new = threading.Event()
+    old_results: list[object] = []
+    new_results: list[object] = []
+
+    def connect(*, expected_runtime_epoch, **_kwargs) -> None:
+        if expected_runtime_epoch == old_epoch:
+            old_entered.set()
+            assert allow_old.wait(timeout=2)
+            raise ConnectionClosedError("old connect failed after close")
+        new_entered.set()
+        assert allow_new.wait(timeout=2)
+
+    def run(results: list[object]) -> None:
+        try:
+            results.append(pool.connect())
+        except BaseException as exc:
+            results.append(exc)
+
+    monkeypatch.setattr(slot, "_connect_with_deadline", connect)
+    old_connector = threading.Thread(target=lambda: run(old_results))
+    new_connector = threading.Thread(target=lambda: run(new_results))
+    old_connector.start()
+    assert old_entered.wait(timeout=2)
+    pool.close()
+    new_connector.start()
+    try:
+        assert new_entered.wait(timeout=2)
+        with pool._condition:
+            new_broker = pool._broker
+            assert new_broker is not None and new_broker is not old_broker
+            assert pool._connect_broker is new_broker
+        allow_old.set()
+        old_connector.join(timeout=2)
+        assert not old_connector.is_alive()
+        with pool._condition:
+            assert pool._connect_broker is new_broker
+    finally:
+        allow_old.set()
+        allow_new.set()
+    new_connector.join(timeout=2)
+
+    assert not new_connector.is_alive()
+    assert len(old_results) == 1 and isinstance(old_results[0], ConnectionClosedError)
+    assert new_results == [None]
+    with pool._condition:
+        assert pool._connect_broker is None
+        assert pool._broker is new_broker
+        assert pool._state is pool_module.PoolState.RUNNING
+    pool.close()
 
 
 class FakePinnedSlot:
@@ -260,6 +450,77 @@ def test_pinned_waiter_reservation_cannot_invert_local_fifo(monkeypatch) -> None
     assert not condition_was_free
     assert queued_call_ids == [2, 3]
     assert all(isinstance(item, ConnectionClosedError) for item in results)
+
+
+def test_pin_terminal_skips_expired_waiter_before_assigning_live_waiter() -> None:
+    broker, _, _, proxy = _new_fake_proxy(timeout=1)
+    broker.reserve_pin_waiter()
+    broker.reserve_pin_waiter()
+    expired = PinWaiter(2, time.monotonic() - 1, reserved=True)
+    live = PinWaiter(3, time.monotonic() + 1, reserved=True)
+    proxy._active_call = 1
+    proxy._call_counter = 3
+    proxy._waiters.extend((expired, live))
+
+    proxy._wire_terminal(1)
+
+    assert isinstance(expired.error, ResponseTimeoutError)
+    assert expired.completed.is_set() and not expired.assigned and not expired.reserved
+    assert live.completed.is_set() and live.assigned and not live.reserved
+    assert proxy._active_call == live.call_id
+    assert broker.snapshot().pin_waiter_count == 0
+    proxy._wire_terminal(live.call_id)
+    proxy.close()
+
+
+def test_pin_close_before_assignment_wakeup_rejects_unstarted_call(monkeypatch) -> None:
+    broker, _, _, proxy = _new_fake_proxy(timeout=1)
+    proxy._active_call = 1
+    proxy._call_counter = 1
+    set_entered = threading.Event()
+    allow_set = threading.Event()
+    completed = BlockingSetEvent(set_entered, allow_set)
+    admit_results: list[object] = []
+    close_results: list[object] = []
+
+    def admit() -> None:
+        try:
+            admit_results.append(proxy._admit(time.monotonic() + 1))
+        except BaseException as exc:
+            admit_results.append(exc)
+
+    def close() -> None:
+        try:
+            close_results.append(proxy.close())
+        except BaseException as exc:
+            close_results.append(exc)
+
+    waiter = threading.Thread(target=admit)
+    terminal = threading.Thread(target=lambda: proxy._wire_terminal(1))
+    closer = threading.Thread(target=close)
+    monkeypatch.setattr(
+        pool_module,
+        "PinWaiter",
+        lambda call_id, deadline, **kwargs: PinWaiter(call_id, deadline, completed=completed, **kwargs),
+    )
+    waiter.start()
+    assert broker.wait_for_pin_waiters(1)
+    terminal.start()
+    assert set_entered.wait(timeout=2)
+    closer.start()
+    with proxy._condition:
+        assert proxy._condition.wait_for(lambda: proxy._state is pool_module.PinState.CLOSING, timeout=2)
+    allow_set.set()
+    waiter.join(timeout=2)
+    terminal.join(timeout=2)
+    closer.join(timeout=2)
+
+    assert not waiter.is_alive() and not terminal.is_alive() and not closer.is_alive()
+    assert len(admit_results) == 1 and isinstance(admit_results[0], ConnectionClosedError)
+    assert close_results == [None]
+    assert proxy._active_call is None
+    snapshot = broker.snapshot()
+    assert (snapshot.idle_slots, snapshot.pin_waiter_count, snapshot.active_leases) == (1, 0, 0)
 
 
 class BlockingConnectSlot(FakePinnedSlot):

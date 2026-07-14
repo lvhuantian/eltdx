@@ -990,6 +990,53 @@ def test_thread_start_failure_closes_owned_push_buffer(monkeypatch) -> None:
     assert candidate.state is RuntimeState.FAILED_CLOSED
 
 
+def test_public_close_surfaces_and_retains_selector_cleanup_failure(monkeypatch) -> None:
+    selectors_created: list[selectors.SelectSelector] = []
+    real_start_actor = actor_module.start_actor
+
+    class FailingCloseSelector(selectors.SelectSelector):
+        def __init__(self) -> None:
+            super().__init__()
+            selectors_created.append(self)
+
+        def register(self, *args, **kwargs):
+            raise RuntimeError("deterministic selector registration failure")
+
+        def close(self) -> None:
+            raise RuntimeError("deterministic selector close failure")
+
+    def start_with_failing_selector(*args, **kwargs):
+        kwargs["selector_factory"] = FailingCloseSelector
+        return real_start_actor(*args, **kwargs)
+
+    monkeypatch.setattr(socket_module, "start_actor", start_with_failing_selector)
+    transport = SocketTransport(["127.0.0.1:9"], timeout=1, heartbeat_interval=None)
+
+    with pytest.raises(ActorStartupError, match="failed during startup"):
+        transport._ensure_runtime(time.monotonic() + 1)
+
+    candidate = transport._candidate
+    assert candidate is not None and candidate.actor_thread is not None
+    candidate.actor_thread.join(timeout=2)
+    assert not candidate.actor_thread.is_alive()
+    assert len(selectors_created) == 1 and candidate.selector is selectors_created[0]
+    assert candidate.wake_reader is None and candidate.wake_writer is None
+    assert isinstance(candidate.cleanup_error, RuntimeError)
+    with pytest.raises(TransportCloseTimeoutError, match="resource cleanup failed"):
+        transport.close()
+    assert transport._candidate is candidate
+    assert candidate.selector is selectors_created[0]
+    assert candidate.state is RuntimeState.FAILED_CLOSING
+
+    selectors.SelectSelector.close(selectors_created[0])
+    with candidate.control_lock:
+        candidate.selector = None
+        candidate.cleanup_error = None
+    transport.close()
+    assert transport._candidate is None and transport._runtime is candidate
+    assert candidate.state is RuntimeState.FAILED_CLOSED
+
+
 def test_old_startup_waiter_cannot_inherit_runtime_created_after_close(monkeypatch) -> None:
     selector_entered = threading.Event()
     release_selector = threading.Event()

@@ -12,7 +12,8 @@ The result document remains historical evidence only until FINAL rewrites it.
 | Baseline HEAD | `994c49b51f47255bdcd9cdc3308a5a554f37588b` |
 | Base | `71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
 | Branch | `actor-transport-refactor` |
-| Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), confirmed OPEN and draft at pushed HEAD `2e48be0` |
+| Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), confirmed OPEN and draft at pushed HEAD `cc46e60` |
+| Final-review correction base | `cc46e6042e60b1d70732ae813b089f9c8b572572` |
 | Baseline worktree | Clean (`git status --short --branch`) |
 | Superseded result | Existing `COMPLETE` claim and 183-test evidence |
 
@@ -35,9 +36,10 @@ again before FINAL evidence is accepted.
 | F01 receive ordering and boundaries | COMPLETE (`8aa089d`) | Sequence boundary, full-send gate, pre-send drain, heartbeat gate, partial-tail handling, and unified receive failure path |
 | F02 request identity and build isolation | COMPLETE (`8aa089d`) | Monotonic request ID, exact cancel, request-local build errors, strict deadline, terminal-owned slot, callback isolation |
 | F03 connect and failover | COMPLETE (`2e48be0`) | Candidate/attempt budgets, next-endpoint retry, Windows peer verification, non-busy rearm, and seven real/fault-injected regressions |
-| F04 Broker and pinned leases | COMPLETE in this checkpoint | Per-waiter Event, exact lease/ticket cancellation, FIFO admission, monotonic pinned close, and capacity preservation |
-| F05 lifecycle and shutdown | COMPLETE in this checkpoint | Candidate ownership, epoch guard, submission/retire gate, single shutdown attempt, rollback ownership, and monotonic failed-close states |
-| F06 stress, performance, resources, compatibility | IMPLEMENTED; heavy evidence pending | Unique wire nonce/provenance, two servers, warmed exact resource plateau, strict heartbeat gate, full Windows CI scope, and reproducible baseline source root |
+| F04 Broker and pinned leases | COMPLETE (`117b8c6`), final-review corrections pending checkpoint | Per-waiter Event, exact lease/ticket cancellation, FIFO admission, monotonic pinned close, deadline-valid assignment, and capacity preservation |
+| F05 lifecycle and shutdown | COMPLETE (`117b8c6`), final-review corrections pending checkpoint | Candidate ownership, epoch guard, submission/retire gate, single shutdown attempt, rollback ownership, cleanup-error retention, and monotonic failed-close states |
+| F06 stress, performance, resources, compatibility | COMPLETE (`0955a8e`, resource correction `cc46e60`); evidence superseded for FINAL | Unique wire nonce/provenance, two servers, warmed resource plateau, strict heartbeat gate, and reproducible baseline source root; production changes after `cc46e60` require fresh artifacts |
+| Final-review correctness correction | IMPLEMENTED; checkpoint pending | DNS preflight/host fallback, startup resource ownership, Broker/pin deadline and wake-close races, pool-connect admission/epoch identity, and `CommandSpec` compatibility; full local suite 270 passed |
 | FINAL independent review and CI | PENDING | Two clean adversarial reviews; local matrix/build/docs and exact-HEAD CI/Pages green |
 
 ## Confirmed Blockers
@@ -150,6 +152,16 @@ exact-source performance artifacts remain to be generated after checkpointing.
 | 2026-07-15 | Exact clean `0955a8e` heavy stress command | 10,000 generations and 100,000 mixed requests both used two real servers; 110,000/110,000 unique responses; duplicate/missing/unexpected/cross-request/cross-generation all **0**; exact Actor/TCP/selector/wakeup/ticket/Broker/Push cleanup; heartbeat ratio **0.997404** with 32 paced completions and 0 timed heartbeats; close p99 3.1032/2.7951ms; warmed handles **199 x 8** |
 | 2026-07-15 | Heavy artifact evidence audit | Rejected two cold per-function handle pairs (`192 -> 209`, `205 -> 338`): sampling occurred before the worker function frame returned and retained joined Thread objects; the next invocation returned to 168. Removed cold pairs entirely and retained only the outer warmed repeated sampler required by the objective |
 | 2026-07-15 | Resource/generation/mixed regressions after sampler correction | **3 passed in 3.97s** |
+| 2026-07-15 | Three independent FINAL reviews of exact `cc46e60` | Reopened acceptance: DNS consumed the public deadline; selector/wakeup leaked before publication; Broker could assign after deadline; exported six-argument `CommandSpec` construction broke; RESULT evidence attribution was incomplete |
+| 2026-07-15 | Deterministic read-only probes on `cc46e60` | DNS 30 ms preflight with 10 ms timeout failed at Actor startup; selector register failure left `close_calls=0`; Broker release assigned a waiter after its deadline; six-argument `CommandSpec(...)` raised `TypeError` |
+| 2026-07-15 | DNS/API compatibility review probes | One failed hostname aborted a healthy numeric fallback and leaked raw `gaierror`; close/reopen could inherit a stale resolver; old public calls could cross close; all corrected with standalone and pooled regressions |
+| 2026-07-15 | Broker/pin/pool-connect adversarial probes | Closed Broker could wake an invalid assigned lease; pin handoff had the same delayed-wake and expiry windows; pool `connect()` bypassed Broker admission and a stale connect gate could bleed into a reopened epoch |
+| 2026-07-15 | Actor cleanup adversarial probes | Resources are published immediately; teardown is best-effort per stage; a close failure retains the exact selector and `cleanup_error`; public close raises instead of claiming resource-free success |
+| 2026-07-15 | `python -m compileall -q src tests scripts` after final-review corrections | PASS |
+| 2026-07-15 | Protocol/Actor/Socket/Pool/lifecycle focused matrix | **122 passed in 2.56s** |
+| 2026-07-15 | New DNS/cleanup/Broker/pin/pool-connect node regressions | All targeted nodes passed, including delayed Event close races, expired handoffs, all-slot connect admission, old/new Broker identity, resolver generations, and post-close heartbeat stability |
+| 2026-07-15 | `python -m pytest -q` after final-review corrections | **270 passed in 74.06s** |
+| 2026-07-15 | Independent correctness re-review of current correction worktree | CLEAN for code: reproduced races closed; compile/diff checks passed; result/evidence still pending exact new SHA |
 
 F03 preserves the public absolute deadline and assigns only private candidate
 and first-attempt sub-deadlines. Handshake timeout/EOF, partial business send,
@@ -219,11 +231,45 @@ Exact pytest node IDs and failure output will be appended before each related
 implementation change. Intentional red tests will not be left as the terminal
 state of a pushed correction checkpoint.
 
+## Final-Review Correction Scope
+
+The exact `cc46e60` implementation and its artifacts are historical correction
+evidence, not the FINAL implementation. FINAL review found and the current
+worktree corrects all of the following without changing business command
+methods, port 7615, pool-size meaning, or runtime dependencies:
+
+- Standalone hostname resolution is a caller-side preflight before deadline,
+  Actor, TCP, ticket, or lease creation. Concurrent callers share only an exact
+  `(close_generation, epoch)` resolver claim; a reopened generation can resolve
+  independently and stale results cannot publish or clear the new claim.
+- Per-host DNS failure is isolated so a healthy later host remains usable; only
+  an all-failed set raises `ConnectionClosedError` in standalone and pool paths.
+- Actor selector and wakeup resources are published as soon as created.
+  Teardown attempts every stage, retains any resource whose close raised, stores
+  the first `cleanup_error`, and makes public close fail closed instead of
+  reporting successful cleanup.
+- Broker and pin-local assignment check absolute deadlines while holding the
+  scheduling lock. Delayed assignment wakeups revalidate exact live identity
+  after close, expired FIFO entries are terminalized before later live entries,
+  and pin reservations are released before wakeup.
+- Explicit pool `connect()` holds all N exact Broker leases, so concurrent
+  execute/pin work cannot enter those slots. Connect serialization is bound to
+  Broker identity; a stale old-epoch attempt neither blocks nor clears a new one.
+- The appended public `CommandSpec.retry_safe` field defaults to conservative
+  `False`; all built-in commands remain explicitly `True`.
+
+The stress harness still needs evidence-hardening before the next exact-head
+artifact: non-vacuous saved-resource presence, close-future terminal checks,
+per-request cross-endpoint retry accounting, and explicit PushBuffer capacity
+high-water fields.
+
 ## Exact Next Action
 
-Create and push the F06 implementation checkpoint. While its exact-head CI and
-Pages run, execute the heavy 10,000-generation/100,000-request/two-server stress
-artifact and the clean detached `71089c0` versus F06 pool-size-one and
-concurrent-100 performance matrix. Then update the permanent result, run two
-fresh FINAL adversarial reviews, delete this ledger only after all evidence is
-transferred, push FINAL, and wait for exact-FINAL-head CI and Pages success.
+Commit and push the final-review correctness correction without the unfinished
+RESULT rewrite. Wait for its exact-head CI and Pages, harden the stress evidence
+schema, then create a second evidence checkpoint and run fresh exact-SHA heavy
+10,000-generation/100,000-request stress plus full 1/2/4 x 1/10/100 and ABBA
+baseline/current performance matrices. Transfer all evidence to RESULT, run at
+least two new clean FINAL reviews, delete this ledger, commit FINAL with both
+`Actor-Checkpoint: FINAL` and `Fix-Checkpoint: FINAL`, push, and wait for exact
+FINAL-head CI and Pages success.

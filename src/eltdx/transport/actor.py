@@ -211,6 +211,7 @@ class ActorRuntime:
     stopped: threading.Event = field(default_factory=threading.Event)
     generation_started: threading.Event = field(default_factory=threading.Event)
     fatal_error: BaseException | None = None
+    cleanup_error: BaseException | None = None
     actor_thread: threading.Thread | None = None
     selector: selectors.BaseSelector | None = None
     wake_reader: socket.socket | None = None
@@ -431,8 +432,13 @@ def close_actor(runtime: ActorRuntime, timeout: float = 1.0) -> None:
             runtime.state = RuntimeState.FAILED_CLOSING
         raise TransportCloseTimeoutError("7709 Actor did not stop within 1 second")
     with runtime.control_lock:
-        if failed_before_close or runtime.state is RuntimeState.FAILED_CLOSING:
+        cleanup_error = runtime.cleanup_error
+        if cleanup_error is not None:
+            runtime.state = RuntimeState.FAILED_CLOSING
+        elif failed_before_close or runtime.state is RuntimeState.FAILED_CLOSING:
             runtime.state = RuntimeState.FAILED_CLOSED
+    if cleanup_error is not None:
+        raise TransportCloseTimeoutError("7709 Actor resource cleanup failed") from cleanup_error
 
 
 def abandon_actor(runtime: ActorRuntime) -> None:
@@ -462,7 +468,12 @@ def actor_snapshot(runtime: ActorRuntime) -> ActorSnapshot:
 def _run_actor(runtime: ActorRuntime) -> None:
     try:
         selector = runtime.selector_factory()
+        with runtime.control_lock:
+            runtime.selector = selector
         wake_reader, wake_writer = socket.socketpair()
+        with runtime.control_lock:
+            runtime.wake_reader = wake_reader
+            runtime.wake_writer = wake_writer
         wake_reader.setblocking(False)
         wake_writer.setblocking(False)
         selector.register(
@@ -471,9 +482,6 @@ def _run_actor(runtime: ActorRuntime) -> None:
             SelectorToken("wakeup", runtime.runtime_epoch, 0, wake_reader),
         )
         with runtime.control_lock:
-            runtime.selector = selector
-            runtime.wake_reader = wake_reader
-            runtime.wake_writer = wake_writer
             if runtime.stop_requested:
                 if runtime.state is not RuntimeState.FAILED_CLOSING:
                     runtime.state = RuntimeState.CLOSING
@@ -1164,19 +1172,29 @@ def _drop_generation(runtime: ActorRuntime, reason: BaseException | None) -> Non
         return
     generation.state = TcpState.RETIRING
     selector = runtime.selector
+    unregister_error: BaseException | None = None
     if selector is not None:
         try:
             selector.unregister(generation.sock)
         except (KeyError, ValueError):
             pass
+        except BaseException as exc:
+            unregister_error = exc
+    close_error: BaseException | None = None
     try:
         generation.sock.close()
-    finally:
+    except BaseException as exc:
+        close_error = exc
+    if close_error is None:
         runtime.generation = None
         runtime.connected_host = None
         runtime.reconnect_count += 1
         if reason is not None:
             runtime.last_error = reason
+    if close_error is not None:
+        raise close_error
+    if unregister_error is not None:
+        raise unregister_error
 
 
 def _drain_wakeup(runtime: ActorRuntime) -> None:
@@ -1240,44 +1258,88 @@ def _fail_actor_startup(runtime: ActorRuntime, error: BaseException) -> None:
 
 def _finish_runtime(runtime: ActorRuntime) -> None:
     error = runtime.fatal_error or ConnectionClosedError("7709 Actor stopped")
-    with runtime.control_lock:
-        pending = runtime.pending_task
-        runtime.pending_task = None
-        active = runtime.active_task
-        runtime.active_task = None
-        runtime.cancel_requests.clear()
-    for ticket in (pending, active):
-        if ticket is not None:
-            _complete_ticket(ticket, RequestState.CANCELLED, error=error)
-    _drop_generation(runtime, error)
-    if runtime.push_buffer is not None and runtime.owns_push_buffer:
-        runtime.push_buffer.close(runtime.fatal_error)
-
+    cleanup_errors: list[BaseException] = []
     selector = runtime.selector
     reader = runtime.wake_reader
     writer = runtime.wake_writer
-    if selector is not None and reader is not None:
-        try:
-            selector.unregister(reader)
-        except (KeyError, ValueError):
-            pass
-    for item in (reader, writer):
-        if item is not None:
+    selector_close_failed = selector is not None
+    reader_close_failed = reader is not None
+    writer_close_failed = writer is not None
+    try:
+        with runtime.control_lock:
+            pending = runtime.pending_task
+            runtime.pending_task = None
+            active = runtime.active_task
+            runtime.active_task = None
+            runtime.cancel_requests.clear()
+        for ticket in (pending, active):
+            if ticket is None:
+                continue
             try:
-                item.close()
-            except OSError:
+                _complete_ticket(ticket, RequestState.CANCELLED, error=error)
+            except BaseException as exc:
+                cleanup_errors.append(exc)
+        try:
+            _drop_generation(runtime, error)
+        except BaseException as exc:
+            cleanup_errors.append(exc)
+        if runtime.push_buffer is not None and runtime.owns_push_buffer:
+            try:
+                runtime.push_buffer.close(runtime.fatal_error)
+            except BaseException as exc:
+                cleanup_errors.append(exc)
+
+        if selector is not None and reader is not None:
+            try:
+                selector.unregister(reader)
+            except (KeyError, ValueError):
                 pass
-    if selector is not None:
-        selector.close()
-    with runtime.control_lock:
-        runtime.selector = None
-        runtime.wake_reader = None
-        runtime.wake_writer = None
-        if runtime.state is RuntimeState.FAILED_CLOSING:
-            runtime.state = RuntimeState.FAILED_CLOSED
-        elif runtime.fatal_error is not None:
-            runtime.state = RuntimeState.FAILED
-        else:
-            runtime.state = RuntimeState.STOPPED
-        runtime.stopped.set()
-        runtime.started.set()
+            except BaseException as exc:
+                cleanup_errors.append(exc)
+        for name, item in (("reader", reader), ("writer", writer)):
+            if item is not None:
+                try:
+                    item.close()
+                except BaseException as exc:
+                    cleanup_errors.append(exc)
+                else:
+                    if name == "reader":
+                        reader_close_failed = False
+                    else:
+                        writer_close_failed = False
+        if selector is not None:
+            try:
+                selector.close()
+            except BaseException as exc:
+                cleanup_errors.append(exc)
+            else:
+                selector_close_failed = False
+    except BaseException as exc:
+        cleanup_errors.append(exc)
+    finally:
+        notify_cleanup_failure = False
+        if cleanup_errors:
+            with runtime.control_lock:
+                if runtime.fatal_error is None:
+                    runtime.fatal_error = cleanup_errors[0]
+                    runtime.last_error = cleanup_errors[0]
+                    notify_cleanup_failure = True
+                runtime.cleanup_error = cleanup_errors[0]
+        if notify_cleanup_failure and runtime.fatal_callback is not None:
+            try:
+                runtime.fatal_callback(runtime, cleanup_errors[0])
+            except BaseException:
+                pass
+        with runtime.control_lock:
+            runtime.selector = selector if selector_close_failed else None
+            runtime.wake_reader = reader if reader_close_failed else None
+            runtime.wake_writer = writer if writer_close_failed else None
+            if runtime.state is RuntimeState.FAILED_CLOSING:
+                if runtime.cleanup_error is None:
+                    runtime.state = RuntimeState.FAILED_CLOSED
+            elif runtime.fatal_error is not None:
+                runtime.state = RuntimeState.FAILED
+            else:
+                runtime.state = RuntimeState.STOPPED
+            runtime.stopped.set()
+            runtime.started.set()
