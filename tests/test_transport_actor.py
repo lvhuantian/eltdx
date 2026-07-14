@@ -617,7 +617,28 @@ def test_partial_send_preserves_every_offset_and_blocking_error() -> None:
 
     assert observed == [0, 1, 3, 6]
     assert generation.active_exchange.sent_any
-    assert runtime.selector.events == [actor_module.selectors.EVENT_READ]
+    assert runtime.selector.events == [
+        actor_module.selectors.EVENT_READ | actor_module.selectors.EVENT_WRITE,
+        actor_module.selectors.EVENT_READ,
+    ]
+
+
+def test_immediate_full_send_keeps_existing_read_interest() -> None:
+    endpoint = resolve_hosts(["127.0.0.1:9"])[0]
+    ticket = actor_module.RequestTicket(1, 1, TYPE_SECURITY_COUNT, {"market": "sz"}, time.monotonic() + 1, True)
+    sock = PartialSocket([1_000_000])
+    generation = actor_module.TcpGeneration(1, sock, endpoint, TcpState.READY)
+    generation.selector_events = actor_module.selectors.EVENT_READ
+    runtime = actor_module.ActorRuntime(1, (endpoint,))
+    runtime.selector = InterestSelector()
+    runtime.generation = generation
+    runtime.active_task = ticket
+
+    assert actor_module._begin_exchange(runtime, ticket, TYPE_SECURITY_COUNT, handshake=False)
+
+    assert generation.tx_offset == len(generation.tx_bytes)
+    assert ticket.state is actor_module.RequestState.WAITING_RESPONSE
+    assert runtime.selector.events == []
 
 
 def test_send_zero_is_connection_closed_and_old_socket_token_is_stale() -> None:

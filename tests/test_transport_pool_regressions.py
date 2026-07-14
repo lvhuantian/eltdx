@@ -771,6 +771,35 @@ def test_pinned_connect_is_an_active_operation_for_close() -> None:
     assert (broker.snapshot().idle_slots, broker.snapshot().active_leases) == (1, 0)
 
 
+def test_pooled_and_pinned_hot_paths_use_their_exact_completion_without_wrapper(monkeypatch) -> None:
+    release = threading.Event()
+
+    def handler(conn: socket.socket) -> None:
+        msg_id, msg_type, _ = read_request(conn)
+        conn.sendall(response_bytes(msg_id, msg_type, handshake_payload()))
+        for value in (81, 82):
+            msg_id, msg_type, _ = read_request(conn)
+            conn.sendall(response_bytes(msg_id, msg_type, value.to_bytes(2, "little")))
+        release.wait(timeout=2)
+
+    with Scripted7709Server([handler]) as server:
+        pool = PooledSocketTransport([server.host], pool_size=1, timeout=1, heartbeat_interval=None)
+        try:
+            pool.connect()
+            monkeypatch.setattr(
+                socket_module,
+                "_TerminalCompletion",
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("redundant wrapper allocated")),
+            )
+
+            assert pool.execute(TYPE_SECURITY_COUNT, {"market": "sz"}) == 81
+            with pool.pin() as pinned:
+                assert pinned.execute(TYPE_SECURITY_COUNT, {"market": "sz"}) == 82
+        finally:
+            release.set()
+            pool.close()
+
+
 def test_pinned_proxy_preserves_connection_snapshot_properties() -> None:
     broker, _, slot, proxy = _new_fake_proxy()
     try:

@@ -202,7 +202,7 @@ class SocketTransport:
             if completion is not None:
                 completion(None)
             raise ResponseTimeoutError("7709 response timed out during queue")
-        terminal = _TerminalCompletion(completion, self._request_lock if lock_slot else None)
+        terminal = _TerminalCompletion(completion, self._request_lock) if lock_slot else completion
         terminal_owned_by_ticket = False
         try:
             with self._submission_gate:
@@ -213,7 +213,7 @@ class SocketTransport:
             if expected_runtime_epoch is not None and not self._pool_runtime_is_active(expected_runtime_epoch):
                 raise ConnectionClosedError("7709 pool closed during connect")
         except BaseException:
-            if not terminal_owned_by_ticket:
+            if not terminal_owned_by_ticket and terminal is not None:
                 terminal(None)
             raise
 
@@ -475,7 +475,7 @@ class SocketTransport:
                 completion(None)
             raise ResponseTimeoutError("7709 response timed out during queue")
         lock_acquired = lock_slot
-        terminal = _TerminalCompletion(completion, self._request_lock if lock_slot else None)
+        terminal = _TerminalCompletion(completion, self._request_lock) if lock_slot else completion
         terminal_owned_by_ticket = False
         ticket: RequestTicket | None = None
         try:
@@ -495,7 +495,7 @@ class SocketTransport:
         except BaseException:
             if ticket is not None and not ticket.completed.is_set():
                 cancel_ticket(runtime, ticket)
-            if not terminal_owned_by_ticket:
+            if not terminal_owned_by_ticket and terminal is not None:
                 terminal(None)
             raise
         finally:

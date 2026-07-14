@@ -392,6 +392,52 @@ def test_matching_response_after_absolute_deadline_cannot_succeed() -> None:
         peer.close()
 
 
+def test_success_response_keeps_existing_read_interest_without_redundant_modify(monkeypatch) -> None:
+    endpoint = resolve_hosts(["127.0.0.1:9"])[0]
+    ticket = actor_module.RequestTicket(
+        1,
+        1,
+        TYPE_SECURITY_COUNT,
+        {"market": "sz"},
+        time.monotonic() + 1,
+        True,
+        request_id=1,
+    )
+    ticket.state = actor_module.RequestState.WAITING_RESPONSE
+    raw = response_bytes(7, TYPE_SECURITY_COUNT, (999).to_bytes(2, "little"))
+    generation = actor_module.TcpGeneration(1, object(), endpoint, actor_module.TcpState.READY)
+    generation.tx_bytes = b"abc"
+    generation.tx_offset = 3
+    generation.active_exchange = actor_module.WireExchange(
+        ticket,
+        TYPE_SECURITY_COUNT,
+        7,
+        TYPE_SECURITY_COUNT,
+        b"abc",
+        False,
+    )
+    runtime = actor_module.ActorRuntime(1, (endpoint,))
+    runtime.active_task = ticket
+    runtime.generation = generation
+    interest_changes: list[int] = []
+    monkeypatch.setattr(
+        actor_module,
+        "_set_generation_interest",
+        lambda _runtime, _generation, events: interest_changes.append(events),
+    )
+
+    actor_module._route_frame(
+        runtime,
+        generation,
+        actor_module.ReceivedFrame(1, decode_response(raw)),
+    )
+
+    assert ticket.state is actor_module.RequestState.SUCCESS
+    assert runtime.active_task is None
+    assert generation.state is actor_module.TcpState.READY
+    assert interest_changes == []
+
+
 class WouldBlockSocket:
     def recv(self, _size: int) -> bytes:
         raise BlockingIOError

@@ -127,6 +127,7 @@ class TcpGeneration:
     receive_drained: bool = False
     connected_at: float = 0.0
     last_activity_at: float = 0.0
+    selector_events: int = 0
 
 
 @dataclass(slots=True)
@@ -684,7 +685,6 @@ def _begin_exchange(runtime: ActorRuntime, ticket: RequestTicket, command: int, 
     generation.state = TcpState.HANDSHAKING if handshake else TcpState.READY
     if not handshake:
         ticket.state = RequestState.SENDING
-    _set_generation_interest(runtime, generation, selectors.EVENT_READ | selectors.EVENT_WRITE)
     try:
         _send_generation(runtime, generation)
     except (OSError, ConnectionClosedError) as exc:
@@ -771,9 +771,12 @@ def _register_connecting(runtime: ActorRuntime, generation: TcpGeneration) -> No
         selectors.EVENT_READ | selectors.EVENT_WRITE,
         SelectorToken("tcp", runtime.runtime_epoch, generation.generation_id, generation.sock),
     )
+    generation.selector_events = selectors.EVENT_READ | selectors.EVENT_WRITE
 
 
 def _set_generation_interest(runtime: ActorRuntime, generation: TcpGeneration, events: int) -> None:
+    if generation.selector_events == events:
+        return
     selector = runtime.selector
     if selector is None:
         raise RuntimeError("Actor selector is unavailable")
@@ -782,6 +785,7 @@ def _set_generation_interest(runtime: ActorRuntime, generation: TcpGeneration, e
         selector.modify(generation.sock, events, token)
     except KeyError:
         selector.register(generation.sock, events, token)
+    generation.selector_events = events
 
 
 def _handle_tcp_event(runtime: ActorRuntime, token: SelectorToken, mask: int) -> None:
@@ -841,6 +845,7 @@ def _defer_connect_probe(runtime: ActorRuntime, generation: TcpGeneration) -> No
         selector.unregister(generation.sock)
     except (KeyError, ValueError):
         pass
+    generation.selector_events = 0
     generation.connect_recheck_at = min(
         generation.connect_deadline,
         time.monotonic() + _CONNECT_RECHECK_INTERVAL,
@@ -854,6 +859,7 @@ def _send_generation(runtime: ActorRuntime, generation: TcpGeneration) -> None:
     try:
         sent = generation.sock.send(memoryview(generation.tx_bytes)[generation.tx_offset:])
     except BlockingIOError:
+        _set_generation_interest(runtime, generation, selectors.EVENT_READ | selectors.EVENT_WRITE)
         return
     if sent == 0:
         raise ConnectionClosedError("7709 socket closed during send")
@@ -863,6 +869,7 @@ def _send_generation(runtime: ActorRuntime, generation: TcpGeneration) -> None:
     generation.tx_offset += sent
     generation.last_activity_at = time.monotonic()
     if generation.tx_offset < len(generation.tx_bytes):
+        _set_generation_interest(runtime, generation, selectors.EVENT_READ | selectors.EVENT_WRITE)
         return
     if not exchange.handshake:
         exchange.ticket.state = RequestState.WAITING_RESPONSE
@@ -971,7 +978,6 @@ def _route_frame(runtime: ActorRuntime, generation: TcpGeneration, received: Rec
     generation.tx_offset = 0
     generation.state = TcpState.READY
     runtime.active_task = None
-    _set_generation_interest(runtime, generation, selectors.EVENT_READ)
     _complete_ticket(ticket, RequestState.SUCCESS, result=envelope)
 
 
@@ -993,6 +999,7 @@ def _finish_connect(runtime: ActorRuntime, generation: TcpGeneration) -> None:
             selector.unregister(generation.sock)
         except (KeyError, ValueError):
             pass
+    generation.selector_events = 0
     now = time.monotonic()
     generation.state = TcpState.CONNECTED_UNHANDSHAKEN
     generation.connected_at = now
@@ -1183,13 +1190,18 @@ def _drop_generation(runtime: ActorRuntime, reason: BaseException | None) -> Non
     generation.state = TcpState.RETIRING
     selector = runtime.selector
     unregister_error: BaseException | None = None
+    unregistered = selector is None
     if selector is not None:
         try:
             selector.unregister(generation.sock)
         except (KeyError, ValueError):
-            pass
+            unregistered = True
         except BaseException as exc:
             unregister_error = exc
+        else:
+            unregistered = True
+    if unregistered:
+        generation.selector_events = 0
     close_error: BaseException | None = None
     try:
         generation.sock.close()

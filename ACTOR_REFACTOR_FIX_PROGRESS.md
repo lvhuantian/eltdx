@@ -12,10 +12,10 @@ The result document remains historical evidence only until FINAL rewrites it.
 | Baseline HEAD | `994c49b51f47255bdcd9cdc3308a5a554f37588b` |
 | Base | `71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
 | Branch | `actor-transport-refactor` |
-| Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), confirmed OPEN and draft at pushed HEAD `0b8ad54` |
+| Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), confirmed OPEN and draft at pushed HEAD `b66a7a8` |
 | Final-review correction base | `cc46e6042e60b1d70732ae813b089f9c8b572572` |
-| Latest pushed correction checkpoint | `0b8ad54f036d852b437e9812c9fc733d8217aa62`; exact CI and Pages successful |
-| Current local follow-up | Post-checkpoint adversarial corrections verified with 296 passing tests; commit pending |
+| Latest pushed correction checkpoint | `b66a7a82bd2d38022237f4ac9dab3f31567cb366`; exact CI and Pages successful |
+| Current local follow-up | Actor hot-path performance corrections verified with 299 passing tests; checkpoint commit pending |
 | Baseline worktree | Clean (`git status --short --branch`) |
 | Superseded result | Existing `COMPLETE` claim and 183-test evidence |
 
@@ -38,10 +38,10 @@ again before FINAL evidence is accepted.
 | F01 receive ordering and boundaries | COMPLETE (`8aa089d`) | Sequence boundary, full-send gate, pre-send drain, heartbeat gate, partial-tail handling, and unified receive failure path |
 | F02 request identity and build isolation | COMPLETE (`8aa089d`) | Monotonic request ID, exact cancel, request-local build errors, strict deadline, terminal-owned slot, callback isolation |
 | F03 connect and failover | COMPLETE (`2e48be0`) | Candidate/attempt budgets, next-endpoint retry, Windows peer verification, non-busy rearm, and seven real/fault-injected regressions |
-| F04 Broker and pinned leases | COMPLETE (`117b8c6`, correction `0b8ad54`); post-review follow-up commit pending | Per-waiter Event, exact lease/ticket cancellation, FIFO admission, close broadcast to every pin-local waiter, and failed-pin capacity recovery |
-| F05 lifecycle and shutdown | COMPLETE (`117b8c6`, correction `0b8ad54`); post-review follow-up commit pending | Candidate ownership, epoch guard, single close owner, exact resource retention, best-effort cleanup, and monotonic failed-close states |
-| F06 stress, performance, resources, compatibility | COMPLETE (`0955a8e`, resource correction `cc46e60`); schema follow-up commit and fresh FINAL evidence pending | Unique provenance, two servers, warmed plateau, strict aggregate heartbeat gate, and exact resource snapshots; production changes require fresh artifacts |
-| Final-review correctness correction | PUSHED (`0b8ad54`); adversarial follow-up VERIFIED, commit pending | DNS/host fallback, startup and socket ownership, Broker/pin races, close-owner cleanup, pool-connect identity, and `CommandSpec` compatibility; latest full local suite 296 passed |
+| F04 Broker and pinned leases | COMPLETE (`117b8c6`, corrections `0b8ad54`, `b66a7a8`) | Per-waiter Event, exact lease/ticket cancellation, FIFO admission, close broadcast to every pin-local waiter, and failed-pin capacity recovery |
+| F05 lifecycle and shutdown | COMPLETE (`117b8c6`, corrections `0b8ad54`, `b66a7a8`) | Candidate ownership, epoch guard, single close owner, exact resource retention, best-effort cleanup, and monotonic failed-close states |
+| F06 stress, performance, resources, compatibility | IN PROGRESS (`0955a8e`, resource correction `cc46e60`, evidence base `b66a7a8`) | Correctness, stress, resources, and heartbeat pass at `b66a7a8`; baseline-relative throughput was just below 95 percent, so hot-path correction and fresh exact-SHA evidence remain required |
+| Final-review correctness correction | PUSHED (`b66a7a8`) | DNS/host fallback, startup and socket ownership, Broker/pin races, close-owner cleanup, pool-connect identity, and `CommandSpec` compatibility; exact CI/Pages and 296-test local suite passed |
 | FINAL independent review and CI | PENDING | Two clean adversarial reviews; local matrix/build/docs and exact-HEAD CI/Pages green |
 
 ## Confirmed Blockers
@@ -174,6 +174,13 @@ exact-source performance artifacts remain to be generated after checkpointing.
 | 2026-07-15 | Strict heartbeat test after hot-path correction | PASS; independent aggregate sample `1.000357`, zero timed wire heartbeats |
 | 2026-07-15 | `python -m compileall -q src tests scripts` and `git diff --check` | PASS |
 | 2026-07-15 | Latest `python -m pytest -q` | **296 passed in 71.29s** |
+| 2026-07-15 | Exact pushed `b66a7a8` PR checks | CI run `29363110965` passed Ubuntu 3.10-3.13 and Windows 3.11/3.13; Pages run `29363110985` passed |
+| 2026-07-15 | Clean exact-`b66a7a8` heavy stress | 10,000 generations and 100,000 mixed requests completed with both servers used; 110,000 unique results and all duplicate/missing/unexpected/cross counters **0**; close resources terminal; close p99 2.9312/2.6155 ms; warmed handles exactly **188 x 8**; artifact SHA256 `316D0C39001410FB513FC52AEA08A53B50A8C10B0BB90468205E84702EEC6974` |
+| 2026-07-15 | Three predeclared heartbeat repetitions at `b66a7a8` | Ratios 0.995257/1.000617/0.996396; combined 96 timed phases and 105,696 business responses gave ratio **0.997418**, zero timed heartbeats and zero cross counters |
+| 2026-07-15 | Exact-`b66a7a8` full 1/2/4 x 1/10/100 matrix | Pool 1 sustained about 163 rps, pool 2 about 321 rps, and pool 4 about 642 rps with observed maximum active work exactly 1/2/4; artifact SHA256 `1DFBDB75F22631F9CB55BD93287ED5D124A08D3EFC747450CE7524F62374C92B` |
+| 2026-07-15 | Full 10,000 sequential / 100,000 concurrent baseline-current-current-baseline acceptance at `b66a7a8` | Sequential ratio **0.948497**, concurrent ratio **0.943353**; both below required 0.95, so FINAL remained open |
+| 2026-07-15 | Actor hot-path correction verification | Normal immediate sends retain READ interest without selector modify; partial/would-block sends arm READ|WRITE; pooled/pinned calls pass their exact completion without a redundant lock wrapper. Compile passed, focused matrix **162 passed**, full suite **299 passed in 69.93s** |
+| 2026-07-15 | Counterbalanced hot-path diagnostics against clean `b66a7a8` | Sequential 3,000-request ABBA measured **+0.3751%**. Two independent 4 x 10,000 concurrent ABBA sets combined to about **+2.0%** but showed system drift, so they are diagnostic only. A stale-wakeup drain experiment measured about **-0.56%** and was rejected without source changes |
 
 Post-`0b8ad54` corrections make Broker close broadcast every independently
 registered pin waiter Event without retaining proxies. A delayed assigned caller
@@ -281,18 +288,19 @@ methods, port 7615, pool-size meaning, or runtime dependencies:
 - The appended public `CommandSpec.retry_safe` field defaults to conservative
   `False`; all built-in commands remain explicitly `True`.
 
-The stress harness still needs evidence-hardening before the next exact-head
-artifact: non-vacuous saved-resource presence, close-future terminal checks,
-per-request cross-endpoint retry accounting, and explicit PushBuffer capacity
-high-water fields.
+The stress harness at `b66a7a8` now enforces non-vacuous saved-resource
+presence, close-future terminal checks, per-request cross-endpoint retry
+accounting, and explicit PushBuffer capacity/high-water fields. The production
+hot-path correction invalidates that checkpoint as FINAL evidence, so all
+artifacts must be regenerated at the next exact implementation SHA.
 
 ## Exact Next Action
 
-Commit and push the final-review correctness correction without the unfinished
-RESULT rewrite. Wait for its exact-head CI and Pages, harden the stress evidence
-schema, then create a second evidence checkpoint and run fresh exact-SHA heavy
-10,000-generation/100,000-request stress plus full 1/2/4 x 1/10/100 and ABBA
-baseline/current performance matrices. Transfer all evidence to RESULT, run at
-least two new clean FINAL reviews, delete this ledger, commit FINAL with both
-`Actor-Checkpoint: FINAL` and `Fix-Checkpoint: FINAL`, push, and wait for exact
-FINAL-head CI and Pages success.
+Commit and push the verified Actor hot-path correction without the unfinished
+RESULT rewrite, then wait for exact-head CI and Pages. From a clean worktree at
+that SHA, rerun heavy 10,000-generation/100,000-request stress, the three fixed
+heartbeat repetitions, full 1/2/4 x 1/10/100 matrix, and full 10,000/100,000
+baseline-current-current-baseline acceptance. Transfer exact evidence to RESULT,
+run at least two new clean FINAL reviews, delete this ledger, commit FINAL with
+both `Actor-Checkpoint: FINAL` and `Fix-Checkpoint: FINAL`, push, and wait for
+exact FINAL-head CI and Pages success.
