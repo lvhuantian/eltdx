@@ -29,14 +29,14 @@ Implement the complete per-slot, single-threaded, non-blocking 7709 `ConnectionA
 | Status | ACTIVE |
 | Spec revision | 1.0 |
 | Spec SHA256 | `C13F9F551CDE202B48B3C1CD7307C2CD31B65DBBA255247D822A444B813CDF61` revalidated 2026-07-14 12:52 +08:00 |
-| Current checkpoint | A02 (starts after A01 commit/push) |
-| Last completed | A01 locally verified; commit/push next |
-| Next exact action | Implement bounded incremental `ResponseFrameDecoder` and safe zlib decoding with byte-boundary, resync, malformed-stream, and limit tests. |
+| Current checkpoint | A03 (starts after A02 commit/push) |
+| Last completed | A02 locally verified; commit/push next |
+| Next exact action | Implement `ActorRuntime`, tickets, generations, static selector runner, socketpair wakeup, non-blocking `connect_ex`/`SO_ERROR`, host failover, and deterministic close tests. |
 | Branch | `actor-transport-refactor` (created locally from verified base) |
 | Base SHA | `71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
-| Local HEAD | `f0168688f8d1ac26f00291e69bb4717b3d3aed77` before this additive A00 synchronization record |
-| Remote HEAD | work branch `f0168688f8d1ac26f00291e69bb4717b3d3aed77` verified from PR head; `origin/main=71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
-| Push state | A00 pushed normally; synchronization record pending push |
+| Local HEAD | `79a14f9` before A02 |
+| Remote HEAD | work branch `79a14f9`; `origin/main=71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
+| Push state | A01 pushed normally after one transient TLS retry |
 | Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), OPEN and draft |
 | CI state | run `29307148534` queued/running for Ubuntu CPython 3.10-3.13 at A00 head; Pages run `29307148575` in progress |
 | Current owner | active Goal thread `019f5ef5-6ebb-7291-89ed-6b55c6bb5992` |
@@ -59,7 +59,7 @@ Implement the complete per-slot, single-threaded, non-blocking 7709 `ConnectionA
 | --- | --- | --- | --- |
 | A00 | none | DONE | Baseline, branch, ledger, tests; remote/PR sync immediately follows commit |
 | A01 | A00 | DONE | Deterministic fault-injection harness and reproducible baseline evidence |
-| A02 | A01 | PENDING | Incremental frame decoder and bounded zlib |
+| A02 | A01 | DONE | Incremental frame decoder and bounded zlib |
 | A03 | A02 | PENDING | Runtime, wakeup, selector, non-blocking connect, close |
 | A04 | A03 | PENDING | Wire request lifecycle, retry, cancel, generations |
 | A05 | A04 | PENDING | Socket facade, heartbeat, push, API compatibility |
@@ -89,6 +89,15 @@ Allowed status values: `PENDING`, `IN_PROGRESS`, `DONE`, `BLOCKED`. At most one 
 - Acceptance evidence: targeted 8 passed in 0.28s; full suite 103 passed in 0.53s; fixed nine-case benchmark completed
 - Commit: this A01 checkpoint commit
 - Trailer: `Actor-Checkpoint: A01`
+
+### A02
+
+- Status: `DONE`
+- Owned files: `src/eltdx/protocol/frame.py`, `tests/test_frame_stream.py`, and this ledger
+- Required commands: `python -m pytest -q tests/test_frame_stream.py tests/test_protocol_7709.py`; `python -m pytest -q`
+- Acceptance evidence: targeted 53 passed in 0.25s; full suite 134 passed in 0.52s; no skips or xfails reported
+- Commit: this A02 checkpoint commit
+- Trailer: `Actor-Checkpoint: A02`
 
 ## A01 Baseline Evidence
 
@@ -123,6 +132,8 @@ Benchmark environment: Windows 11 10.0.26200 AMD64, CPython 3.12.6, Intel i5-134
 | 2026-07-14 12:59 +08:00 | Windows 11 10.0.26200 AMD64 | CPython 3.12.6 | A01 | targeted Actor support and legacy transport tests | PASS: 8 passed in 0.28s | Barrier/Event loopback harness; no timing sleeps in fault control. |
 | 2026-07-14 13:00 +08:00 | Windows 11 10.0.26200 AMD64 | CPython 3.12.6 | A01 | fixed old-transport benchmark, nine cases | PASS: 11.5s wall | Raw artifact/hash and full table recorded above. |
 | 2026-07-14 13:01 +08:00 | Windows 11 10.0.26200 AMD64 | CPython 3.12.6 | A01 | `python -m pytest -q` | PASS: 103 passed in 0.53s | No skips or xfails reported. |
+| 2026-07-14 13:07 +08:00 | Windows 11 10.0.26200 AMD64 | CPython 3.12.6 | A02 | `python -m pytest -q tests/test_frame_stream.py tests/test_protocol_7709.py` | PASS: 53 passed in 0.25s | Byte-split, sticky buffer, multi-frame, resync, EOF, zlib corruption/trailing/limit matrix. |
+| 2026-07-14 13:08 +08:00 | Windows 11 10.0.26200 AMD64 | CPython 3.12.6 | A02 | `python -m pytest -q` | PASS: 134 passed in 0.52s | No skips or xfails reported. |
 
 ## Open Decisions
 
@@ -151,6 +162,7 @@ Bootstrap inspection found no additional dirty repository paths. Pre-existing Py
 | Signature | Count | Last Attempt | Evidence | Next Retry/Unblock Condition |
 | --- | --- | --- | --- | --- |
 | none | 0 | n/a | n/a | n/a |
+| `schannel: failed to receive handshake, SSL/TLS connection failed` on A01 push | 1 | 2026-07-14 13:02 +08:00 | first push failed; 5-second retry succeeded without history rewrite | resolved |
 
 ## Remote Synchronization
 
