@@ -102,6 +102,7 @@ class LeaseBroker:
         self._lease_counter = 0
         self._pin_waiters = 0
         self._closed = False
+        self._waiter_local = threading.local()
 
     def acquire(self, deadline: float, *, pinned: bool = False) -> SlotLease:
         with self._condition:
@@ -112,10 +113,15 @@ class LeaseBroker:
             if len(self._waiters) + self._pin_waiters >= self.max_pending_requests:
                 raise PoolBusyError("7709 pool admission queue is full")
             self._waiter_counter += 1
-            waiter = AdmissionWaiter(self.pool_epoch, self._waiter_counter, deadline, pinned)
+            completed = getattr(self._waiter_local, "completed", None)
+            if completed is None:
+                completed = threading.Event()
+                self._waiter_local.completed = completed
+            else:
+                completed.clear()
+            waiter = AdmissionWaiter(self.pool_epoch, self._waiter_counter, deadline, pinned, completed=completed)
             self._waiters.append(waiter)
             self._condition.notify_all()
-
         remaining = max(0.0, deadline - time.monotonic())
         if not waiter.completed.wait(remaining):
             with self._condition:
@@ -232,14 +238,12 @@ class LeaseCompletion:
     def __init__(self, broker: LeaseBroker, lease: SlotLease) -> None:
         self._broker_ref = weakref.ref(broker)
         self._lease = lease
-        self._lock = threading.Lock()
         self._released = False
 
     def __call__(self, ticket: object | None) -> None:
-        with self._lock:
-            if self._released:
-                return
-            self._released = True
+        if self._released:
+            return
+        self._released = True
         broker = self._broker_ref()
         if broker is not None:
             broker.release(self._lease)
@@ -407,6 +411,7 @@ class PinnedTransportProxy:
         deadline = time.monotonic() + self._timeout
         call_id = self._admit(deadline)
         completion = PinCompletion(self, call_id)
+        runtime = self._slot._runtime
         try:
             return self._slot._execute_with_lease(
                 command,
@@ -414,6 +419,8 @@ class PinnedTransportProxy:
                 lease_id=self._lease.lease_id,
                 deadline=deadline,
                 completion=completion,
+                runtime=runtime,
+                lock_slot=False,
             )
         except BaseException:
             completion(None)
@@ -656,12 +663,15 @@ class PooledSocketTransport:
         deadline = time.monotonic() + self._timeout
         lease = broker.acquire(deadline)
         completion = LeaseCompletion(broker, lease)
-        return self._transports[lease.slot_id]._execute_with_lease(
+        transport = self._transports[lease.slot_id]
+        return transport._execute_with_lease(
             command,
             payload,
             lease_id=lease.lease_id,
             deadline=deadline,
             completion=completion,
+            runtime=transport._runtime,
+            lock_slot=False,
         )
 
     @contextmanager

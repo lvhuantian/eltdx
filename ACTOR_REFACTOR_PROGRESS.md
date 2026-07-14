@@ -29,14 +29,14 @@ Implement the complete per-slot, single-threaded, non-blocking 7709 `ConnectionA
 | Status | ACTIVE |
 | Spec revision | 1.0 |
 | Spec SHA256 | `C13F9F551CDE202B48B3C1CD7307C2CD31B65DBBA255247D822A444B813CDF61` revalidated 2026-07-14 12:52 +08:00 |
-| Current checkpoint | A08 (starts after A07 commit/push) |
-| Last completed | A07 locally verified; commit/push next |
-| Next exact action | Complete the deterministic fault matrix, add bounded stress/soak/resource/performance tooling, run Windows stress and fixed old/new benchmarks, and expand CI to Ubuntu 3.10-3.13 plus Windows 3.11/3.13. |
+| Current checkpoint | A09 (starts after A08 commit/push) |
+| Last completed | A08 locally verified; commit/push and CI next |
+| Next exact action | Update architecture/API/debug/changelog documentation, perform base..HEAD review and fresh full verification, then push A09 and wait for required CI. |
 | Branch | `actor-transport-refactor` (created locally from verified base) |
 | Base SHA | `71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
-| Local HEAD | `e7d8fca` before A07 |
-| Remote HEAD | work branch `e7d8fca`; `origin/main=71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
-| Push state | A06 pushed normally |
+| Local HEAD | `049f101` before A08 |
+| Remote HEAD | work branch `049f101`; `origin/main=71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
+| Push state | A07 pushed normally |
 | Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), OPEN and draft |
 | CI state | run `29307148534` queued/running for Ubuntu CPython 3.10-3.13 at A00 head; Pages run `29307148575` in progress |
 | Current owner | active Goal thread `019f5ef5-6ebb-7291-89ed-6b55c6bb5992` |
@@ -65,7 +65,7 @@ Implement the complete per-slot, single-threaded, non-blocking 7709 `ConnectionA
 | A05 | A04 | DONE | Socket facade, heartbeat, push, API compatibility |
 | A06 | A05 | DONE | FIFO pool leases, pin, rollback, shared push |
 | A07 | A06 | DONE | Reopen, fatal, finalizer, diagnostics |
-| A08 | A07 | PENDING | Cross-platform matrix, stress, soak, performance |
+| A08 | A07 | DONE | Cross-platform matrix, stress, soak, performance |
 | A09 | A08 | PENDING | Docs, cleanup, full verification, FINAL delivery |
 
 Allowed status values: `PENDING`, `IN_PROGRESS`, `DONE`, `BLOCKED`. At most one checkpoint may be `IN_PROGRESS`.
@@ -144,6 +144,33 @@ Allowed status values: `PENDING`, `IN_PROGRESS`, `DONE`, `BLOCKED`. At most one 
 - Commit: this A07 checkpoint commit
 - Trailer: `Actor-Checkpoint: A07`
 
+### A08
+
+- Status: `DONE`
+- Owned files: stress/soak/resource/performance tests and scripts, benchmark artifacts/summaries, CI workflow, and this ledger
+- Required commands: full deterministic fault matrix, quick stress, 1,000/10,000 generation runs, 100,000 mixed requests, old/new fixed benchmark comparison, resource/close/heartbeat measurements, full suite, and CI matrix
+- Acceptance evidence: full suite 182 passed in 13.72s; build and strict docs passed; 10k generation, 100k mixed, 100 close samples, idle CPU, heartbeat impact and paired old/new 5ms performance artifacts all passed
+- Commit: this A08 checkpoint commit
+- Trailer: `Actor-Checkpoint: A08`
+
+## A08 Performance And Stress Evidence
+
+Final stress artifact: `artifacts/actor_stress_final_v2.json`, SHA256 `4955C7AAF5C1A2153F903FD4D94847D176644FE3C18D91A515E0BC1A3BBE6715`, workload SHA256 `33FEBF83A46862181784D1DC89FCBF97B0BFD0B47DBDF3DF21E16FCADFD753A6`.
+
+- 10,000 generation changes: 22.017s, one Actor identity, generation counter 10,000, accepts 10,000, stale events 0, actor threads returned to 0, Windows handle baseline 173 -> 187 after GC.
+- 100,000 mixed requests, pool 4/concurrency 100: 58.806s, 1,700.519 req/s, server max active exactly 4, 103 accepts, 1,030 push frames, 6 bounded drops with one explicit gap, stale events 0, waiter/lease counts 0, actor threads 0, handles 179 -> 188 after GC.
+- Close samples (100 each): idle p50/p95/p99 = 1.6525/2.1581/2.4234ms; loaded = 1.1182/1.6334/2.0457ms.
+- Idle selector sample: 0.504s wall, 0.000s process CPU. Heartbeat workload (10,000 requests): 1,539.927 req/s disabled vs 1,544.061 enabled, ratio 1.002685; only 15 heartbeat requests occurred during per-slot idle gaps.
+
+Paired 5ms workload uses the unchanged A01 benchmark script SHA256 `27F80ADE31216BC5EB4879B26EA013FDD1C70DB8C828C26679B3E65458523960` on the same Windows host. Old artifact SHA256 `559ED78556435A8161E99D6EC7EB131E190150FDBDFDF5E0D80864CCDFFA3FCE`; new artifact SHA256 `3E1EF9A7E3C102376037C852FB8C1E731CCF6DDD777E39056CA9DAC3C7E042DD`.
+
+| Case | Old | New | Ratio |
+| --- | ---: | ---: | ---: |
+| pool 1, concurrency 1, 10,000 requests | 170.250 req/s | 168.970 req/s | 99.25% |
+| pool 4, concurrency 100, 100,000 requests | 682.586 req/s | 654.552 req/s | 95.89% |
+
+The 1ms loopback diagnostic remains retained for timer-sensitivity audit: final new artifact SHA256 `DDCA90A7ABDA152E53D3D4C9F97447F10DD8E67E60C8AAE6A6C6CE34E06D6DCD`; the Windows microbenchmark observed scheduling p50/p99 increments of approximately 0.14/0.13ms, within the 0.2ms allowance. The 1ms server sleep is deliberately not used as the throughput acceptance workload because Windows timer granularity caused large scheduling variance; it is not hidden or discarded.
+
 ## A01 Baseline Evidence
 
 All signatures are anchored to base commit `71089c0`; no intentionally failing test, skip, or xfail was added.
@@ -189,6 +216,9 @@ Benchmark environment: Windows 11 10.0.26200 AMD64, CPython 3.12.6, Intel i5-134
 | 2026-07-14 14:03 +08:00 | Windows 11 10.0.26200 AMD64 | CPython 3.12.6 | A06 | `python -m pytest -q` | PASS: 166 passed in 1.06s | No skips or xfails reported. |
 | 2026-07-14 14:25 +08:00 | Windows 11 10.0.26200 AMD64 | CPython 3.12.6 | A07 | lifecycle/finalizer and pool targeted matrices | PASS: 23 passed in 0.44s; broader transport 47 passed in 0.94s | Reopen, failed-close, fatal fail-closed, DNS epoch, immutable diagnostics, standalone/pool idle/connected/waiting GC. |
 | 2026-07-14 14:25 +08:00 | Windows 11 10.0.26200 AMD64 | CPython 3.12.6 | A07 | `python -m pytest -q` | PASS: 178 passed in 1.11s | No skips or xfails reported. |
+| 2026-07-14 15:33 +08:00 | Windows 11 10.0.26200 AMD64 | CPython 3.12.6 | A08 | `python -m pytest -q` | PASS: 182 passed in 13.72s | Includes deterministic stress/soak and heartbeat/idle tests; no skips or xfails. |
+| 2026-07-14 15:33 +08:00 | Windows 11 10.0.26200 AMD64 | CPython 3.12.6 | A08 | `python -m build` | PASS | Built `eltdx-1.0.2.tar.gz` and wheel. |
+| 2026-07-14 15:33 +08:00 | Windows 11 10.0.26200 AMD64 | CPython 3.12.6 | A08 | `python -m mkdocs build --strict` | PASS | Strict documentation build succeeded. |
 
 ## Open Decisions
 

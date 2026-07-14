@@ -217,6 +217,7 @@ class SocketTransport:
         deadline: float,
         completion: Any,
         runtime: ActorRuntime | None = None,
+        lock_slot: bool = True,
     ) -> Any:
         request_payload = dict(payload or {})
         if runtime is None:
@@ -226,10 +227,12 @@ class SocketTransport:
                 if completion is not None:
                     completion(None)
                 raise
-        if not self._acquire_request_lock(deadline):
+        lock_acquired = False
+        if lock_slot and not self._acquire_request_lock(deadline):
             if completion is not None:
                 completion(None)
             raise ResponseTimeoutError("7709 response timed out during queue")
+        lock_acquired = lock_slot
         ticket: RequestTicket | None = None
         try:
             self._require_current_runtime(runtime)
@@ -251,7 +254,8 @@ class SocketTransport:
                 completion(None)
             raise
         finally:
-            self._request_lock.release()
+            if lock_acquired:
+                self._request_lock.release()
 
         if not isinstance(envelope, FrameEnvelope):
             raise ConnectionClosedError("7709 Actor returned an invalid response envelope")

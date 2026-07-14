@@ -262,7 +262,8 @@ def submit_connect(runtime: ActorRuntime, deadline: float) -> ConnectTicket:
         if runtime.pending_task is not None:
             raise TransportError("7709 Actor mailbox is full")
         runtime.pending_task = ticket
-    _notify_actor(runtime)
+        writer = runtime.wake_writer
+    _notify_actor(runtime, writer)
     return ticket
 
 
@@ -291,7 +292,8 @@ def submit_request(
         if runtime.pending_task is not None:
             raise TransportError("7709 Actor mailbox is full")
         runtime.pending_task = ticket
-    _notify_actor(runtime)
+        writer = runtime.wake_writer
+    _notify_actor(runtime, writer)
     return ticket
 
 
@@ -303,7 +305,8 @@ def cancel_ticket(runtime: ActorRuntime, ticket: RequestTicket) -> None:
             tcp_generation=generation.generation_id if generation is not None else 0,
             lease_id=ticket.lease_id,
         )
-    _notify_actor(runtime)
+        writer = runtime.wake_writer
+    _notify_actor(runtime, writer)
 
 
 def wait_ticket(ticket: ConnectTicket | RequestTicket) -> Any:
@@ -326,7 +329,8 @@ def request_actor_stop(runtime: ActorRuntime) -> None:
             runtime.state is RuntimeState.FAILED and thread is not None and thread.is_alive()
         ):
             runtime.state = RuntimeState.CLOSING
-    _notify_actor(runtime)
+        writer = runtime.wake_writer
+    _notify_actor(runtime, writer)
 
 
 def close_actor(runtime: ActorRuntime, timeout: float = 1.0) -> None:
@@ -429,14 +433,22 @@ def _drain_control(runtime: ActorRuntime) -> None:
     with runtime.control_lock:
         cancel = runtime.cancel_request
         runtime.cancel_request = None
+        if cancel is None and (runtime.stop_requested or runtime.active_task is not None):
+            return
+        if cancel is None:
+            task = runtime.pending_task
+            runtime.pending_task = None
+            runtime.active_task = task
+        else:
+            task = None
     if cancel is not None:
         _apply_cancel(runtime, cancel)
-    with runtime.control_lock:
-        if runtime.stop_requested or runtime.active_task is not None:
-            return
-        task = runtime.pending_task
-        runtime.pending_task = None
-        runtime.active_task = task
+        with runtime.control_lock:
+            if runtime.stop_requested or runtime.active_task is not None:
+                return
+            task = runtime.pending_task
+            runtime.pending_task = None
+            runtime.active_task = task
     if task is None:
         return
     if isinstance(task, ConnectTicket):
@@ -521,6 +533,10 @@ def _begin_exchange(runtime: ActorRuntime, ticket: RequestTicket, command: int, 
     if not handshake:
         ticket.state = RequestState.SENDING
     _set_generation_interest(runtime, generation, selectors.EVENT_READ | selectors.EVENT_WRITE)
+    try:
+        _send_generation(runtime, generation)
+    except (OSError, ConnectionClosedError) as exc:
+        _handle_wire_failure(runtime, exc, retryable=True)
 
 
 def _start_next_endpoint(runtime: ActorRuntime) -> None:
@@ -655,11 +671,16 @@ def _receive_generation(runtime: ActorRuntime, generation: TcpGeneration) -> Non
         bytes_read += len(chunk)
         generation.last_activity_at = time.monotonic()
         frames = generation.decoder.feed(chunk)
+        terminal_frame = False
         for response in frames:
             frames_read += 1
+            exchange_before = generation.active_exchange
             _route_frame(runtime, generation, response)
+            terminal_frame = terminal_frame or (exchange_before is not None and generation.active_exchange is None)
             if runtime.generation is not generation or frames_read >= 64:
                 return
+        if terminal_frame:
+            return
 
 
 def _route_frame(runtime: ActorRuntime, generation: TcpGeneration, response: ResponseFrame) -> None:
@@ -900,9 +921,10 @@ def _drain_wakeup(runtime: ActorRuntime) -> None:
             raise ConnectionClosedError("7709 Actor wakeup writer closed")
 
 
-def _notify_actor(runtime: ActorRuntime) -> None:
-    with runtime.control_lock:
-        writer = runtime.wake_writer
+def _notify_actor(runtime: ActorRuntime, writer: socket.socket | None = None) -> None:
+    if writer is None:
+        with runtime.control_lock:
+            writer = runtime.wake_writer
     if writer is None:
         return
     try:
