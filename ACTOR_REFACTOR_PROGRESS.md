@@ -29,14 +29,14 @@ Implement the complete per-slot, single-threaded, non-blocking 7709 `ConnectionA
 | Status | ACTIVE |
 | Spec revision | 1.0 |
 | Spec SHA256 | `C13F9F551CDE202B48B3C1CD7307C2CD31B65DBBA255247D822A444B813CDF61` revalidated 2026-07-14 12:52 +08:00 |
-| Current checkpoint | A05 (starts after A04 commit/push) |
-| Last completed | A04 locally verified; commit/push next |
-| Next exact action | Add bounded epoch-scoped `PushBuffer`, heartbeat scheduling, and replace legacy `SocketTransport` with the Actor-backed synchronous facade while preserving public behavior. |
+| Current checkpoint | A06 (starts after A05 commit/push) |
+| Last completed | A05 locally verified; commit/push next |
+| Next exact action | Replace round-robin pool scheduling with bounded FIFO admission, first-idle leases, pinned epoch proxies, parallel connect rollback, shared PushBuffer, and pool close wakeups. |
 | Branch | `actor-transport-refactor` (created locally from verified base) |
 | Base SHA | `71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
-| Local HEAD | `608fdeb` before A04 |
-| Remote HEAD | work branch `608fdeb`; `origin/main=71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
-| Push state | A03 pushed normally |
+| Local HEAD | `949c787` before A05 |
+| Remote HEAD | work branch `949c787`; `origin/main=71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
+| Push state | A04 pushed normally |
 | Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), OPEN and draft |
 | CI state | run `29307148534` queued/running for Ubuntu CPython 3.10-3.13 at A00 head; Pages run `29307148575` in progress |
 | Current owner | active Goal thread `019f5ef5-6ebb-7291-89ed-6b55c6bb5992` |
@@ -62,7 +62,7 @@ Implement the complete per-slot, single-threaded, non-blocking 7709 `ConnectionA
 | A02 | A01 | DONE | Incremental frame decoder and bounded zlib |
 | A03 | A02 | DONE | Runtime, wakeup, selector, non-blocking connect, close |
 | A04 | A03 | DONE | Wire request lifecycle, retry, cancel, generations |
-| A05 | A04 | PENDING | Socket facade, heartbeat, push, API compatibility |
+| A05 | A04 | DONE | Socket facade, heartbeat, push, API compatibility |
 | A06 | A05 | PENDING | FIFO pool leases, pin, rollback, shared push |
 | A07 | A06 | PENDING | Reopen, fatal, finalizer, diagnostics |
 | A08 | A07 | PENDING | Cross-platform matrix, stress, soak, performance |
@@ -117,6 +117,15 @@ Allowed status values: `PENDING`, `IN_PROGRESS`, `DONE`, `BLOCKED`. At most one 
 - Commit: this A04 checkpoint commit
 - Trailer: `Actor-Checkpoint: A04`
 
+### A05
+
+- Status: `DONE`
+- Owned files: `src/eltdx/transport/push.py`, `src/eltdx/transport/actor.py`, `src/eltdx/transport/socket.py`, transport exports, socket/client compatibility tests, and this ledger
+- Required commands: PushBuffer tests, Actor/socket/client tests, legacy-path and blocking-API scans, then `python -m pytest -q`
+- Acceptance evidence: targeted PushBuffer/Actor/socket/client matrix 60 passed in 0.68s; full suite 158 passed in 0.95s; legacy reader/heartbeat/socket ownership and Actor blocking-API scans clean
+- Commit: this A05 checkpoint commit
+- Trailer: `Actor-Checkpoint: A05`
+
 ## A01 Baseline Evidence
 
 All signatures are anchored to base commit `71089c0`; no intentionally failing test, skip, or xfail was added.
@@ -156,6 +165,8 @@ Benchmark environment: Windows 11 10.0.26200 AMD64, CPython 3.12.6, Intel i5-134
 | 2026-07-14 13:16 +08:00 | Windows 11 10.0.26200 AMD64 | CPython 3.12.6 | A03 | `python -m pytest -q` | PASS: 144 passed in 0.67s | No skips or xfails reported. |
 | 2026-07-14 13:28 +08:00 | Windows 11 10.0.26200 AMD64 | CPython 3.12.6 | A04 | `python -m pytest -q tests/test_transport_actor.py tests/test_frame_stream.py tests/test_protocol_7709.py` | PASS: 72 passed in 0.62s | Handshake, partial send/recv, EOF retry, non-retry-safe, cancel, timeout, old event/fd identity, complete-once, decoder and retry metadata. |
 | 2026-07-14 13:28 +08:00 | Windows 11 10.0.26200 AMD64 | CPython 3.12.6 | A04 | `python -m pytest -q` | PASS: 153 passed in 0.88s | No skips or xfails reported. |
+| 2026-07-14 13:41 +08:00 | Windows 11 10.0.26200 AMD64 | CPython 3.12.6 | A05 | PushBuffer/Actor/socket/client targeted matrix | PASS: 60 passed in 0.68s | Parser release, heartbeat, push dual limits/gap, close poller wake, 200-frame flood fairness. |
+| 2026-07-14 13:42 +08:00 | Windows 11 10.0.26200 AMD64 | CPython 3.12.6 | A05 | `python -m pytest -q` | PASS: 158 passed in 0.95s | No skips or xfails reported. |
 
 ## Open Decisions
 

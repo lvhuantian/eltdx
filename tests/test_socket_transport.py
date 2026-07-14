@@ -5,8 +5,12 @@ import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 
+import pytest
+
+from eltdx.exceptions import PushOverflowError
 from eltdx.protocol.constants import TYPE_HANDSHAKE, TYPE_HEARTBEAT, TYPE_REFRESH_STREAM, TYPE_SECURITY_COUNT
 from eltdx.transport import SocketTransport
+from eltdx.transport import socket as socket_module
 
 
 Request = tuple[int, int, bytes]
@@ -143,6 +147,80 @@ def test_socket_transport_background_heartbeat_uses_same_connection() -> None:
             transport.close()
 
     assert transport.last_heartbeat is not None
+
+
+def test_business_parser_runs_in_caller_after_wire_slot_is_released(monkeypatch) -> None:
+    parser_entered = threading.Event()
+    release_parser = threading.Event()
+    second_request_seen = threading.Event()
+    release_server = threading.Event()
+    original_parse = socket_module.parse_command_response
+
+    def handler(conn: socket.socket) -> None:
+        msg_id, msg_type, _ = _read_request(conn)
+        conn.sendall(_response(msg_id, msg_type, _handshake_payload()))
+        msg_id, msg_type, _ = _read_request(conn)
+        conn.sendall(_response(msg_id, msg_type, (111).to_bytes(2, "little")))
+        msg_id, msg_type, _ = _read_request(conn)
+        second_request_seen.set()
+        conn.sendall(_response(msg_id, msg_type, (222).to_bytes(2, "little")))
+        release_server.wait(timeout=2)
+
+    def parse(command, response, payload=None):
+        if response.data == (111).to_bytes(2, "little"):
+            parser_entered.set()
+            assert release_parser.wait(timeout=2)
+        return original_parse(command, response, payload)
+
+    monkeypatch.setattr(socket_module, "parse_command_response", parse)
+    with Scripted7709Server([handler]) as server:
+        transport = SocketTransport(hosts=[server.host], timeout=2, heartbeat_interval=None)
+        try:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                first = pool.submit(transport.execute, TYPE_SECURITY_COUNT, {"market": "sz"})
+                assert parser_entered.wait(timeout=2)
+                second = pool.submit(transport.execute, TYPE_SECURITY_COUNT, {"market": "sz"})
+                assert second_request_seen.wait(timeout=2)
+                release_parser.set()
+                assert (first.result(), second.result()) == (111, 222)
+        finally:
+            release_parser.set()
+            release_server.set()
+            transport.close()
+
+
+def test_push_flood_is_bounded_and_does_not_starve_matching_response() -> None:
+    release = threading.Event()
+
+    def handler(conn: socket.socket) -> None:
+        msg_id, msg_type, _ = _read_request(conn)
+        conn.sendall(_response(msg_id, msg_type, _handshake_payload()))
+        msg_id, msg_type, _ = _read_request(conn)
+        for index in range(200):
+            conn.sendall(_response(0x290000 + index, TYPE_REFRESH_STREAM, bytes.fromhex("9393")))
+        conn.sendall(_response(msg_id, msg_type, (456).to_bytes(2, "little")))
+        release.wait(timeout=2)
+
+    with Scripted7709Server([handler]) as server:
+        transport = SocketTransport(
+            hosts=[server.host],
+            timeout=2,
+            heartbeat_interval=None,
+            push_queue_size=10,
+            push_queue_bytes=1024,
+        )
+        try:
+            assert transport.execute(TYPE_SECURITY_COUNT, {"market": "sz"}) == 456
+            assert transport.pending_push_count <= 10
+            assert transport._push_buffer is not None
+            snapshot = transport._push_buffer.snapshot()
+            assert snapshot.max_frames_observed <= 10
+            assert snapshot.max_bytes_observed <= 1024
+            with pytest.raises(PushOverflowError, match="push gap"):
+                transport.poll_push()
+        finally:
+            release.set()
+            transport.close()
 
 
 def _read_request(conn: socket.socket) -> Request:

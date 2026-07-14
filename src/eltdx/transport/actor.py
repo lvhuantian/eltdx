@@ -21,8 +21,10 @@ from eltdx.exceptions import (
 )
 from eltdx.hosts import ResolvedEndpoint
 from eltdx.protocol.commands import build_command_frame, parse_command_response
-from eltdx.protocol.constants import TYPE_HANDSHAKE
+from eltdx.protocol.constants import TYPE_HANDSHAKE, TYPE_HEARTBEAT
 from eltdx.protocol.frame import ResponseFrame, ResponseFrameDecoder
+
+from .push import PushBuffer, PushFrame
 
 
 SelectorFactory = Callable[[], selectors.BaseSelector]
@@ -80,6 +82,7 @@ class RequestTicket:
     deadline: float
     retry_safe: bool
     completion: Callable[[RequestTicket], None] | None = None
+    internal: bool = False
     attempts: int = 0
     state: RequestState = RequestState.ADMITTED
     result: object | None = None
@@ -161,6 +164,9 @@ class ActorRuntime:
     endpoints: tuple[ResolvedEndpoint, ...]
     selector_factory: SelectorFactory = selectors.DefaultSelector
     socket_factory: SocketFactory = socket.socket
+    push_buffer: PushBuffer | None = None
+    heartbeat_interval: float | None = None
+    request_timeout: float = 8.0
     control_lock: threading.Lock = field(default_factory=threading.Lock)
     state: RuntimeState = RuntimeState.STARTING
     stop_requested: bool = False
@@ -184,6 +190,7 @@ class ActorRuntime:
     msg_id_counter: int = 0
     stale_event_count: int = 0
     last_handshake: object | None = None
+    last_heartbeat: object | None = None
 
 
 _SUCCESS_CONNECT_CODES = frozenset(
@@ -211,6 +218,9 @@ def start_actor(
     *,
     selector_factory: SelectorFactory = selectors.DefaultSelector,
     socket_factory: SocketFactory = socket.socket,
+    push_buffer: PushBuffer | None = None,
+    heartbeat_interval: float | None = None,
+    request_timeout: float = 8.0,
     startup_timeout: float = 1.0,
 ) -> ActorRuntime:
     runtime = ActorRuntime(
@@ -218,6 +228,9 @@ def start_actor(
         endpoints=tuple(endpoints),
         selector_factory=selector_factory,
         socket_factory=socket_factory,
+        push_buffer=push_buffer,
+        heartbeat_interval=heartbeat_interval,
+        request_timeout=request_timeout,
     )
     thread = threading.Thread(
         target=_run_actor,
@@ -365,6 +378,7 @@ def _run_actor(runtime: ActorRuntime) -> None:
             if runtime.stop_requested:
                 break
             _expire_active_task(runtime)
+            _schedule_heartbeat(runtime)
             timeout = _selector_timeout(runtime)
             events = selector.select(timeout)
             for key, _ in events:
@@ -635,7 +649,13 @@ def _route_frame(runtime: ActorRuntime, generation: TcpGeneration, response: Res
         or response.msg_id != exchange.msg_id
         or response.msg_type != exchange.msg_type
     ):
-        runtime.stale_event_count += 1
+        push_buffer = runtime.push_buffer
+        if push_buffer is None:
+            runtime.stale_event_count += 1
+        else:
+            push_buffer.offer_nowait(
+                PushFrame(runtime.runtime_epoch, generation.generation_id, generation.endpoint.host, response)
+            )
         return
 
     ticket = exchange.ticket
@@ -650,6 +670,8 @@ def _route_frame(runtime: ActorRuntime, generation: TcpGeneration, response: Res
             return
     elif ticket.command == TYPE_HANDSHAKE:
         runtime.last_handshake = parse_command_response(TYPE_HANDSHAKE, response, {})
+    elif ticket.command == TYPE_HEARTBEAT:
+        runtime.last_heartbeat = parse_command_response(TYPE_HEARTBEAT, response, {})
     envelope = FrameEnvelope(
         runtime_epoch=runtime.runtime_epoch,
         tcp_generation=generation.generation_id,
@@ -723,9 +745,37 @@ def _expire_active_task(runtime: ActorRuntime) -> None:
 
 def _selector_timeout(runtime: ActorRuntime) -> float | None:
     ticket = runtime.active_task
-    if ticket is None:
-        return None
-    return max(0.0, ticket.deadline - time.monotonic())
+    now = time.monotonic()
+    if ticket is not None:
+        return max(0.0, ticket.deadline - now)
+    generation = runtime.generation
+    interval = runtime.heartbeat_interval
+    if generation is not None and interval is not None and interval > 0:
+        return max(0.0, generation.last_activity_at + interval - now)
+    return None
+
+
+def _schedule_heartbeat(runtime: ActorRuntime) -> None:
+    interval = runtime.heartbeat_interval
+    generation = runtime.generation
+    if interval is None or interval <= 0 or generation is None or runtime.active_task is not None:
+        return
+    with runtime.control_lock:
+        if runtime.pending_task is not None or runtime.cancel_request is not None:
+            return
+    if time.monotonic() < generation.last_activity_at + interval:
+        return
+    ticket = RequestTicket(
+        runtime_epoch=runtime.runtime_epoch,
+        lease_id=-1,
+        command=TYPE_HEARTBEAT,
+        request_payload_snapshot={},
+        deadline=time.monotonic() + runtime.request_timeout,
+        retry_safe=False,
+        internal=True,
+    )
+    runtime.active_task = ticket
+    _start_request_attempt(runtime)
 
 
 def _fail_active_task(
@@ -753,6 +803,7 @@ def _fail_active_task(
             return
         can_retry = (
             retryable
+            and not ticket.internal
             and ticket.attempts < 2
             and time.monotonic() < ticket.deadline
             and (ticket.retry_safe or not sent_business)
@@ -851,6 +902,8 @@ def _finish_runtime(runtime: ActorRuntime) -> None:
         if ticket is not None:
             _complete_ticket(ticket, RequestState.CANCELLED, error=error)
     _drop_generation(runtime, error)
+    if runtime.push_buffer is not None:
+        runtime.push_buffer.close(runtime.fatal_error)
 
     selector = runtime.selector
     reader = runtime.wake_reader

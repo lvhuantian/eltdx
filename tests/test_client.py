@@ -1,15 +1,14 @@
 from datetime import date, datetime
-from queue import Queue
 
 from eltdx import Client, HelperApi, TdxClient, __version__, to_json, to_jsonable
 from eltdx import WorkdayService
 from eltdx.api import ping
-from eltdx.exceptions import ResponseTimeoutError
 from eltdx.hosts import FALLBACK_HOSTS, DEFAULT_HOSTS, load_server_config, load_server_hosts
 from eltdx.protocol.constants import TYPE_REFRESH_STREAM
-from eltdx.protocol.frame import ResponseFrame
 from eltdx.protocol import COMMANDS, decode, encode, required_commands
 from eltdx.transport import PooledSocketTransport, SocketTransport
+from eltdx.transport.push import PushBuffer, PushFrame
+from eltdx.protocol.frame import ResponseFrame
 from eltdx.models import QuoteLevel, QuoteRefreshPage, QuoteRefreshRecord, QuoteSnapshot
 
 
@@ -916,7 +915,8 @@ def test_socket_transport_routes_unmatched_push_frames() -> None:
         raw=b"",
     )
 
-    transport._route_response(response)
+    transport._push_buffer = PushBuffer(1)
+    transport._push_buffer.offer_nowait(PushFrame(1, 1, "127.0.0.1:1", response))
 
     assert transport.pending_push_count == 1
     parsed = transport.poll_push(parse=True)
@@ -924,59 +924,20 @@ def test_socket_transport_routes_unmatched_push_frames() -> None:
     assert parsed.decoded_payload == b"\x00\x00"
 
 
-def test_socket_transport_routes_matched_response_to_pending_queue() -> None:
-    transport = SocketTransport(hosts=["127.0.0.1:1"], timeout=0.1)
-    response = ResponseFrame(
-        control=0,
-        msg_id=123,
-        msg_type=TYPE_REFRESH_STREAM,
-        zip_length=2,
-        length=2,
-        data=bytes.fromhex("9393"),
-        raw=b"",
-    )
-    pending: Queue = Queue(maxsize=1)
-    transport._pending[(response.msg_id, response.msg_type)] = pending
-
-    transport._route_response(response)
-
-    assert pending.get_nowait() is response
-    assert transport.pending_push_count == 0
-
-
-def test_socket_transport_request_timeout_raises_response_timeout() -> None:
-    class FakeSocket:
-        def sendall(self, data: bytes) -> None:
-            pass
-
+def test_socket_transport_has_no_legacy_reader_or_socket_owner_paths() -> None:
     transport = SocketTransport(hosts=["127.0.0.1:1"], timeout=0.01)
-    transport._socket = FakeSocket()
-    transport._reader_thread = object()
 
-    try:
-        transport._request_locked(TYPE_REFRESH_STREAM, {"codes": ["sz000001"]})
-    except ResponseTimeoutError as exc:
-        assert "0x0547" in str(exc)
-    else:
-        raise AssertionError("expected ResponseTimeoutError")
-
-
-def test_socket_transport_reader_keeps_running_after_timeout() -> None:
-    import socket
-
-    transport = SocketTransport(hosts=["127.0.0.1:1"], timeout=0.1)
-    calls = {"count": 0}
-
-    def fake_read():
-        calls["count"] += 1
-        if calls["count"] == 1:
-            raise TimeoutError("idle")
-        transport._stop_reader.set()
-        raise socket.timeout("idle")
-
-    transport._read_response_locked = fake_read
-
-    transport._reader_loop()
-
-    assert calls["count"] == 2
-    assert transport._reader_error is None
+    assert all(
+        not hasattr(transport, name)
+        for name in (
+            "_socket",
+            "_reader_thread",
+            "_heartbeat_thread",
+            "_stop_reader",
+            "_stop_heartbeat",
+            "_pending",
+            "_send_lock",
+            "_reader_loop",
+            "_heartbeat_loop",
+        )
+    )
