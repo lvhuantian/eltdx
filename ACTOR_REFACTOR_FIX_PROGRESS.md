@@ -12,10 +12,10 @@ The result document remains historical evidence only until FINAL rewrites it.
 | Baseline HEAD | `994c49b51f47255bdcd9cdc3308a5a554f37588b` |
 | Base | `71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
 | Branch | `actor-transport-refactor` |
-| Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), confirmed OPEN and draft at pushed HEAD `72ef660efdbf3158a392df16ddf31bbf61200ecf` |
+| Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), confirmed OPEN and draft at pushed HEAD `2da76518a785c6c167474b9826863c1d3cf98953` |
 | Final-review correction base | `cc46e6042e60b1d70732ae813b089f9c8b572572` |
-| Latest pushed correction checkpoint | `d76ca47d69f139c1f5b1894a4f8536a95ab63794`; exact CI run `29416793618` and Pages run `29416793666` passed |
-| Current local follow-up | Formal `fifo-v2-72ef660-a` remains a permanent FAIL; low-risk wake-only and Broker steady-state optimizations are retained with deterministic race regressions, while terminal handoff was measured and fully reverted |
+| Latest pushed correction checkpoint | `2da76518a785c6c167474b9826863c1d3cf98953`; exact CI run `29417093204` and Pages run `29417093233` passed |
+| Current local follow-up | Formal `fifo-v2-2da7651-a` is a permanent FAIL: sequential/saturated throughput and no-backlog p50/p99 remain below their gates; no sample will be rerun at this SHA |
 | Baseline worktree | User-owned modification in `ACTOR_REFACTOR_RESULT.md`; preserve and integrate, do not overwrite |
 | Superseded result | Existing `COMPLETE` claim and 183-test evidence |
 
@@ -40,7 +40,7 @@ again before FINAL evidence is accepted.
 | F03 connect and failover | COMPLETE (`2e48be0`) | Candidate/attempt budgets, next-endpoint retry, Windows peer verification, non-busy rearm, and seven real/fault-injected regressions |
 | F04 Broker and pinned leases | CORRECTNESS CLOSED; CHECKPOINT CANDIDATE | BaseException-safe waiter withdrawal, assigned-waiter lazy reap, pin close lease recovery, atomic batch admission, and FIFO pass |
 | F05 lifecycle and shutdown | CORRECTNESS CLOSED; CHECKPOINT CANDIDATE | Tokenized lifecycle gates, nonblocking finalizers, deadline-bounded best-effort fatal cleanup, and monotonic shutdown pass |
-| F06 stress, performance, resources, compatibility | LOW-RISK HOT-PATH CHECKPOINT (`8296511`); FIFO-v2 A FAIL (`72ef660`) retained | Wake-only drive and Broker allocation/scan reductions pass focused concurrency review; exact new-HEAD CI and a prospective campaign are still required |
+| F06 stress, performance, resources, compatibility | LOW-RISK HOT-PATH CHECKPOINT (`8296511`); exact remote evidence (`2da7651`); FIFO-v2 campaign FAIL | Wake-only drive and Broker allocation/scan reductions pass focused concurrency review and exact CI/Pages; `fifo-v2-2da7651-a` failed four hard gates, so another implementation checkpoint is required |
 | Final-review correctness correction | COMPLETE (`a53cc09`) | 443-test correctness snapshot plus deterministic two-endpoint generation failover; exact CI and Pages passed |
 | FINAL independent review and CI | PENDING | Two clean adversarial reviews; local matrix/build/docs and exact-HEAD CI/Pages green |
 
@@ -170,6 +170,48 @@ Trial hashes in schedule order are `6045b8ebcbece31695180de62f876235466fdf5ccd77
 `cd042c107d6fc750f4c33d3b83cb4b6abcec1332134fd7a03ec0c5ab420edd3a`,
 and `29adc67c1470ad1a77c11a3a095ec40dfc9d7db252e053ef8d03784d2d0fb564`.
 This exact source and campaign will not be sampled again.
+
+### FIFO-v2 `2da7651` Campaign Failure
+
+The post-hot-path campaign `fifo-v2-2da7651-a` was declared before sampling
+against clean baseline `71089c0a2867a75dc79aa2c340213f4e3845b6e3` and
+current `2da76518a785c6c167474b9826863c1d3cf98953` worktrees. Its canonical
+declaration SHA256 is
+`b8276d380998bfc819ca9fb58b36e429e37eb48a3a35ac5e12ea4528538ced62`;
+the declaration file SHA256 is
+`74162f5585120b226db4932cf7c334c35db915f214bb550ffe5f2fb3a5de9b44`.
+All eight attempt-1 trials ran exactly once in fixed
+`baseline/current/current/baseline/current/baseline/baseline/current` order.
+No cell was retried. The verifier reported `errors=[]`.
+
+Across 32 cases and 1,000,000 completion rows, client successes, server
+requests, wire attempts, and unique responses were all exactly 1,000,000.
+Duplicate, missing, unexpected, cross-request, and cross-generation counts
+were all zero. The immutable campaign bundle SHA256 is
+`2d10ed3b55c6aded7146cc699ac344753d11444d05496c07658b48fc3a95ee3c`;
+the verification report file SHA256 is
+`cc8cd9445d9ed2f263d2ffed1afd783b5e72edddd5a2e3ae02230d55ddedc0e1`.
+
+Four hard gates failed:
+
+- Sequential throughput was 169.640752 versus 160.834299 requests/second,
+  ratio 0.948088 against the 0.95 minimum.
+- Saturated throughput was 665.262613 versus 625.189760 requests/second,
+  ratio 0.939764.
+- No-backlog p50 was 6.25775 versus 6.9896 ms, delta 0.73185 ms against a
+  0.625775 ms allowance; the passing ceiling was exceeded by 0.106075 ms.
+- No-backlog p99 was 7.1636 versus 8.4525 ms, delta 1.2889 ms against a
+  0.71636 ms allowance; the passing ceiling was exceeded by 0.57254 ms.
+
+Sequential p50 and p99 passed. Saturated raw latency remained report-only:
+baseline p50/p99 115.97525/522.2971 ms versus current
+157.0036/176.5262 ms. ABBA throughput ratios were 0.957255 sequential and
+0.960391 saturated, both passing; BAAB ratios were 0.939196 and 0.919921,
+both failing. No-backlog p50/p99 failed independently in both blocks: ABBA
+deltas were 0.76525/1.3198 ms and BAAB deltas were 0.69745/1.2488 ms.
+The best current no-backlog p99 trial was 8.0137 ms, still above the worst
+baseline trial's 10-percent ceiling of 7.99953 ms. This campaign is permanently
+retained as FAIL and this exact source will not be sampled again.
 
 ## Post-Campaign Adversarial Reopening At `8303405`
 
@@ -414,6 +456,9 @@ exact-source performance artifacts remain to be generated after checkpointing.
 | 2026-07-15 | Low-risk optimization checkpoint local matrix | Complete suite **468 passed in 82.20s**; wheel and sdist built successfully; MkDocs strict and `compileall -q src tests scripts` passed |
 | 2026-07-15 | Low-risk optimization source checkpoint | Commit `8296511` (`Fix-Checkpoint: F06-HOTPATH-LOW-RISK`) contains only Actor/Broker production changes and four regression groups; the user-owned result document was explicitly excluded |
 | 2026-07-15 | Exact `d76ca47` remote checks | CI run `29416793618` passed Ubuntu 3.10-3.13, Windows 3.11/3.13, and package build; Pages run `29416793666` passed. PR #12 remained OPEN and draft at the exact SHA |
+| 2026-07-15 | Exact `2da7651` remote checks | CI run `29417093204` passed Ubuntu 3.10-3.13, Windows 3.11/3.13, and package build; Pages run `29417093233` passed. PR #12 remained OPEN and draft at exact head `2da76518a785c6c167474b9826863c1d3cf98953` |
+| 2026-07-15 | Formal `fifo-v2-2da7651-a` campaign | Eight declared attempt-1 cells completed once in exact ABBA+BAAB order; the external campaign command wall time was 2,050.8 seconds. The verifier found no evidence errors across 1,000,000 completions and all cross counters were zero, but sequential/saturated throughput ratios 0.948088/0.939764 and no-backlog p50/p99 deltas 0.73185/1.2889 ms failed. Bundle `2d10ed3...95ee3c` and report `cc8cd944...dc0e1` are retained permanently as FAIL |
+| 2026-07-15 | Rejected Broker no-waiter fast path | Skipping the empty-waiter assignment scan and retaining a monotonic reclaim marker reduced an isolated Broker operation by roughly 10-18 percent but less than one microsecond absolute. Real pool-4/cohort-4 p99 regressed in both adjacent pairs by about 0.177/0.089 ms. The experiment was fully reverted; no source or test diff remains |
 
 Post-`0b8ad54` corrections make Broker close broadcast every independently
 registered pin waiter Event without retaining proxies. A delayed assigned caller
@@ -530,7 +575,13 @@ artifacts must be regenerated at the next exact implementation SHA.
 
 ## Exact Next Action
 
-Commit and push this exact remote-evidence ledger update while explicitly
-excluding the user-owned result document. Require that final documentation-only
-HEAD's CI and Pages, then declare one new FIFO-v2 campaign ID at that SHA. Do not
-change or resample either failed campaign.
+Commit and push this exact campaign-failure ledger update while explicitly
+excluding the user-owned result document. Then evaluate the low-risk pooled
+hot-path candidate that avoids constructing an unused `_RequestLockOwnership`
+and token when `lock_slot=False`. Preserve submission, validation, cancellation,
+completion, and physical-lock semantics; run focused race regressions and fixed
+C/E/E/C development samples. Retain it only with clean correctness evidence and
+non-regressing adjacent measurements. Any retained source requires a new
+checkpoint, exact CI/Pages, campaign ID, declaration, and one-shot schedule.
+Never resample `fifo-v1-ca43972-a`, `fifo-v2-72ef660-a`, or
+`fifo-v2-2da7651-a`.
