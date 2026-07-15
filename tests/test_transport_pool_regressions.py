@@ -105,6 +105,68 @@ class DelayedReturnEvent:
         return self._event.is_set()
 
 
+def test_immediate_lease_avoids_event_but_waiter_handoff_keeps_exact_cancellation() -> None:
+    broker = LeaseBroker(1, pool_size=1, max_pending_requests=2)
+    immediate = broker.acquire(time.monotonic() + 1)
+    assert immediate.cancellation is None
+    acquired: list[object] = []
+
+    waiter_thread = threading.Thread(
+        target=lambda: acquired.append(broker.acquire(time.monotonic() + 2))
+    )
+    waiter_thread.start()
+    assert broker.wait_for_waiters(1)
+    with broker._condition:
+        waiter_cancellation = broker._waiters[0].cancelled
+    assert broker.release(immediate)
+    waiter_thread.join(timeout=2)
+
+    assert not waiter_thread.is_alive()
+    assert len(acquired) == 1
+    queued = acquired[0]
+    assert isinstance(queued, pool_module.SlotLease)
+    assert queued.cancellation is waiter_cancellation
+    assert broker.release(queued)
+
+
+def test_immediate_lease_release_timeout_is_lazily_reclaimed() -> None:
+    broker = LeaseBroker(1, pool_size=1, max_pending_requests=1)
+    lease = broker.acquire(time.monotonic() + 1)
+    condition_held = threading.Event()
+    release_condition = threading.Event()
+
+    def hold_condition() -> None:
+        with broker._condition:
+            condition_held.set()
+            release_condition.wait(timeout=2)
+
+    holder = threading.Thread(target=hold_condition)
+    holder.start()
+    assert condition_held.wait(timeout=2)
+    completion = pool_module.LeaseCompletion(broker, lease, time.monotonic() + 0.03)
+    completion(None)
+
+    assert lease.cancellation is pool_module._CANCELLED_LEASE
+    assert lease.cancellation.is_set()
+    release_condition.set()
+    holder.join(timeout=2)
+    assert not holder.is_alive()
+    snapshot = broker.snapshot()
+    assert (snapshot.idle_slots, snapshot.active_leases) == (1, 0)
+
+
+def test_broker_abandon_marks_immediate_lease_cancelled() -> None:
+    broker = LeaseBroker(1, pool_size=1, max_pending_requests=1)
+    lease = broker.acquire(time.monotonic() + 1)
+    assert lease.cancellation is None
+
+    broker.abandon()
+
+    assert lease.cancellation is pool_module._CANCELLED_LEASE
+    snapshot = broker.snapshot()
+    assert snapshot.closed and snapshot.idle_slots == 0 and snapshot.active_leases == 0
+
+
 def test_admission_waiter_late_set_cannot_wake_next_acquire(monkeypatch) -> None:
     broker = LeaseBroker(1, pool_size=1, max_pending_requests=4)
     initial = broker.acquire(time.monotonic() + 2)
@@ -323,6 +385,47 @@ def test_batch_admission_reserves_all_slots_ahead_of_later_single_waiter() -> No
     assert not batch.is_alive() and not single.is_alive()
     snapshot = broker.snapshot()
     assert (snapshot.idle_slots, snapshot.waiter_count, snapshot.active_leases) == (2, 0, 0)
+
+
+def test_release_reclaims_concurrent_cancellation_before_batch_assignment(monkeypatch) -> None:
+    broker = LeaseBroker(1, pool_size=2, max_pending_requests=2)
+    first = broker.acquire(time.monotonic() + 2)
+    second = broker.acquire(time.monotonic() + 2)
+    batch_leases: list[object] = []
+    assign_entered = threading.Event()
+    allow_assign = threading.Event()
+    release_started = threading.Event()
+    original_assign = broker._assign_waiters_locked
+
+    def observed_assign(wake) -> None:
+        if release_started.is_set():
+            assign_entered.set()
+            assert allow_assign.wait(timeout=2)
+        original_assign(wake)
+
+    monkeypatch.setattr(broker, "_assign_waiters_locked", observed_assign)
+    waiter_thread = threading.Thread(
+        target=lambda: batch_leases.extend(broker.acquire_many(2, time.monotonic() + 2))
+    )
+    waiter_thread.start()
+    assert broker.wait_for_waiters(1)
+    release_started.set()
+    release_thread = threading.Thread(target=lambda: broker.release(second))
+    release_thread.start()
+    assert assign_entered.wait(timeout=2)
+    pool_module._mark_lease_cancelled(first)
+    allow_assign.set()
+    release_thread.join(timeout=2)
+    waiter_thread.join(timeout=2)
+
+    assert not release_thread.is_alive() and not waiter_thread.is_alive()
+    assert len(batch_leases) == 2
+    snapshot = broker.snapshot()
+    assert (snapshot.idle_slots, snapshot.waiter_count, snapshot.active_leases) == (0, 0, 2)
+    assert first.state is pool_module.LeaseState.RELEASED
+    for lease in batch_leases:
+        assert isinstance(lease, pool_module.SlotLease)
+        assert broker.release(lease)
 
 
 def test_batch_admission_timeout_releases_no_partial_lease() -> None:

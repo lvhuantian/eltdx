@@ -53,6 +53,47 @@ def test_message_ids_are_keyed_nonrepeating_exchange_tokens() -> None:
     assert actor_module._next_message_id(zero_preimage) != 0
 
 
+@pytest.mark.parametrize(
+    ("wake_seen", "tcp_seen", "blocked_by_frames", "blocked_by_buffer", "expected_advances"),
+    (
+        (True, False, False, False, 1),
+        (False, False, False, False, 0),
+        (True, True, False, False, 0),
+        (True, False, True, False, 0),
+        (True, False, False, True, 0),
+    ),
+)
+def test_wake_only_batch_advances_only_without_tcp_or_receive_backlog(
+    monkeypatch,
+    wake_seen: bool,
+    tcp_seen: bool,
+    blocked_by_frames: bool,
+    blocked_by_buffer: bool,
+    expected_advances: int,
+) -> None:
+    endpoint = resolve_hosts(["127.0.0.1:9"])[0]
+    sock = socket.socket()
+    generation = actor_module.TcpGeneration(1, sock, endpoint, actor_module.TcpState.READY)
+    runtime = actor_module.ActorRuntime(1, (endpoint,))
+    runtime.generation = generation
+    advances: list[object] = []
+    monkeypatch.setattr(actor_module, "_advance_active_task", lambda candidate: advances.append(candidate))
+    if blocked_by_frames:
+        generation.decoded_frames.append(object())  # type: ignore[arg-type]
+    if blocked_by_buffer:
+        generation.decoder.feed(response_bytes(1, TYPE_SECURITY_COUNT, b"\x00\x00")[:8])
+    try:
+        actor_module._advance_wake_only_batch(
+            runtime,
+            wake_seen=wake_seen,
+            tcp_seen=tcp_seen,
+        )
+    finally:
+        sock.close()
+
+    assert advances == [runtime] * expected_advances
+
+
 def test_old_decoded_batch_cannot_complete_next_request_after_64_frame_budget() -> None:
     b_received = threading.Event()
     release_server = threading.Event()

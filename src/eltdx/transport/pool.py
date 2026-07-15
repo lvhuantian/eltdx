@@ -36,6 +36,8 @@ from .socket import (
 
 DEFAULT_MAX_PENDING_REQUESTS = 256
 _INTERNAL_EVENT = threading.Event
+_CANCELLED_LEASE = _INTERNAL_EVENT()
+_CANCELLED_LEASE.set()
 
 
 class PoolState(Enum):
@@ -84,6 +86,14 @@ class SlotLease:
     state: LeaseState = LeaseState.ACTIVE
 
 
+def _mark_lease_cancelled(lease: SlotLease) -> None:
+    cancellation = lease.cancellation
+    if cancellation is None:
+        lease.cancellation = _CANCELLED_LEASE
+    else:
+        cancellation.set()
+
+
 @dataclass(slots=True)
 class AdmissionWaiter:
     pool_epoch: int
@@ -97,7 +107,6 @@ class AdmissionWaiter:
     error: BaseException | None = None
     completed: threading.Event = field(default_factory=threading.Event)
     cancelled: threading.Event = field(default_factory=_INTERNAL_EVENT)
-    published: threading.Event = field(default_factory=_INTERNAL_EVENT)
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,7 +151,6 @@ class LeaseBroker:
         if not acquired:
             raise ResponseTimeoutError("7709 response timed out during queue")
         try:
-            self._reclaim_cancelled_leases_locked()
             self._assign_waiters_locked(initial_wake)
             if self._closed:
                 raise ConnectionClosedError("7709 pool is closed")
@@ -186,31 +194,27 @@ class LeaseBroker:
                         except ValueError:
                             pass
                         waiter.state = AdmissionState.REJECTED
-                        waiter.published.set()
                     elif waiter.state is AdmissionState.ASSIGNED:
                         waiter.state = AdmissionState.REJECTED
-                    self._reclaim_cancelled_leases_locked()
                     self._assign_waiters_locked(wake)
                 finally:
                     self._condition.release()
             for assigned in wake:
                 assigned.completed.set()
             raise
-        if not woke and not waiter.published.is_set():
-            waiter.cancelled.set()
+        if not woke:
             wake: list[AdmissionWaiter] = []
             acquired = self._condition.acquire(timeout=max(0.0, deadline - time.monotonic()))
             if acquired:
                 try:
-                    self._reclaim_cancelled_leases_locked()
                     if waiter.state is AdmissionState.WAITING:
+                        waiter.cancelled.set()
                         try:
                             self._waiters.remove(waiter)
                         except ValueError:
                             pass
                         waiter.state = AdmissionState.TIMED_OUT
                         waiter.error = ResponseTimeoutError("7709 response timed out during queue")
-                        waiter.published.set()
                         wake.append(waiter)
                         self._assign_waiters_locked(wake)
                 finally:
@@ -222,7 +226,6 @@ class LeaseBroker:
             waiter.cancelled.set()
             raise ResponseTimeoutError("7709 response timed out during queue")
         try:
-            self._reclaim_cancelled_leases_locked()
             self._assign_waiters_locked(final_wake)
             if waiter.state is AdmissionState.ASSIGNED and len(waiter.assigned_leases) == count:
                 leases = waiter.assigned_leases
@@ -241,7 +244,6 @@ class LeaseBroker:
                     return leases
                 if waiter.cancelled.is_set() or time.monotonic() >= deadline:
                     waiter.cancelled.set()
-                    self._reclaim_cancelled_leases_locked()
                     self._assign_waiters_locked(final_wake)
                     waiter.state = AdmissionState.TIMED_OUT
                     waiter.error = ResponseTimeoutError("7709 response timed out during queue")
@@ -267,10 +269,9 @@ class LeaseBroker:
         if not acquired:
             raise TransportCloseTimeoutError("7709 pool broker release blocked before deadline")
         try:
-            self._reclaim_cancelled_leases_locked()
-            self._assign_waiters_locked(wake)
             current = self._active_leases.get(lease.lease_id)
             if current is not lease or lease.state is LeaseState.RELEASED:
+                self._assign_waiters_locked(wake)
                 return False
             lease.state = LeaseState.RELEASED
             del self._active_leases[lease.lease_id]
@@ -295,7 +296,6 @@ class LeaseBroker:
                 self._waiters.popleft()
                 waiter.state = AdmissionState.TIMED_OUT
                 waiter.error = ResponseTimeoutError("7709 response timed out during queue")
-                waiter.published.set()
                 wake.append(waiter)
                 continue
             if len(self._idle_slots) < waiter.slot_count:
@@ -312,7 +312,6 @@ class LeaseBroker:
             waiter.assigned_leases = leases
             waiter.assigned_lease = leases[0]
             waiter.state = AdmissionState.ASSIGNED
-            waiter.published.set()
             wake.append(waiter)
 
     def validate(self, lease: SlotLease, *, deadline: float | None = None) -> bool:
@@ -325,7 +324,6 @@ class LeaseBroker:
         if not acquired:
             raise ResponseTimeoutError("7709 response timed out validating pool lease")
         try:
-            self._reclaim_cancelled_leases_locked()
             self._assign_waiters_locked(wake)
             return (
                 not self._closed
@@ -404,7 +402,6 @@ class LeaseBroker:
                 if waiter.state is AdmissionState.WAITING:
                     waiter.state = AdmissionState.CLOSED
                     waiter.error = ConnectionClosedError("7709 pool closed during admission")
-                    waiter.published.set()
                     wake.append(waiter)
             self._waiters.clear()
             for lease in self._active_leases.values():
@@ -426,15 +423,13 @@ class LeaseBroker:
             waiter.cancelled.set()
             waiter.completed.set()
         for lease in tuple(self._active_leases.values()):
-            if lease.cancellation is not None:
-                lease.cancellation.set()
+            _mark_lease_cancelled(lease)
         for completed in tuple(self._pin_waiter_events):
             completed.set()
 
     def snapshot(self) -> BrokerSnapshot:
         wake: list[AdmissionWaiter] = []
         with self._condition:
-            self._reclaim_cancelled_leases_locked()
             self._assign_waiters_locked(wake)
             self._reclaim_cancelled_pin_waiters_locked()
             snapshot = BrokerSnapshot(
@@ -503,7 +498,7 @@ class LeaseBroker:
             self._lease_counter,
             slot_id,
             pinned,
-            cancellation or _INTERNAL_EVENT(),
+            cancellation,
         )
         self._active_leases[lease.lease_id] = lease
         return lease
@@ -525,8 +520,7 @@ class LeaseCompletion:
             try:
                 broker.release(self._lease, deadline=self._deadline)
             except BaseException:
-                if self._lease.cancellation is not None:
-                    self._lease.cancellation.set()
+                _mark_lease_cancelled(self._lease)
 
 
 class HeartbeatAdmissionGuard:
@@ -1978,8 +1972,7 @@ class PooledSocketTransport:
             try:
                 broker.release(lease, deadline=deadline)
             except BaseException:
-                if lease.cancellation is not None:
-                    lease.cancellation.set()
+                _mark_lease_cancelled(lease)
             raise
         transport = self._transports[lease.slot_id]
         try:

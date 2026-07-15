@@ -779,19 +779,24 @@ def _run_actor(runtime: ActorRuntime) -> None:
             _schedule_heartbeat(runtime)
             timeout = _selector_timeout(runtime)
             events = selector.select(timeout)
+            wake_seen = False
             for key, _ in events:
                 token = key.data
                 if isinstance(token, SelectorToken) and token.kind == "wakeup":
+                    wake_seen = True
                     _drain_wakeup(runtime)
             _drain_control(runtime)
             if runtime.stop_requested:
                 break
             _expire_active_task(runtime)
+            tcp_seen = False
             for key, mask in events:
                 token = key.data
                 if isinstance(token, SelectorToken) and token.kind == "tcp":
+                    tcp_seen = True
                     _handle_tcp_event(runtime, token, mask)
             _expire_active_task(runtime)
+            _advance_wake_only_batch(runtime, wake_seen=wake_seen, tcp_seen=tcp_seen)
     except BaseException as exc:
         with runtime.control_lock:
             runtime.fatal_error = exc
@@ -804,6 +809,15 @@ def _run_actor(runtime: ActorRuntime) -> None:
                 fatal_callback_error = callback_error
     finally:
         _finish_runtime(runtime, fatal_callback_error)
+
+
+def _advance_wake_only_batch(runtime: ActorRuntime, *, wake_seen: bool, tcp_seen: bool) -> None:
+    if not wake_seen or tcp_seen:
+        return
+    generation = runtime.generation
+    if generation is not None and (generation.decoded_frames or generation.decoder.buffered_bytes):
+        return
+    _advance_active_task(runtime)
 
 
 def _drain_control(runtime: ActorRuntime) -> None:
