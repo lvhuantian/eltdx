@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import platform
+import struct
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -18,8 +19,9 @@ from typing import Any, Mapping, Sequence
 
 TOOL_ROOT = Path(__file__).resolve().parents[1]
 BENCHMARK_PATH = Path(__file__).with_name("benchmark_actor_transport.py").resolve()
+_COMPLETION_RECORD = struct.Struct("<IIIIIIIII")
 BASELINE_SHA = "71089c0a2867a75dc79aa2c340213f4e3845b6e3"
-FIFO_PROTOCOL = "fifo-v1"
+FIFO_PROTOCOL = "fifo-v2"
 FIFO_SCHEDULE = (
     "baseline",
     "current",
@@ -47,6 +49,8 @@ DECLARATION_KEYS = {
     "expected_trials",
     "baseline_sha",
     "current_sha",
+    "baseline_source_root",
+    "current_source_root",
     "workload_sha256",
     "verifier_sha256",
     "system",
@@ -96,6 +100,19 @@ CASE_EVIDENCE_KEYS = {
     "latency_p50_ms",
     "latency_p99_ms",
     "latency_ns",
+    "request_token_start",
+    "request_token_end",
+    "request_token_sum",
+    "server_connections",
+    "server_attempts",
+    "unique_responses",
+    "duplicate_responses",
+    "missing_responses",
+    "unexpected_responses",
+    "cross_request_completions",
+    "cross_generation_completions",
+    "completion_sha256",
+    "completion_records",
 }
 COHORT_EVIDENCE_KEYS = {
     "boundary_checks_supported",
@@ -108,9 +125,30 @@ COHORT_EVIDENCE_KEYS = {
 }
 
 
-def fifo_v1_config() -> dict[str, Any]:
+def fifo_v2_config() -> dict[str, Any]:
     return {
         "delay_ns": 5_000_000,
+        "response_contract": {
+            "command": "file_content",
+            "path": "eltdx-performance.bin",
+            "content_fields": [
+                "request_token",
+                "measurement_epoch",
+                "connection_id",
+                "attempt_sequence",
+            ],
+            "completion_record_fields": [
+                "requested_token",
+                "snapshot_token",
+                "echoed_token",
+                "response_epoch",
+                "response_connection_id",
+                "response_attempt_sequence",
+                "expected_epoch",
+                "expected_connection_id",
+                "expected_attempt_sequence",
+            ],
+        },
         "cases": {
             "sequential": {
                 "mode": "saturated",
@@ -160,15 +198,16 @@ class CampaignProtocol:
     latency_cases: tuple[str, ...]
     expected_max_active: Mapping[str, int]
     required_system: str = "Windows"
+    validate_declared_roots: bool = True
     throughput_minimum: Fraction = Fraction(95, 100)
     latency_fraction: Fraction = Fraction(1, 10)
     latency_floor_ns: int = 200_000
 
 
-FIFO_V1 = CampaignProtocol(
+FIFO_V2 = CampaignProtocol(
     name=FIFO_PROTOCOL,
     schedule=FIFO_SCHEDULE,
-    config=fifo_v1_config(),
+    config=fifo_v2_config(),
     baseline_sha=BASELINE_SHA,
     throughput_cases=THROUGHPUT_CASES,
     latency_cases=LATENCY_CASES,
@@ -194,6 +233,11 @@ def frozen_gates(protocol: CampaignProtocol) -> dict[str, Any]:
         "throughput_cases": list(protocol.throughput_cases),
         "latency_cases": list(protocol.latency_cases),
         "other_raw_latency": "report-only",
+        "source_root_identity": "existing clean git root at declared exact HEAD",
+        "artifact_authenticity": (
+            "trusted local producer measurements; verifier rejects exact replay and structural/physical "
+            "inconsistency, not deliberate self-consistent fabrication"
+        ),
     }
 
 
@@ -217,6 +261,16 @@ def _parse_utc(value: Any) -> datetime:
 
 def _is_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_sha256(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and value == value.lower()
+        and value != "0" * 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
 
 
 def _number_fraction(value: Any) -> Fraction | None:
@@ -257,6 +311,91 @@ def _summary(values: Sequence[int]) -> dict[str, float]:
 
 def _error(errors: list[str], location: str, message: str) -> None:
     errors.append(f"{location}: {message}")
+
+
+def _validate_completion_records(
+    case: Mapping[str, Any],
+    *,
+    requests: int,
+    expected_connections: int,
+    expected_attempt_order: bool,
+    expected_cohort_size: int | None,
+    location: str,
+    errors: list[str],
+) -> None:
+    raw_records = case.get("completion_records")
+    if not isinstance(raw_records, list) or len(raw_records) != requests:
+        count = len(raw_records) if isinstance(raw_records, list) else None
+        _error(errors, location, f"completion record count={count!r}, expected {requests}")
+        return
+    records: list[list[int]] = []
+    for index, raw in enumerate(raw_records):
+        if not isinstance(raw, list) or len(raw) != 9:
+            _error(errors, location, f"completion record {index} does not contain 9 fields")
+            return
+        if any(not _is_int(value) or not 0 <= value <= 0xFFFFFFFF for value in raw):
+            _error(errors, location, f"completion record {index} contains a non-uint32 value")
+            return
+        if raw[0] != index:
+            _error(errors, location, f"completion record {index} requested_token={raw[0]}, expected {index}")
+        for field_index, label in ((3, "response_epoch"), (6, "expected_epoch")):
+            if raw[field_index] <= 0:
+                _error(errors, location, f"completion record {index} has invalid {label}")
+        for field_index, label in (
+            (4, "response_connection_id"),
+            (7, "expected_connection_id"),
+        ):
+            if not 1 <= raw[field_index] <= expected_connections:
+                _error(errors, location, f"completion record {index} has invalid {label}")
+        for field_index, label in (
+            (5, "response_attempt_sequence"),
+            (8, "expected_attempt_sequence"),
+        ):
+            if not 1 <= raw[field_index] <= requests:
+                _error(errors, location, f"completion record {index} has invalid {label}")
+        records.append(raw)
+    if len(records) != requests:
+        return
+    expected_sequences = {record[8] for record in records}
+    if expected_sequences != set(range(1, requests + 1)):
+        _error(errors, location, "expected attempt sequences are not an exact 1..requests permutation")
+    expected_epochs = {record[6] for record in records}
+    if expected_epochs != {1}:
+        _error(errors, location, f"expected measurement epochs={sorted(expected_epochs)!r}, expected [1]")
+    if expected_attempt_order and any(record[8] != record[0] + 1 for record in records):
+        _error(errors, location, "sequential expected attempt sequence does not match token order")
+    expected_connection_ids = {record[7] for record in records}
+    if expected_connection_ids != set(range(1, expected_connections + 1)):
+        _error(errors, location, "expected provenance does not exercise every server connection")
+    if expected_cohort_size is not None and any(
+        (record[8] - 1) // expected_cohort_size != record[0] // expected_cohort_size
+        for record in records
+    ):
+        _error(errors, location, "fixed-cohort attempt sequence crosses a declared wave boundary")
+    requested = [record[0] for record in records]
+    echoed = [record[2] for record in records]
+    expected_tokens = set(range(requests))
+    returned_tokens = set(echoed)
+    derived = {
+        "request_token_start": min(requested),
+        "request_token_end": max(requested),
+        "request_token_sum": sum(requested),
+        "unique_responses": len(returned_tokens),
+        "duplicate_responses": len(echoed) - len(returned_tokens),
+        "missing_responses": len(expected_tokens - returned_tokens),
+        "unexpected_responses": len(returned_tokens - expected_tokens),
+        "cross_request_completions": sum(
+            record[1] != record[0] or record[2] != record[0] for record in records
+        ),
+        "cross_generation_completions": sum(record[3:6] != record[6:9] for record in records),
+    }
+    digest = hashlib.sha256()
+    for record in records:
+        digest.update(_COMPLETION_RECORD.pack(*record))
+    derived["completion_sha256"] = digest.hexdigest()
+    for field, expected_value in derived.items():
+        if case.get(field) != expected_value:
+            _error(errors, location, f"{field}={case.get(field)!r}, recomputed {expected_value!r}")
 
 
 def _validate_case(
@@ -300,6 +439,48 @@ def _validate_case(
         )
     if not _is_int(case.get("server_requests")) or case.get("server_requests") != requests:
         _error(errors, location, f"server_requests={case.get('server_requests')!r}, expected {requests}")
+    completion_expectations = {
+        "request_token_start": 0,
+        "request_token_end": requests - 1,
+        "request_token_sum": requests * (requests - 1) // 2,
+        "server_connections": expected["pool_size"],
+        "server_attempts": requests,
+        "unique_responses": requests,
+        "duplicate_responses": 0,
+        "missing_responses": 0,
+        "unexpected_responses": 0,
+        "cross_request_completions": 0,
+        "cross_generation_completions": 0,
+    }
+    for field, expected_value in completion_expectations.items():
+        if not _is_int(case.get(field)) or case.get(field) != expected_value:
+            _error(errors, location, f"{field}={case.get(field)!r}, expected {expected_value}")
+    if not _is_sha256(case.get("completion_sha256")):
+        _error(errors, location, "completion_sha256 is not a nonzero lowercase SHA256")
+    successes = case.get("successes")
+    unique = case.get("unique_responses")
+    duplicate = case.get("duplicate_responses")
+    missing = case.get("missing_responses")
+    unexpected = case.get("unexpected_responses")
+    server_requests = case.get("server_requests")
+    server_attempts = case.get("server_attempts")
+    if all(_is_int(value) for value in (successes, unique, duplicate)) and unique + duplicate != successes:
+        _error(errors, location, "unique_responses + duplicate_responses does not equal successes")
+    if all(_is_int(value) for value in (unique, missing, unexpected)):
+        if requests - missing != unique - unexpected:
+            _error(errors, location, "missing/unexpected response counts are physically inconsistent")
+    if all(_is_int(value) for value in (server_requests, server_attempts)):
+        if server_requests != server_attempts:
+            _error(errors, location, "server_requests does not equal server_attempts")
+    _validate_completion_records(
+        case,
+        requests=requests,
+        expected_connections=expected["pool_size"],
+        expected_attempt_order=expected.get("concurrency") == 1,
+        expected_cohort_size=(expected["cohort_size"] if expected["mode"] == "fixed_cohort" else None),
+        location=location,
+        errors=errors,
+    )
     expected_workers = expected.get("concurrency", expected.get("cohort_size"))
     if not _is_int(case.get("worker_threads")) or case.get("worker_threads") != expected_workers:
         _error(errors, location, f"worker_threads={case.get('worker_threads')!r}, expected {expected_workers}")
@@ -383,18 +564,53 @@ def _validate_case(
         if case.get("boundary_checks_all_clean") is not True:
             _error(errors, location, "cohort boundary cleanup is not true")
         supported = case.get("boundary_checks_supported")
+        expected_checks = expected["warmup_cohorts"] + expected["measured_cohorts"]
+        if not isinstance(supported, bool):
+            _error(errors, location, "boundary_checks_supported must be a boolean")
         if role == "current" and supported is not True:
             _error(errors, location, "current implementation did not expose Broker boundary checks")
         if supported is True:
-            expected_checks = expected["warmup_cohorts"] + expected["measured_cohorts"]
             if not _is_int(case.get("boundary_checks")) or case.get("boundary_checks") != expected_checks:
                 _error(errors, location, f"boundary_checks must equal {expected_checks}")
+        elif supported is False:
+            if not _is_int(case.get("boundary_checks")) or case.get("boundary_checks") != 0:
+                _error(errors, location, "boundary_checks must equal 0 when unsupported")
     return latencies
+
+
+def _validate_declared_root_identities(
+    declaration: Mapping[str, Any],
+    protocol: CampaignProtocol,
+    errors: list[str],
+) -> None:
+    if not protocol.validate_declared_roots:
+        return
+    for role in ("baseline", "current"):
+        raw_root = declaration.get(f"{role}_source_root")
+        if not isinstance(raw_root, str) or not raw_root:
+            continue
+        try:
+            root = Path(raw_root).resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            _error(errors, "declaration", f"{role}_source_root is not an existing path: {exc}")
+            continue
+        if role == "current" and root != TOOL_ROOT:
+            _error(errors, "declaration", "current_source_root does not resolve to TOOL_ROOT")
+            continue
+        try:
+            sha, dirty = _git_identity(root)
+        except (OSError, subprocess.CalledProcessError) as exc:
+            _error(errors, "declaration", f"cannot read {role} source identity: {exc}")
+            continue
+        if sha != declaration.get(f"{role}_sha"):
+            _error(errors, "declaration", f"{role} source HEAD does not match declared SHA")
+        if dirty:
+            _error(errors, "declaration", f"{role} source root is dirty")
 
 
 def verify_campaign(
     bundle: Mapping[str, Any],
-    protocol: CampaignProtocol = FIFO_V1,
+    protocol: CampaignProtocol = FIFO_V2,
 ) -> dict[str, Any]:
     errors: list[str] = []
     gates: list[dict[str, Any]] = []
@@ -403,7 +619,7 @@ def verify_campaign(
         return {"schema": 1, "protocol": protocol.name, "passed": False, "errors": ["bundle is not an object"], "gates": []}
     if set(bundle) != BUNDLE_KEYS:
         _error(errors, "bundle", "bundle keys differ from the frozen schema")
-    if bundle.get("schema") != 3 or bundle.get("kind") != "actor-performance-campaign":
+    if bundle.get("schema") != 4 or bundle.get("kind") != "actor-performance-campaign":
         _error(errors, "bundle", "unexpected schema or kind")
     declaration = bundle.get("declaration")
     if not isinstance(declaration, Mapping):
@@ -433,6 +649,15 @@ def verify_campaign(
         or current_sha == protocol.baseline_sha
     ):
         _error(errors, "declaration", "invalid current SHA")
+    for role in ("baseline", "current"):
+        source_root = declaration.get(f"{role}_source_root")
+        if not isinstance(source_root, str) or not source_root:
+            _error(errors, "declaration", f"missing {role}_source_root")
+    if declaration.get("current_source_root") != str(TOOL_ROOT):
+        _error(errors, "declaration", "current_source_root does not own the adjacent verifier")
+    if declaration.get("baseline_source_root") == declaration.get("current_source_root"):
+        _error(errors, "declaration", "baseline and current source roots must differ")
+    _validate_declared_root_identities(declaration, protocol, errors)
     if declaration.get("config") != expected_config:
         _error(errors, "declaration", "config differs from the frozen protocol")
     expected_config_hash = canonical_sha256(expected_config)
@@ -473,6 +698,7 @@ def verify_campaign(
         _error(errors, "bundle", f"trial count={len(trials)}, expected {len(protocol.schedule)}")
     seen_ids: set[str] = set()
     seen_indexes: set[int] = set()
+    seen_case_evidence: dict[tuple[str, str], int] = {}
     raw_by_role: dict[str, dict[str, list[int]]] = {
         role: {name: [] for name in expected_config["cases"]}
         for role in ("baseline", "current")
@@ -497,7 +723,7 @@ def verify_campaign(
             continue
         if set(trial) != TRIAL_KEYS:
             _error(errors, location, "trial keys differ from the frozen schema")
-        if trial.get("schema") != 3 or trial.get("kind") != "actor-performance-trial":
+        if trial.get("schema") != 4 or trial.get("kind") != "actor-performance-trial":
             _error(errors, location, "unexpected trial schema or kind")
         index = trial.get("trial_index")
         trial_id = trial.get("trial_id")
@@ -510,6 +736,8 @@ def verify_campaign(
             seen_indexes.add(index)
         if trial_id != expected_id:
             _error(errors, location, f"trial_id={trial_id!r}, expected {expected_id!r}")
+        if trial.get("label") != expected_id:
+            _error(errors, location, f"label={trial.get('label')!r}, expected {expected_id!r}")
         if trial_id in seen_ids:
             _error(errors, location, "duplicate trial_id")
         if isinstance(trial_id, str):
@@ -529,11 +757,15 @@ def verify_campaign(
         expected_sha = declaration.get(f"{role}_sha")
         if trial.get("implementation_sha") != expected_sha:
             _error(errors, location, "implementation SHA mismatch")
+        if trial.get("source_root") != declaration.get(f"{role}_source_root"):
+            _error(errors, location, "source_root mismatch")
         for field in ("workload_sha256", "system", "platform", "python"):
             if trial.get(field) != declaration.get(field):
                 _error(errors, location, f"{field} mismatch")
         if trial.get("config") != expected_config or trial.get("config_sha256") != expected_config_hash:
             _error(errors, location, "trial config mismatch")
+        started: datetime | None = None
+        ended: datetime | None = None
         try:
             started = _parse_utc(trial.get("started_at_utc"))
             ended = _parse_utc(trial.get("ended_at_utc"))
@@ -548,6 +780,36 @@ def verify_campaign(
         if not isinstance(cases, Mapping) or set(cases) != set(expected_config["cases"]):
             _error(errors, location, "case names differ from the frozen protocol")
             continue
+        # Exact reuse violates the one-sample-per-cell rule. Deliberately forged
+        # measurements remain outside the local-artifact trust boundary above.
+        for name, case in cases.items():
+            evidence_key = (name, canonical_sha256(case))
+            replayed_index = seen_case_evidence.get(evidence_key)
+            if replayed_index is not None:
+                _error(errors, location, f"replays {name} case evidence from trial[{replayed_index}]")
+            else:
+                seen_case_evidence[evidence_key] = expected_index
+        lower_bound_ns = 0
+        lower_bound_valid = True
+        for name, case_protocol in expected_config["cases"].items():
+            case = cases.get(name)
+            duration_field = "wall_elapsed_ns" if case_protocol["mode"] == "fixed_cohort" else "elapsed_ns"
+            duration_value = case.get(duration_field) if isinstance(case, Mapping) else None
+            if not _is_int(duration_value) or duration_value <= 0:
+                lower_bound_valid = False
+                break
+            lower_bound_ns += duration_value
+        if started is not None and ended is not None and lower_bound_valid:
+            duration = ended - started
+            duration_ns = (
+                (duration.days * 86_400 + duration.seconds) * 1_000_000 + duration.microseconds
+            ) * 1_000
+            if duration_ns < lower_bound_ns:
+                _error(
+                    errors,
+                    location,
+                    f"trial duration {duration_ns} ns is shorter than case measurement lower bound {lower_bound_ns} ns",
+                )
         summary_cases: dict[str, Any] = {}
         for name, case_protocol in expected_config["cases"].items():
             case_location = f"{location}.{name}"
@@ -665,7 +927,7 @@ def _validate_source_roots(
     *,
     baseline_root: Path,
     current_root: Path,
-    protocol: CampaignProtocol = FIFO_V1,
+    protocol: CampaignProtocol = FIFO_V2,
 ) -> tuple[str, str]:
     if platform.system() != protocol.required_system:
         raise RuntimeError(
@@ -690,7 +952,7 @@ def declare_campaign(
     current_root: Path,
     output_dir: Path,
     campaign_id: str,
-    protocol: CampaignProtocol = FIFO_V1,
+    protocol: CampaignProtocol = FIFO_V2,
 ) -> dict[str, Any]:
     if output_dir.exists():
         raise FileExistsError(f"campaign output already exists: {output_dir}")
@@ -711,6 +973,8 @@ def declare_campaign(
         "expected_trials": len(protocol.schedule),
         "baseline_sha": baseline_sha,
         "current_sha": current_sha,
+        "baseline_source_root": str(baseline_root.resolve()),
+        "current_source_root": str(current_root.resolve()),
         "workload_sha256": workload_sha,
         "verifier_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "system": platform.system(),
@@ -753,6 +1017,8 @@ def _validate_declaration_for_run(
         "expected_trials": len(protocol.schedule),
         "baseline_sha": baseline_sha,
         "current_sha": current_sha,
+        "baseline_source_root": str(baseline_root.resolve()),
+        "current_source_root": str(current_root.resolve()),
         "workload_sha256": hashlib.sha256(BENCHMARK_PATH.read_bytes()).hexdigest(),
         "verifier_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "system": platform.system(),
@@ -778,7 +1044,7 @@ def run_campaign(
     baseline_root: Path,
     current_root: Path,
     python_executable: str,
-    protocol: CampaignProtocol = FIFO_V1,
+    protocol: CampaignProtocol = FIFO_V2,
 ) -> dict[str, Any]:
     declaration_path = declaration_path.resolve()
     output_dir = declaration_path.parent
@@ -856,7 +1122,7 @@ def run_campaign(
         trials.append(trial)
         print(f"completed trial {index + 1}/{len(protocol.schedule)} role={role}", flush=True)
     bundle = {
-        "schema": 3,
+        "schema": 4,
         "kind": "actor-performance-campaign",
         "declaration": declaration,
         "trials": trials,

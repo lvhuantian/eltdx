@@ -15,11 +15,55 @@ from pathlib import Path
 
 import pytest
 
+from eltdx.models import FileContentChunk
 from scripts import benchmark_actor_transport as benchmark
 from scripts import verify_actor_performance as verifier
 
 
 CURRENT_SHA = "1" * 40
+
+
+def test_performance_protocol_requires_unique_file_content_responses() -> None:
+    config = benchmark.fifo_v2_config()
+
+    assert benchmark.FIFO_PROTOCOL == "fifo-v2"
+    assert config["response_contract"] == {
+        "command": "file_content",
+        "path": "eltdx-performance.bin",
+        "content_fields": [
+            "request_token",
+            "measurement_epoch",
+            "connection_id",
+            "attempt_sequence",
+        ],
+        "completion_record_fields": [
+            "requested_token",
+            "snapshot_token",
+            "echoed_token",
+            "response_epoch",
+            "response_connection_id",
+            "response_attempt_sequence",
+            "expected_epoch",
+            "expected_connection_id",
+            "expected_attempt_sequence",
+        ],
+    }
+
+
+def test_saturated_real_loopback_has_unique_completion_evidence() -> None:
+    result = benchmark.run_case(2, 4, 8, 0, include_latencies=True)
+
+    assert result["request_token_start"] == 0
+    assert result["request_token_end"] == 7
+    assert result["server_connections"] == 2
+    assert result["server_attempts"] == 8
+    assert result["unique_responses"] == 8
+    assert result["duplicate_responses"] == 0
+    assert result["missing_responses"] == 0
+    assert result["unexpected_responses"] == 0
+    assert result["cross_request_completions"] == 0
+    assert result["cross_generation_completions"] == 0
+    assert len(result["completion_sha256"]) == 64
 
 
 def _small_protocol() -> verifier.CampaignProtocol:
@@ -62,12 +106,27 @@ def _small_protocol() -> verifier.CampaignProtocol:
         latency_cases=("sequential", "cohort"),
         expected_max_active={"sequential": 1, "saturated": 2, "cohort": 2},
         required_system=platform.system(),
+        validate_declared_roots=False,
     )
 
 
 def _reported_median(values: list[int]) -> int | float:
     value = verifier._median(values)
     return int(value) if value.denominator == 1 else float(value)
+
+
+def _benchmark_chunk(payload: dict) -> FileContentChunk:
+    token = payload["offset"]
+    content = benchmark._BENCHMARK_VALUE.pack(token, 1, 1, token + 1)
+    raw_payload = len(content).to_bytes(4, "little") + content
+    return FileContentChunk(
+        path=payload["path"],
+        offset=token,
+        request_size=payload["size"],
+        chunk_len=len(content),
+        content=content,
+        raw_payload=raw_payload,
+    )
 
 
 def _case(
@@ -88,6 +147,23 @@ def _case(
             for start in range(0, len(latencies), width)
         ]
         elapsed = sum(wave_makespans)
+    completion_records = []
+    completion_digest = hashlib.sha256()
+    for token in range(expected["requests"]):
+        connection_id = token % expected["pool_size"] + 1
+        record = [
+            token,
+            token,
+            token,
+            1,
+            connection_id,
+            token + 1,
+            1,
+            connection_id,
+            token + 1,
+        ]
+        completion_records.append(record)
+        completion_digest.update(benchmark._COMPLETION_RECORD.pack(*record))
     result = {
         **expected,
         "successes": expected["requests"],
@@ -95,6 +171,19 @@ def _case(
         "worker_threads": expected.get("concurrency", expected.get("cohort_size")),
         "server_max_active": max_active,
         "server_requests": expected["requests"],
+        "request_token_start": 0,
+        "request_token_end": expected["requests"] - 1,
+        "request_token_sum": expected["requests"] * (expected["requests"] - 1) // 2,
+        "server_connections": expected["pool_size"],
+        "server_attempts": expected["requests"],
+        "unique_responses": expected["requests"],
+        "duplicate_responses": 0,
+        "missing_responses": 0,
+        "unexpected_responses": 0,
+        "cross_request_completions": 0,
+        "cross_generation_completions": 0,
+        "completion_sha256": completion_digest.hexdigest(),
+        "completion_records": completion_records,
         "elapsed_ns": elapsed,
         "latency_ns": list(latencies),
         "latency_p50_ns": _reported_median(latencies),
@@ -134,6 +223,8 @@ def _bundle(protocol: verifier.CampaignProtocol | None = None) -> dict:
         "expected_trials": len(protocol.schedule),
         "baseline_sha": protocol.baseline_sha,
         "current_sha": CURRENT_SHA,
+        "baseline_source_root": "C:/baseline",
+        "current_source_root": str(verifier.TOOL_ROOT),
         "workload_sha256": hashlib.sha256(verifier.BENCHMARK_PATH.read_bytes()).hexdigest(),
         "verifier_sha256": hashlib.sha256(Path(verifier.__file__).read_bytes()).hexdigest(),
         "system": platform.system(),
@@ -149,10 +240,10 @@ def _bundle(protocol: verifier.CampaignProtocol | None = None) -> dict:
     for index, role in enumerate(protocol.schedule):
         trials.append(
             {
-                "schema": 3,
+                "schema": 4,
                 "kind": "actor-performance-trial",
                 "protocol": protocol.name,
-                "label": f"test/{index:03d}",
+                "label": f"test-campaign/{index:03d}",
                 "campaign_id": declaration["campaign_id"],
                 "trial_id": f"test-campaign/{index:03d}",
                 "trial_index": index,
@@ -160,7 +251,7 @@ def _bundle(protocol: verifier.CampaignProtocol | None = None) -> dict:
                 "role": role,
                 "declaration_sha256": declaration["declaration_sha256"],
                 "workload_sha256": declaration["workload_sha256"],
-                "source_root": "C:/source",
+                "source_root": "C:/baseline" if role == "baseline" else str(verifier.TOOL_ROOT),
                 "system": declaration["system"],
                 "platform": declaration["platform"],
                 "python": declaration["python"],
@@ -171,13 +262,19 @@ def _bundle(protocol: verifier.CampaignProtocol | None = None) -> dict:
                 "implementation_sha": protocol.baseline_sha if role == "baseline" else CURRENT_SHA,
                 "implementation_dirty": False,
                 "cases": {
-                    name: _case(dict(expected), role, protocol.expected_max_active[name])
+                    name: _case(
+                        dict(expected),
+                        role,
+                        protocol.expected_max_active[name],
+                        latency_ns=[1_000_000 + index] * expected["requests"],
+                        elapsed_ns=(95_000_000 if role == "baseline" else 100_000_000) + index,
+                    )
                     for name, expected in config["cases"].items()
                 },
             }
         )
     return {
-        "schema": 3,
+        "schema": 4,
         "kind": "actor-performance-campaign",
         "declaration": declaration,
         "trials": trials,
@@ -186,13 +283,13 @@ def _bundle(protocol: verifier.CampaignProtocol | None = None) -> dict:
 
 def _set_latency(bundle: dict, protocol: verifier.CampaignProtocol, role: str, name: str, value: int) -> None:
     expected = dict(protocol.config["cases"][name])
-    for trial in bundle["trials"]:
+    for index, trial in enumerate(bundle["trials"]):
         if trial["role"] == role:
             trial["cases"][name] = _case(
                 expected,
                 role,
                 protocol.expected_max_active[name],
-                latency_ns=[value] * expected["requests"],
+                latency_ns=[value - index, value, value, value],
             )
 
 
@@ -211,8 +308,15 @@ def _rehash_declaration(bundle: dict) -> None:
         trial["declaration_sha256"] = declaration["declaration_sha256"]
 
 
+def _rehash_completion(case: dict) -> None:
+    digest = hashlib.sha256()
+    for record in case["completion_records"]:
+        digest.update(benchmark._COMPLETION_RECORD.pack(*record))
+    case["completion_sha256"] = digest.hexdigest()
+
+
 def test_fifo_producer_and_verifier_freeze_the_same_config() -> None:
-    assert benchmark.fifo_v1_config() == verifier.fifo_v1_config()
+    assert benchmark.fifo_v2_config() == verifier.fifo_v2_config()
 
 
 def test_complete_counterbalanced_bundle_passes() -> None:
@@ -222,6 +326,201 @@ def test_complete_counterbalanced_bundle_passes() -> None:
     assert report["passed"]
     assert not report["errors"]
     assert all(gate["passed"] for gate in report["gates"])
+
+
+def test_fifo_v2_rejects_fifo_v1_schema_and_missing_completion_evidence() -> None:
+    protocol = _small_protocol()
+    bundle = _bundle(protocol)
+    bundle["schema"] = 3
+    for trial in bundle["trials"]:
+        trial["schema"] = 3
+
+    report = verifier.verify_campaign(bundle, protocol)
+
+    assert not report["passed"]
+    assert any("unexpected schema" in error for error in report["errors"])
+
+    bundle = _bundle(protocol)
+    bundle["trials"][0]["cases"]["sequential"].pop("cross_generation_completions")
+    report = verifier.verify_campaign(bundle, protocol)
+    assert not report["passed"]
+    assert any("case keys differ" in error for error in report["errors"])
+
+
+def test_completion_summary_detects_cross_request_and_cross_generation_results() -> None:
+    server = benchmark.BenchmarkServer(0)
+    server.accept_count = 1
+    server.attempt_sequence = 2
+    server.expected_provenance = {0: (1, 1, 1), 1: (1, 1, 2)}
+    records = [
+        {
+            "requested_token": 0,
+            "snapshot_token": 0,
+            "echoed_token": 1,
+            "measurement_epoch": 1,
+            "connection_id": 1,
+            "attempt_sequence": 1,
+        },
+        {
+            "requested_token": 1,
+            "snapshot_token": 1,
+            "echoed_token": 0,
+            "measurement_epoch": 1,
+            "connection_id": 1,
+            "attempt_sequence": 99,
+        },
+    ]
+
+    summary = benchmark._completion_summary(records, server)
+
+    assert summary["unique_responses"] == 2
+    assert summary["duplicate_responses"] == 0
+    assert summary["missing_responses"] == 0
+    assert summary["unexpected_responses"] == 0
+    assert summary["cross_request_completions"] == 2
+    assert summary["cross_generation_completions"] == 1
+    assert len(summary["completion_sha256"]) == 64
+
+
+def test_campaign_recomputes_completion_digest_and_identity_counters() -> None:
+    protocol = _small_protocol()
+    bundle = _bundle(protocol)
+    case = bundle["trials"][0]["cases"]["sequential"]
+    case["completion_sha256"] = "f" * 64
+
+    report = verifier.verify_campaign(bundle, protocol)
+
+    assert not report["passed"]
+    assert any("completion_sha256" in error and "recomputed" in error for error in report["errors"])
+
+    bundle = _bundle(protocol)
+    case = bundle["trials"][0]["cases"]["sequential"]
+    records = case["completion_records"]
+    records[0][2], records[1][2] = records[1][2], records[0][2]
+    records[1][5] = records[0][5]
+    digest = hashlib.sha256()
+    for record in records:
+        digest.update(benchmark._COMPLETION_RECORD.pack(*record))
+    case["completion_sha256"] = digest.hexdigest()
+
+    report = verifier.verify_campaign(bundle, protocol)
+
+    assert not report["passed"]
+    assert any("cross_request_completions" in error for error in report["errors"])
+    assert any("cross_generation_completions" in error for error in report["errors"])
+
+
+def test_campaign_rejects_stale_trial_or_current_source_root() -> None:
+    protocol = _small_protocol()
+    bundle = _bundle(protocol)
+    bundle["trials"][0]["source_root"] = "C:/stale-checkout/ca43972"
+
+    report = verifier.verify_campaign(bundle, protocol)
+
+    assert not report["passed"]
+    assert any("source_root mismatch" in error for error in report["errors"])
+
+    bundle = _bundle(protocol)
+    bundle["declaration"]["current_source_root"] = "C:/stale-checkout/ca43972"
+    _rehash_declaration(bundle)
+    report = verifier.verify_campaign(bundle, protocol)
+    assert not report["passed"]
+    assert any("does not own the adjacent verifier" in error for error in report["errors"])
+
+
+def test_campaign_physically_validates_declared_git_roots(tmp_path, monkeypatch) -> None:
+    protocol = replace(_small_protocol(), validate_declared_roots=True)
+    baseline_root = (tmp_path / "baseline").resolve()
+    baseline_root.mkdir()
+    bundle = _bundle(protocol)
+    bundle["declaration"]["baseline_source_root"] = str(baseline_root)
+    for trial in bundle["trials"]:
+        if trial["role"] == "baseline":
+            trial["source_root"] = str(baseline_root)
+    _rehash_declaration(bundle)
+
+    def clean_identity(root: Path) -> tuple[str, bool]:
+        return (protocol.baseline_sha, False) if root == baseline_root else (CURRENT_SHA, False)
+
+    monkeypatch.setattr(verifier, "_git_identity", clean_identity)
+    assert verifier.verify_campaign(bundle, protocol)["passed"]
+
+    stale_sha = "ca439727b44a02d9396b3d6dcd21b78d06addb8b"
+    bundle["declaration"]["current_sha"] = stale_sha
+    for trial in bundle["trials"]:
+        if trial["role"] == "current":
+            trial["implementation_sha"] = stale_sha
+    _rehash_declaration(bundle)
+    report = verifier.verify_campaign(bundle, protocol)
+    assert not report["passed"]
+    assert any("current source HEAD" in error for error in report["errors"])
+
+    bundle = _bundle(protocol)
+    missing = tmp_path / "missing-baseline"
+    bundle["declaration"]["baseline_source_root"] = str(missing)
+    for trial in bundle["trials"]:
+        if trial["role"] == "baseline":
+            trial["source_root"] = str(missing)
+    _rehash_declaration(bundle)
+    report = verifier.verify_campaign(bundle, protocol)
+    assert not report["passed"]
+    assert any("not an existing path" in error for error in report["errors"])
+
+    bundle = _bundle(protocol)
+    bundle["declaration"]["baseline_source_root"] = str(baseline_root)
+    for trial in bundle["trials"]:
+        if trial["role"] == "baseline":
+            trial["source_root"] = str(baseline_root)
+    _rehash_declaration(bundle)
+
+    def dirty_current_identity(root: Path) -> tuple[str, bool]:
+        return (protocol.baseline_sha, False) if root == baseline_root else (CURRENT_SHA, True)
+
+    monkeypatch.setattr(verifier, "_git_identity", dirty_current_identity)
+    report = verifier.verify_campaign(bundle, protocol)
+    assert not report["passed"]
+    assert any("current source root is dirty" in error for error in report["errors"])
+
+
+def test_campaign_rejects_self_consistent_impossible_completion_provenance() -> None:
+    protocol = _small_protocol()
+    bundle = _bundle(protocol)
+    sequential = bundle["trials"][0]["cases"]["sequential"]
+    for record in sequential["completion_records"]:
+        record[3] = record[6] = 2
+    _rehash_completion(sequential)
+    report = verifier.verify_campaign(bundle, protocol)
+    assert not report["passed"]
+    assert any("measurement epochs" in error for error in report["errors"])
+
+    bundle = _bundle(protocol)
+    saturated = bundle["trials"][0]["cases"]["saturated"]
+    for record in saturated["completion_records"]:
+        record[4] = record[7] = 1
+    _rehash_completion(saturated)
+    report = verifier.verify_campaign(bundle, protocol)
+    assert not report["passed"]
+    assert any("every server connection" in error for error in report["errors"])
+
+    bundle = _bundle(protocol)
+    cohort = bundle["trials"][0]["cases"]["cohort"]
+    first = cohort["completion_records"][0]
+    second_wave = cohort["completion_records"][2]
+    first[3:9], second_wave[3:9] = second_wave[3:9], first[3:9]
+    _rehash_completion(cohort)
+    report = verifier.verify_campaign(bundle, protocol)
+    assert not report["passed"]
+    assert any("wave boundary" in error for error in report["errors"])
+
+    bundle = _bundle(protocol)
+    sequential = bundle["trials"][0]["cases"]["sequential"]
+    first, second = sequential["completion_records"][:2]
+    first[5], second[5] = second[5], first[5]
+    first[8], second[8] = second[8], first[8]
+    _rehash_completion(sequential)
+    report = verifier.verify_campaign(bundle, protocol)
+    assert not report["passed"]
+    assert any("sequential expected attempt" in error for error in report["errors"])
 
 
 @pytest.mark.parametrize(
@@ -255,6 +554,10 @@ def test_campaign_rejects_optional_stop_or_identity_mutation(mutate) -> None:
         ("server_max_active", 3),
         ("worker_threads", 3),
         ("elapsed_ns", 0),
+        ("server_attempts", 3),
+        ("unique_responses", 3),
+        ("cross_request_completions", 1),
+        ("completion_sha256", "0" * 64),
     ],
 )
 def test_campaign_rejects_invalid_case_evidence(field: str, value) -> None:
@@ -266,6 +569,27 @@ def test_campaign_rejects_invalid_case_evidence(field: str, value) -> None:
 
     assert not report["passed"]
     assert any("trial[0].saturated" in error for error in report["errors"])
+
+
+@pytest.mark.parametrize(
+    ("supported", "checks"),
+    [
+        (False, 999),
+        ("no", -1),
+        (None, "many"),
+    ],
+)
+def test_campaign_rejects_impossible_unsupported_boundary_counts(supported, checks) -> None:
+    protocol = _small_protocol()
+    bundle = _bundle(protocol)
+    cohort = bundle["trials"][0]["cases"]["cohort"]
+    cohort["boundary_checks_supported"] = supported
+    cohort["boundary_checks"] = checks
+
+    report = verifier.verify_campaign(bundle, protocol)
+
+    assert not report["passed"]
+    assert any("boundary_checks" in error for error in report["errors"])
 
 
 def test_campaign_rejects_truncated_or_forged_latency_samples() -> None:
@@ -335,6 +659,43 @@ def test_campaign_rejects_overlapping_or_naive_trial_time() -> None:
     report = verifier.verify_campaign(bundle, protocol)
     assert not report["passed"]
     assert any("UTC offset" in error for error in report["errors"])
+
+
+def test_campaign_rejects_unbound_label_impossible_duration_and_replayed_cell() -> None:
+    protocol = _small_protocol()
+    bundle = _bundle(protocol)
+    bundle["trials"][0]["label"] = "unrelated-campaign/999"
+    report = verifier.verify_campaign(bundle, protocol)
+    assert not report["passed"]
+    assert any("label=" in error for error in report["errors"])
+
+    bundle = _bundle(protocol)
+    bundle["trials"][0]["ended_at_utc"] = "2026-07-15T00:00:01.000001Z"
+    report = verifier.verify_campaign(bundle, protocol)
+    assert not report["passed"]
+    assert any("shorter than case measurement" in error for error in report["errors"])
+
+    bundle = _bundle(protocol)
+    bundle["trials"][2]["cases"] = copy.deepcopy(bundle["trials"][1]["cases"])
+    report = verifier.verify_campaign(bundle, protocol)
+    assert not report["passed"]
+    assert any("replays sequential case evidence" in error for error in report["errors"])
+
+    bundle = _bundle(protocol)
+    bundle["trials"][2]["cases"]["sequential"] = copy.deepcopy(
+        bundle["trials"][1]["cases"]["sequential"]
+    )
+    report = verifier.verify_campaign(bundle, protocol)
+    assert not report["passed"]
+    assert any("replays sequential case evidence" in error for error in report["errors"])
+
+    bundle = _bundle(protocol)
+    for name in protocol.throughput_cases:
+        bundle["trials"][1]["cases"][name] = copy.deepcopy(bundle["trials"][0]["cases"][name])
+    report = verifier.verify_campaign(bundle, protocol)
+    assert not report["passed"]
+    assert any("replays sequential case evidence" in error for error in report["errors"])
+    assert any("replays saturated case evidence" in error for error in report["errors"])
 
 
 @pytest.mark.parametrize(("field", "index"), [("trial_index", 1), ("attempt", 0)])
@@ -472,6 +833,14 @@ def test_fixed_cohort_real_loopback_has_exact_samples_and_clean_boundaries() -> 
     assert result["boundary_checks_all_clean"]
     assert result["server_max_active"] == 2
     assert result["server_requests"] == 6
+    assert result["server_attempts"] == 6
+    assert result["server_connections"] == 2
+    assert result["unique_responses"] == 6
+    assert result["duplicate_responses"] == 0
+    assert result["missing_responses"] == 0
+    assert result["unexpected_responses"] == 0
+    assert result["cross_request_completions"] == 0
+    assert result["cross_generation_completions"] == 0
 
 
 def test_saturated_case_resets_server_activity_after_parallel_setup() -> None:
@@ -492,27 +861,33 @@ def test_campaign_runner_declares_every_cell_before_packing_bundle(tmp_path, mon
     def fake_identity(root: Path) -> tuple[str, bool]:
         return (protocol.baseline_sha, False) if root == baseline_root else (CURRENT_SHA, False)
 
-    def fake_run(command, **_kwargs):
+    def fake_run(command, **kwargs):
         index = int(command[command.index("--trial-index") + 1])
         output = Path(command[command.index("--output") + 1])
         declaration = json.loads((output_dir / "declaration.json").read_text(encoding="utf-8"))
+        role = protocol.schedule[index]
+        expected_root = baseline_root if role == "baseline" else current_root
+        assert Path(kwargs["cwd"]).resolve() == current_root.resolve()
+        assert Path(kwargs["env"]["ELTDX_SOURCE_ROOT"]).resolve() == expected_root.resolve()
         trial = copy.deepcopy(templates[index])
         trial.update(
             {
                 "protocol": protocol.name,
                 "campaign_id": declaration["campaign_id"],
+                "label": f"{declaration['campaign_id']}/{index:03d}",
                 "trial_id": f"{declaration['campaign_id']}/{index:03d}",
                 "trial_index": index,
-                "role": protocol.schedule[index],
+                "role": role,
                 "declaration_sha256": declaration["declaration_sha256"],
                 "workload_sha256": declaration["workload_sha256"],
+                "source_root": str(Path(kwargs["env"]["ELTDX_SOURCE_ROOT"]).resolve()),
                 "system": declaration["system"],
                 "platform": declaration["platform"],
                 "python": declaration["python"],
                 "config": copy.deepcopy(protocol.config),
                 "config_sha256": declaration["config_sha256"],
                 "implementation_sha": (
-                    protocol.baseline_sha if protocol.schedule[index] == "baseline" else CURRENT_SHA
+                    protocol.baseline_sha if role == "baseline" else CURRENT_SHA
                 ),
                 "implementation_dirty": False,
                 "started_at_utc": f"2099-01-01T00:00:{index * 2:02d}Z",
@@ -665,12 +1040,12 @@ def test_partial_cohort_submit_keeps_future_for_cleanup() -> None:
     active = []
 
     class Transport:
-        def execute(self, *_args, **_kwargs):
-            return 23285
+        def execute(self, _command, payload):
+            return _benchmark_chunk(payload)
 
     try:
         with pytest.raises(RuntimeError, match="submit failed"):
-            benchmark._run_cohort_wave(executor, Transport(), 2, active)
+            benchmark._run_cohort_wave(executor, Transport(), range(2), active)
         assert len(active) == 1
         wait(active, timeout=1)
         assert active[0].done()
@@ -683,16 +1058,16 @@ def test_cohort_timeout_returns_without_a_second_full_wait(monkeypatch) -> None:
     active = []
 
     class Transport:
-        def execute(self, *_args, **_kwargs):
+        def execute(self, _command, payload):
             release.wait(timeout=1)
-            return 23285
+            return _benchmark_chunk(payload)
 
     executor = ThreadPoolExecutor(max_workers=2)
     monkeypatch.setattr(benchmark, "_COHORT_TIMEOUT", 0.1)
     started = time.perf_counter()
     try:
         with pytest.raises(TimeoutError):
-            benchmark._run_cohort_wave(executor, Transport(), 2, active)
+            benchmark._run_cohort_wave(executor, Transport(), range(2), active)
         elapsed = time.perf_counter() - started
         assert elapsed < 0.17
     finally:

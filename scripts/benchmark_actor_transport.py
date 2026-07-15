@@ -9,6 +9,7 @@ import os
 import platform
 import socket
 import statistics
+import struct
 import subprocess
 import sys
 import threading
@@ -16,22 +17,49 @@ import time
 from concurrent.futures import ALL_COMPLETED, Future, ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_ROOT = Path(os.environ.get("ELTDX_SOURCE_ROOT", ROOT)).resolve()
 sys.path.insert(0, str(SOURCE_ROOT / "src"))
 
-from eltdx.protocol.constants import TYPE_HANDSHAKE, TYPE_SECURITY_COUNT  # noqa: E402
+from eltdx.models import FileContentChunk  # noqa: E402
+from eltdx.protocol.constants import TYPE_FILE_CONTENT, TYPE_HANDSHAKE  # noqa: E402
 from eltdx.transport import PooledSocketTransport  # noqa: E402
 
 
-FIFO_PROTOCOL = "fifo-v1"
+FIFO_PROTOCOL = "fifo-v2"
+_BENCHMARK_PATH = "eltdx-performance.bin"
+_BENCHMARK_VALUE = struct.Struct("<IIII")
+_COMPLETION_RECORD = struct.Struct("<IIIIIIIII")
+_SETUP_TOKEN_BASE = 0xE0000000
+_WARMUP_TOKEN_BASE = 0xC0000000
 
 
-def fifo_v1_config() -> dict[str, Any]:
+def fifo_v2_config() -> dict[str, Any]:
     return {
         "delay_ns": 5_000_000,
+        "response_contract": {
+            "command": "file_content",
+            "path": _BENCHMARK_PATH,
+            "content_fields": [
+                "request_token",
+                "measurement_epoch",
+                "connection_id",
+                "attempt_sequence",
+            ],
+            "completion_record_fields": [
+                "requested_token",
+                "snapshot_token",
+                "echoed_token",
+                "response_epoch",
+                "response_connection_id",
+                "response_attempt_sequence",
+                "expected_epoch",
+                "expected_connection_id",
+                "expected_attempt_sequence",
+            ],
+        },
         "cases": {
             "sequential": {
                 "mode": "saturated",
@@ -84,6 +112,10 @@ class BenchmarkServer:
         self._active = 0
         self.max_active = 0
         self.requests = 0
+        self.accept_count = 0
+        self.measurement_epoch = 0
+        self.attempt_sequence = 0
+        self.expected_provenance: dict[int, tuple[int, int, int]] = {}
         self.errors: list[str] = []
         self.host = ""
 
@@ -136,11 +168,18 @@ class BenchmarkServer:
                 raise TimeoutError(f"benchmark server retained {self._active} active requests")
             self.max_active = 0
             self.requests = 0
+            self.measurement_epoch += 1
+            self.attempt_sequence = 0
+            self.expected_provenance.clear()
 
     def wait_for_idle(self, timeout: float = 2.0) -> None:
         with self._idle:
             if not self._idle.wait_for(lambda: self._active == 0, timeout=timeout):
                 raise TimeoutError(f"benchmark server retained {self._active} active requests")
+
+    def provenance_snapshot(self) -> tuple[int, int, dict[int, tuple[int, int, int]]]:
+        with self._idle:
+            return self.accept_count, self.attempt_sequence, dict(self.expected_provenance)
 
     def _accept(self) -> None:
         while not self._closing.is_set():
@@ -153,24 +192,31 @@ class BenchmarkServer:
                     conn.close()
                     return
                 self._connections.add(conn)
-            worker = threading.Thread(target=self._serve, args=(conn,), daemon=True)
+                self.accept_count += 1
+                connection_id = self.accept_count
+            worker = threading.Thread(target=self._serve, args=(conn, connection_id), daemon=True)
             self._workers.append(worker)
             worker.start()
 
-    def _serve(self, conn: socket.socket) -> None:
+    def _serve(self, conn: socket.socket, connection_id: int) -> None:
         try:
             with conn:
                 while not self._closing.is_set():
-                    msg_id, msg_type, _ = _read_request(conn)
+                    msg_id, msg_type, request = _read_request(conn)
                     if msg_type == TYPE_HANDSHAKE:
-                        payload = _handshake_payload()
-                    elif msg_type == TYPE_SECURITY_COUNT:
-                        payload = (23285).to_bytes(2, "little")
-                    else:
+                        conn.sendall(_response(msg_id, msg_type, _handshake_payload()))
+                        continue
+                    if msg_type != TYPE_FILE_CONTENT:
                         raise RuntimeError(f"unexpected benchmark command: {msg_type:#x}")
+                    token = _parse_benchmark_request(request)
                     with self._idle:
+                        if token in self.expected_provenance:
+                            raise RuntimeError(f"duplicate benchmark request token: {token}")
                         self._active += 1
                         self.max_active = max(self.max_active, self._active)
+                        self.attempt_sequence += 1
+                        provenance = (self.measurement_epoch, connection_id, self.attempt_sequence)
+                        self.expected_provenance[token] = provenance
                     try:
                         if self._delay:
                             time.sleep(self._delay)
@@ -180,6 +226,8 @@ class BenchmarkServer:
                             self.requests += 1
                             if self._active == 0:
                                 self._idle.notify_all()
+                    content = _BENCHMARK_VALUE.pack(token, *provenance)
+                    payload = len(content).to_bytes(4, "little") + content
                     conn.sendall(_response(msg_id, msg_type, payload))
         except (EOFError, OSError):
             return
@@ -204,6 +252,17 @@ def _read_request(conn: socket.socket) -> tuple[int, int, bytes]:
     header = _read_exact(conn, 12)
     length = int.from_bytes(header[6:8], "little")
     return int.from_bytes(header[1:5], "little"), int.from_bytes(header[10:12], "little"), _read_exact(conn, length - 2)
+
+
+def _parse_benchmark_request(request: bytes) -> int:
+    if len(request) < 8:
+        raise RuntimeError("truncated benchmark file-content request")
+    token = int.from_bytes(request[:4], "little")
+    requested_size = int.from_bytes(request[4:8], "little")
+    path = request[8:].split(b"\x00", 1)[0]
+    if requested_size != _BENCHMARK_VALUE.size or path != _BENCHMARK_PATH.encode("ascii"):
+        raise RuntimeError("benchmark file-content request contract mismatch")
+    return token
 
 
 def _response(msg_id: int, msg_type: int, payload: bytes) -> bytes:
@@ -270,13 +329,77 @@ def _prestart_executor(executor: ThreadPoolExecutor, workers: int) -> tuple[int,
     return thread_ids
 
 
-def _execute_timed(transport: Any) -> int:
+def _execute_timed(transport: Any, token: int) -> dict[str, int]:
     started_ns = time.perf_counter_ns()
-    value = transport.execute(TYPE_SECURITY_COUNT, {"market": "sz"})
+    value = transport.execute(
+        TYPE_FILE_CONTENT,
+        {"path": _BENCHMARK_PATH, "offset": token, "size": _BENCHMARK_VALUE.size},
+    )
     elapsed_ns = time.perf_counter_ns() - started_ns
-    if value != 23285:
-        raise AssertionError(value)
-    return elapsed_ns
+    if not isinstance(value, FileContentChunk):
+        raise AssertionError(f"benchmark response is not FileContentChunk: {value!r}")
+    if (
+        value.path != _BENCHMARK_PATH
+        or value.offset != token
+        or value.request_size != _BENCHMARK_VALUE.size
+        or value.chunk_len != _BENCHMARK_VALUE.size
+        or len(value.content) != _BENCHMARK_VALUE.size
+    ):
+        raise AssertionError(f"benchmark response snapshot mismatch: {value!r}")
+    echoed_token, measurement_epoch, connection_id, attempt_sequence = _BENCHMARK_VALUE.unpack(value.content)
+    return {
+        "requested_token": token,
+        "snapshot_token": value.offset,
+        "echoed_token": echoed_token,
+        "measurement_epoch": measurement_epoch,
+        "connection_id": connection_id,
+        "attempt_sequence": attempt_sequence,
+        "call_latency_ns": elapsed_ns,
+    }
+
+
+def _completion_summary(records: Sequence[Mapping[str, int]], server: BenchmarkServer) -> dict[str, Any]:
+    requested = [record["requested_token"] for record in records]
+    echoed = [record["echoed_token"] for record in records]
+    expected_tokens = set(requested)
+    returned_tokens = set(echoed)
+    connections, attempts, expected_provenance = server.provenance_snapshot()
+    cross_request = sum(
+        record["snapshot_token"] != record["requested_token"]
+        or record["echoed_token"] != record["requested_token"]
+        for record in records
+    )
+    digest = hashlib.sha256()
+    completion_records: list[list[int]] = []
+    for record in records:
+        expected = expected_provenance.get(record["requested_token"], (0, 0, 0))
+        completion_record = [
+            record["requested_token"],
+            record["snapshot_token"],
+            record["echoed_token"],
+            record["measurement_epoch"],
+            record["connection_id"],
+            record["attempt_sequence"],
+            *expected,
+        ]
+        completion_records.append(completion_record)
+        digest.update(_COMPLETION_RECORD.pack(*completion_record))
+    cross_generation = sum(record[3:6] != record[6:9] for record in completion_records)
+    return {
+        "request_token_start": min(requested) if requested else None,
+        "request_token_end": max(requested) if requested else None,
+        "request_token_sum": sum(requested),
+        "server_connections": connections,
+        "server_attempts": attempts,
+        "unique_responses": len(returned_tokens),
+        "duplicate_responses": len(echoed) - len(returned_tokens),
+        "missing_responses": len(expected_tokens - returned_tokens),
+        "unexpected_responses": len(returned_tokens - expected_tokens),
+        "cross_request_completions": cross_request,
+        "cross_generation_completions": cross_generation,
+        "completion_sha256": digest.hexdigest(),
+        "completion_records": completion_records,
+    }
 
 
 def _close_after_failure(
@@ -303,11 +426,11 @@ def _close_after_failure(
 def _submit_requests(
     executor: ThreadPoolExecutor,
     transport: Any,
-    requests: int,
-    futures: list[Future[int]],
+    tokens: Sequence[int],
+    futures: list[Future[dict[str, int]]],
 ) -> None:
-    for _ in range(requests):
-        futures.append(executor.submit(_execute_timed, transport))
+    for token in tokens:
+        futures.append(executor.submit(_execute_timed, transport, token))
 
 
 def run_case(
@@ -327,22 +450,28 @@ def run_case(
             heartbeat_interval=None,
         )
         executor = ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="eltdx-benchmark")
-        active_futures: list[Future[int]] = []
+        active_futures: list[Future[dict[str, int]]] = []
         try:
             transport.connect()
-            for _ in range(pool_size):
-                assert transport.execute(TYPE_SECURITY_COUNT, {"market": "sz"}) == 23285
+            for index in range(pool_size):
+                _execute_timed(transport, _SETUP_TOKEN_BASE + index)
             worker_ids = _prestart_executor(executor, concurrency)
             if warmup_requests:
-                _submit_requests(executor, transport, warmup_requests, active_futures)
+                _submit_requests(
+                    executor,
+                    transport,
+                    range(_WARMUP_TOKEN_BASE, _WARMUP_TOKEN_BASE + warmup_requests),
+                    active_futures,
+                )
                 for future in active_futures:
                     future.result()
                 active_futures.clear()
             server.reset_measurement()
             started_ns = time.perf_counter_ns()
-            _submit_requests(executor, transport, requests, active_futures)
-            latencies_ns = [future.result() for future in active_futures]
+            _submit_requests(executor, transport, range(requests), active_futures)
+            records = [future.result() for future in active_futures]
             elapsed_ns = time.perf_counter_ns() - started_ns
+            latencies_ns = [record["call_latency_ns"] for record in records]
             active_futures.clear()
             server.wait_for_idle()
         except BaseException as exc:
@@ -364,6 +493,7 @@ def run_case(
             "worker_threads": len(worker_ids),
             "server_max_active": server.max_active,
             "server_requests": server.requests,
+            **_completion_summary(records, server),
             **_summary_fields(latencies_ns, elapsed_ns, requests),
         }
         if include_latencies:
@@ -375,9 +505,12 @@ def run_case(
 def _run_cohort_wave(
     executor: ThreadPoolExecutor,
     transport: Any,
-    width: int,
+    tokens: Sequence[int],
     active_futures: list[Future[dict[str, int]]],
 ) -> list[dict[str, int]]:
+    width = len(tokens)
+    if width <= 0:
+        raise ValueError("cohort token list is empty")
     epoch_ns = 0
 
     def release() -> None:
@@ -386,23 +519,17 @@ def _run_cohort_wave(
 
     barrier = threading.Barrier(width + 1, action=release, timeout=_COHORT_TIMEOUT)
 
-    def execute(worker_id: int) -> dict[str, int]:
+    def execute(worker_id: int, token: int) -> dict[str, int]:
         barrier.wait()
-        call_started_ns = time.perf_counter_ns()
-        value = transport.execute(TYPE_SECURITY_COUNT, {"market": "sz"})
-        done_ns = time.perf_counter_ns()
-        if value != 23285:
-            raise AssertionError(value)
-        return {
-            "worker_id": worker_id,
-            "call_latency_ns": done_ns - call_started_ns,
-            "cohort_latency_ns": done_ns - epoch_ns,
-        }
+        record = _execute_timed(transport, token)
+        record["worker_id"] = worker_id
+        record["cohort_latency_ns"] = time.perf_counter_ns() - epoch_ns
+        return record
 
     active_futures.clear()
     try:
-        for worker_id in range(width):
-            active_futures.append(executor.submit(execute, worker_id))
+        for worker_id, token in enumerate(tokens):
+            active_futures.append(executor.submit(execute, worker_id, token))
         barrier.wait()
         _, pending = wait(active_futures, timeout=_COHORT_TIMEOUT, return_when=ALL_COMPLETED)
         if pending:
@@ -473,10 +600,11 @@ def run_fixed_cohort_case(
         boundary_checks = 0
         boundary_supported = False
         active_futures: list[Future[dict[str, int]]] = []
+        measured_records: list[dict[str, int]] = []
         try:
             transport.connect()
-            for _ in range(pool_size):
-                assert transport.execute(TYPE_SECURITY_COUNT, {"market": "sz"}) == 23285
+            for index in range(pool_size):
+                _execute_timed(transport, _SETUP_TOKEN_BASE + index)
             worker_ids = _prestart_executor(executor, cohort_size)
             measured_started_ns = 0
             total_cohorts = warmup_cohorts + measured_cohorts
@@ -484,7 +612,16 @@ def run_fixed_cohort_case(
                 if cohort_index == warmup_cohorts:
                     server.reset_measurement()
                     measured_started_ns = time.perf_counter_ns()
-                records = _run_cohort_wave(executor, transport, cohort_size, active_futures)
+                if cohort_index < warmup_cohorts:
+                    token_start = _WARMUP_TOKEN_BASE + cohort_index * cohort_size
+                else:
+                    token_start = (cohort_index - warmup_cohorts) * cohort_size
+                records = _run_cohort_wave(
+                    executor,
+                    transport,
+                    range(token_start, token_start + cohort_size),
+                    active_futures,
+                )
                 server.wait_for_idle()
                 boundary = _broker_boundary(transport, pool_size)
                 if boundary is not None:
@@ -493,6 +630,7 @@ def run_fixed_cohort_case(
                     if not boundary["clean"]:
                         raise AssertionError(f"cohort boundary retained Broker state: {boundary!r}")
                 if cohort_index >= warmup_cohorts:
+                    measured_records.extend(records)
                     call_latencies_ns.extend(record["call_latency_ns"] for record in records)
                     cohort_latencies_ns.extend(record["cohort_latency_ns"] for record in records)
                     wave_makespans_ns.append(max(record["cohort_latency_ns"] for record in records))
@@ -522,6 +660,7 @@ def run_fixed_cohort_case(
             "worker_threads": len(worker_ids),
             "server_max_active": server.max_active,
             "server_requests": server.requests,
+            **_completion_summary(measured_records, server),
             "boundary_checks_supported": boundary_supported,
             "boundary_checks": boundary_checks,
             "boundary_checks_all_clean": True,
@@ -577,7 +716,7 @@ def run_fifo_trial(
 ) -> dict[str, Any]:
     if role not in {"baseline", "current"}:
         raise ValueError(f"unsupported trial role: {role}")
-    config = fifo_v1_config()
+    config = fifo_v2_config()
     delay = config["delay_ns"] / 1_000_000_000
     started_at = _utc_now()
     cases = {
@@ -616,7 +755,7 @@ def run_fifo_trial(
     }
     source = Path(__file__).read_bytes()
     return {
-        "schema": 3,
+        "schema": 4,
         "kind": "actor-performance-trial",
         "protocol": FIFO_PROTOCOL,
         "label": label,

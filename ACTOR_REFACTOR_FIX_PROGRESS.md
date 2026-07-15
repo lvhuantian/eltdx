@@ -12,10 +12,10 @@ The result document remains historical evidence only until FINAL rewrites it.
 | Baseline HEAD | `994c49b51f47255bdcd9cdc3308a5a554f37588b` |
 | Base | `71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
 | Branch | `actor-transport-refactor` |
-| Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), confirmed OPEN and draft at pushed HEAD `8303405` |
+| Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), confirmed OPEN and draft at pushed HEAD `a53cc09450cd98b3cb8011e92110b244d854148b` |
 | Final-review correction base | `cc46e6042e60b1d70732ae813b089f9c8b572572` |
-| Latest pushed correction checkpoint | `7b961fe56f9d27d56a53e04a5997f01d8647af46`; Pages and five CI jobs passed, Ubuntu 3.11 exposed a nondeterministic generation-stress endpoint-use assertion |
-| Current local follow-up | Deterministic two-loopback generation/failover stress correction is locally green at 443 tests and independently reviewed CLEAN; follow-up commit/push and exact-head CI are next |
+| Latest pushed correction checkpoint | `a53cc09450cd98b3cb8011e92110b244d854148b`; exact CI run `29403736004` passed Ubuntu 3.10-3.13, Windows 3.11/3.13, and package build; exact Pages run `29403735977` passed |
+| Current local follow-up | FIFO-v2 schema 4 producer/verifier freeze candidate is locally green at 459 tests; independent protocol and evidence reviews are CLEAN at the frozen local-artifact trust boundary |
 | Baseline worktree | User-owned modification in `ACTOR_REFACTOR_RESULT.md`; preserve and integrate, do not overwrite |
 | Superseded result | Existing `COMPLETE` claim and 183-test evidence |
 
@@ -40,8 +40,8 @@ again before FINAL evidence is accepted.
 | F03 connect and failover | COMPLETE (`2e48be0`) | Candidate/attempt budgets, next-endpoint retry, Windows peer verification, non-busy rearm, and seven real/fault-injected regressions |
 | F04 Broker and pinned leases | CORRECTNESS CLOSED; CHECKPOINT CANDIDATE | BaseException-safe waiter withdrawal, assigned-waiter lazy reap, pin close lease recovery, atomic batch admission, and FIFO pass |
 | F05 lifecycle and shutdown | CORRECTNESS CLOSED; CHECKPOINT CANDIDATE | Tokenized lifecycle gates, nonblocking finalizers, deadline-bounded best-effort fatal cleanup, and monotonic shutdown pass |
-| F06 stress, performance, resources, compatibility | FIFO-v1 A FAIL (`ca43972`; prior failures retained) | Stress/resources/heartbeat/matrix and all throughput/structure/sequential/no-backlog-p50 gates pass; no-backlog p99 exceeds its allowance by 0.13318 ms |
-| Final-review correctness correction | LOCAL CHECKPOINT CANDIDATE after `8303405` | Current 443-test snapshot closes all post-campaign deterministic blockers with two final CLEAN reviews; push and exact-head CI/Pages remain required |
+| F06 stress, performance, resources, compatibility | FIFO-v2 FREEZE CANDIDATE; FIFO-v1 A FAIL retained | Schema 4 uses unique file-content tokens, raw 9-field completion provenance, physical root/SHA checks, and exact-cell replay rejection; the new formal campaign has not started |
+| Final-review correctness correction | COMPLETE (`a53cc09`) | 443-test correctness snapshot plus deterministic two-endpoint generation failover; exact CI and Pages passed |
 | FINAL independent review and CI | PENDING | Two clean adversarial reviews; local matrix/build/docs and exact-HEAD CI/Pages green |
 
 ## Current Acceptance Blocker
@@ -103,6 +103,32 @@ was 7.0652 ms baseline versus 7.9049 ms current: delta 0.8397 ms against a
 0.70652 ms allowance, exceeding the ceiling by 0.13318 ms. Bundle SHA256
 `C9F75FBC72B69AA26307EDCF967FA369914F266676374158453C795D62AAEAEA` is
 retained as FAIL. The same exact source will not be sampled again.
+
+### FIFO-v2 Prospective Protocol
+
+FIFO-v2 supersedes only the prospective producer/verifier format; it does not
+rerun, modify, or reinterpret `fifo-v1-ca43972-a`. Bundle and trial schemas are
+version 4. The shared `TYPE_FILE_CONTENT` workload works on both clean
+`71089c0` and current source. Setup (`0xE0000000...`), warmup
+(`0xC0000000...`), and measured (`0..requests-1`) token domains are disjoint.
+
+Every timed completion retains nine uint32 values: requested, snapshot, and
+echoed token; response epoch, connection, and attempt; and the server ledger's
+expected epoch, connection, and attempt. The verifier reconstructs token
+ranges, uniqueness, duplicate/missing/unexpected counts, cross-request and
+cross-generation counts, and the 9xuint32 SHA256 from those rows. It also
+requires epoch 1, exact attempt permutation, every pool connection, sequential
+attempt order, fixed-cohort wave membership, and physical request/attempt/
+success equalities.
+
+Production verification binds both declared roots to existing clean Git
+worktrees at the declared SHA, and requires the current root to own the adjacent
+producer/verifier. Trial label/id, physical duration lower bounds, and exact
+per-case replay across roles are enforced. The frozen declaration states the
+achievable artifact trust boundary from plan revision 1.1: local producer raw
+measurements are trusted; the verifier detects exact replay and structural or
+physical inconsistency, but does not claim cryptographic authentication against
+deliberate self-consistent fabrication.
 
 ## Post-Campaign Adversarial Reopening At `8303405`
 
@@ -322,6 +348,13 @@ exact-source performance artifacts remain to be generated after checkpointing.
 | 2026-07-15 | Generation-stress CI root cause and correction | Old harness relied on a race between remote EOF observation and the next request submission to make endpoint 1 receive business. Endpoint 0 now deterministically keeps each odd request connection and drops every even recorded attempt before any response byte; retry must start at endpoint 1. Tests require both servers, nonzero retries, every retry cross-endpoint, and zero same-endpoint retries |
 | 2026-07-15 | Corrected generation-stress evidence | Ten consecutive 1,000-generation nodes passed. A retained diagnostic produced generation `1000`, accepts `[500, 500]`, business attempts `[1000, 500]`, attempts/retries/cross-endpoint `1500/500/500`, same-endpoint `0`, 1,000 unique responses, and zero cross-request/cross-generation completions. Full stress file **5 passed in 64.73s**; complete suite **443 passed in 80.81s** |
 | 2026-07-15 | Generation-stress independent review | **CLEAN**: two real loopback endpoints are deterministically exercised, retry provenance binds the final server/connection/global attempt, Actor identity is stable, and close resource assertions remain non-vacuous; compile/diff/process checks passed with no pytest left behind |
+| 2026-07-15 | Exact `a53cc09` remote checks | CI run `29403736004` passed Ubuntu 3.10-3.13, Windows 3.11/3.13, and package build; Pages run `29403735977` passed. PR #12 remained OPEN and draft at the exact SHA |
+| 2026-07-15 | FIFO-v2 producer baseline/current loopback probes | All nine pool 1/2/4 x concurrency 1/10/100 five-request cases on clean `71089c0` and current source had exact request/attempt/record counts, connection coverage equal to pool size, unique responses, and zero cross-request/cross-generation completions; temporary files were removed |
+| 2026-07-15 | FIFO-v2 initial evidence matrix | Schema 4 and root/provenance regressions **53 passed in 0.85s**; full suite **455 passed in 80.96s**; compileall, wheel/sdist, MkDocs strict, and diff check passed |
+| 2026-07-15 | FIFO-v2 adversarial protocol red evidence | After the first root/provenance blockers were closed, probes still accepted an unbound trial label, a 1 microsecond trial containing multi-millisecond cases, whole-cell replay, and then single-case/cross-role exact replay. Deterministic regressions were added before each verifier correction |
+| 2026-07-15 | FIFO-v2 final local evidence | Trial label, physical duration, per-case cross-role exact replay, and boolean/zero-or-exact cohort boundary constraints pass; runner cwd/source-root, physical dirty-root, sequential attempt, epoch, connection coverage, and cohort wave mutation tests are retained. Evidence file **57 passed in 0.86s**; complete suite **459 passed in 82.77s** |
+| 2026-07-15 | FIFO-v2 evidence test audit | **CLEAN**: production root routing mutations make the runner test fail; dirty physical root and sequential self-consistent attempt swaps are target-locked; fixture uniqueness preserves exact throughput and latency boundaries |
+| 2026-07-15 | FIFO-v2 protocol audit | **CLEAN** at the frozen plan trust boundary after red-to-green root/SHA, epoch, connection, attempt, wave, label, duration, replay, and boundary type/count probes. Deliberate synchronized fabrication of trusted raw measurements is explicitly not claimed as cryptographically authenticated |
 
 Post-`0b8ad54` corrections make Broker close broadcast every independently
 registered pin waiter Event without retaining proxies. A delayed assigned caller
@@ -438,9 +471,10 @@ artifacts must be regenerated at the next exact implementation SHA.
 
 ## Exact Next Action
 
-Commit the deterministic generation-stress CI correction plus this ledger while
-preserving the user-owned RESULT diff, push the append-only checkpoint, and
-wait for that exact HEAD's Ubuntu 3.10-3.13, Windows 3.11/3.13, wheel/sdist,
-MkDocs, and Pages checks. Only after exact-head correctness is green may F06 convert the
-performance producer from constant 23285 to unique verifiable responses and
-freeze a new campaign. Do not change or resample the failed `ca43972` campaign.
+Protocol and evidence reviews are CLEAN at the explicit local-artifact trust
+boundary. Commit producer, verifier, tests, and this ledger while preserving the
+user-owned RESULT diff; push the append-only freeze checkpoint and wait for that
+exact HEAD's CI and Pages. Create a separate clean detached worktree at the exact
+checkpoint, declare a new FIFO-v2 campaign there, externally retain the
+declaration hash before any sample, and run the complete fixed schedule once.
+Do not change or resample the failed `ca43972` campaign.
