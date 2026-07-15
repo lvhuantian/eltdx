@@ -12,10 +12,10 @@ The result document remains historical evidence only until FINAL rewrites it.
 | Baseline HEAD | `994c49b51f47255bdcd9cdc3308a5a554f37588b` |
 | Base | `71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
 | Branch | `actor-transport-refactor` |
-| Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), confirmed OPEN and draft at pushed HEAD `a53cc09450cd98b3cb8011e92110b244d854148b` |
+| Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), confirmed OPEN and draft at pushed HEAD `72ef660efdbf3158a392df16ddf31bbf61200ecf` |
 | Final-review correction base | `cc46e6042e60b1d70732ae813b089f9c8b572572` |
-| Latest pushed correction checkpoint | `66e44968d407b52b3b0f7464cf7fb1baabe680f7`; Pages run `29407448038` passed, while CI run `29407448048` retained one Windows 3.11 deterministic-test timing failure; every other job passed |
-| Current local follow-up | The failed regression now waits to its captured Event deadline instead of assuming `sleep(0.06)` crossed 50 ms; 20 focused rounds, 46 pool regressions, and 459 full tests pass locally |
+| Latest pushed correction checkpoint | `72ef660efdbf3158a392df16ddf31bbf61200ecf`; exact CI run `29407921165` and Pages run `29407921155` passed |
+| Current local follow-up | Formal `fifo-v2-72ef660-a` remains a permanent FAIL; low-risk wake-only and Broker steady-state optimizations are retained with deterministic race regressions, while terminal handoff was measured and fully reverted |
 | Baseline worktree | User-owned modification in `ACTOR_REFACTOR_RESULT.md`; preserve and integrate, do not overwrite |
 | Superseded result | Existing `COMPLETE` claim and 183-test evidence |
 
@@ -40,7 +40,7 @@ again before FINAL evidence is accepted.
 | F03 connect and failover | COMPLETE (`2e48be0`) | Candidate/attempt budgets, next-endpoint retry, Windows peer verification, non-busy rearm, and seven real/fault-injected regressions |
 | F04 Broker and pinned leases | CORRECTNESS CLOSED; CHECKPOINT CANDIDATE | BaseException-safe waiter withdrawal, assigned-waiter lazy reap, pin close lease recovery, atomic batch admission, and FIFO pass |
 | F05 lifecycle and shutdown | CORRECTNESS CLOSED; CHECKPOINT CANDIDATE | Tokenized lifecycle gates, nonblocking finalizers, deadline-bounded best-effort fatal cleanup, and monotonic shutdown pass |
-| F06 stress, performance, resources, compatibility | FIFO-v2 FREEZE (`66e4496`) with CI follow-up pending; FIFO-v1 A FAIL retained | Schema 4 uses unique file-content tokens, raw 9-field completion provenance, physical root/SHA checks, and exact-cell replay rejection; the new formal campaign has not started |
+| F06 stress, performance, resources, compatibility | LOW-RISK HOT-PATH CHECKPOINT (`8296511`); FIFO-v2 A FAIL (`72ef660`) retained | Wake-only drive and Broker allocation/scan reductions pass focused concurrency review; exact new-HEAD CI and a prospective campaign are still required |
 | Final-review correctness correction | COMPLETE (`a53cc09`) | 443-test correctness snapshot plus deterministic two-endpoint generation failover; exact CI and Pages passed |
 | FINAL independent review and CI | PENDING | Two clean adversarial reviews; local matrix/build/docs and exact-HEAD CI/Pages green |
 
@@ -129,6 +129,47 @@ achievable artifact trust boundary from plan revision 1.1: local producer raw
 measurements are trusted; the verifier detects exact replay and structural or
 physical inconsistency, but does not claim cryptographic authentication against
 deliberate self-consistent fabrication.
+
+### FIFO-v2 Campaign A Failure
+
+The first schema-4 campaign `fifo-v2-72ef660-a` was declared before any
+sample with canonical SHA256
+`fafe65ea46f182cdc06d887043758a2c6e6a72c4c7a68de30853a111a3877f39`.
+All eight attempt-1 trials completed once in exact `ABBA + BAAB` order. The
+verifier returned no evidence errors. Across 32 cases and 1,000,000 raw
+completion rows, requests, server requests, attempts, and unique responses were
+all exactly 1,000,000; duplicate, missing, unexpected, cross-request, and
+cross-generation counts were all zero.
+
+Five hard gates failed:
+
+- Sequential throughput was 173.853591 versus 163.026466 requests/second,
+  ratio 0.937723 against the 0.95 minimum.
+- Saturated throughput was 680.884296 versus 605.317634 requests/second,
+  ratio 0.889017.
+- Sequential p99 was 6.2537 versus 7.0782 ms, delta 0.8245 ms against a
+  0.62537 ms allowance.
+- No-backlog p50 was 6.1475 versus 7.1239 ms, delta 0.9764 ms against a
+  0.61475 ms allowance.
+- No-backlog p99 was 7.3065 versus 9.0527 ms, delta 1.7462 ms against a
+  0.73065 ms allowance.
+
+Sequential p50 passed. Saturated raw latency remained report-only: baseline
+p50/p99 108.8690/527.3172 ms versus current 163.62815/183.3818 ms. The failure
+was present in both counterbalanced blocks and is not a single-trial outlier.
+Bundle SHA256 is
+`a533a286a8c3f988b32dd1303ef174a8cbd18067095a92909a0587fc6c79c29d`;
+verification report SHA256 is
+`5dc53c3c336c417a7a6d610afd4df6929f8461ab43475f01e0e082778376df0b`.
+Trial hashes in schedule order are `6045b8ebcbece31695180de62f876235466fdf5ccd773b96bc453d5ad8e5c293`,
+`6c3fbb525ac9829a66517df52e08c65adff670816fb0308474e407202f2d6d25`,
+`d9d107dc88e289d0371203e7df8809766dc0e1b081f2a828c11f3e5d855bd29f`,
+`dd3128fb7cc489bc652c0199b8e2a40c893b1cd724fbdf6898e2fb4b9e670098`,
+`a4a7264938c6ff8102055391d65906f6814b9174171a3f9f36ca2dc3b1bac436`,
+`e627d0ff9e16f8d96c8867e947cf855f0a386d332c59bf54a0033e9f9efb44e1`,
+`cd042c107d6fc750f4c33d3b83cb4b6abcec1332134fd7a03ec0c5ab420edd3a`,
+and `29adc67c1470ad1a77c11a3a095ec40dfc9d7db252e053ef8d03784d2d0fb564`.
+This exact source and campaign will not be sampled again.
 
 ## Post-Campaign Adversarial Reopening At `8303405`
 
@@ -357,6 +398,21 @@ exact-source performance artifacts remain to be generated after checkpointing.
 | 2026-07-15 | FIFO-v2 protocol audit | **CLEAN** at the frozen plan trust boundary after red-to-green root/SHA, epoch, connection, attempt, wave, label, duration, replay, and boundary type/count probes. Deliberate synchronized fabrication of trusted raw measurements is explicitly not claimed as cryptographically authenticated |
 | 2026-07-15 | Exact `66e4496` remote checks | Pages run `29407448038` passed. CI run `29407448048` passed Ubuntu 3.10-3.13, Windows 3.13, and package build, but Windows 3.11 failed only `test_broker_delayed_assignment_return_reclaims_expired_lease`: fixed `sleep(0.06)` returned before the test's 50 ms deadline on that runner, so the retained result was a valid lease rather than the expected timeout |
 | 2026-07-15 | Windows 3.11 regression timing correction | `DelayedReturnEvent` records the exact deadline derived from its real `wait(timeout)` call; the test blocks to that monotonic deadline before allowing the wait to return. The node passed **20 consecutive rounds**, the pool regression file **46 passed in 1.61s**, and the full suite **459 passed in 82.19s** |
+| 2026-07-15 | Exact `72ef660` remote checks | CI run `29407921165` passed Ubuntu 3.10-3.13, Windows 3.11/3.13, and package build; Pages run `29407921155` passed. PR #12 remained OPEN and draft at the exact SHA |
+| 2026-07-15 | FIFO-v2 campaign A declaration | Campaign `fifo-v2-72ef660-a`; canonical declaration SHA256 `fafe65ea46f182cdc06d887043758a2c6e6a72c4c7a68de30853a111a3877f39`; declaration file SHA256 `bb64e08537b9f47b518d196f86635ea7bf5ee6e2cd6d6a48264564571834ca00`; clean roots `71089c0` and `72ef660`; exact `ABBA + BAAB` schedule externally recorded before sampling |
+| 2026-07-15 | FIFO-v2 campaign A run | All eight attempt-1 trials completed once in 2,050.1 seconds. Evidence structure was clean across 1,000,000 rows, but five hard gates failed: sequential/saturated throughput ratios 0.937723/0.889017, sequential p99 delta 0.8245 ms, and no-backlog p50/p99 deltas 0.9764/1.7462 ms. Bundle SHA256 `a533a286a8c3f988b32dd1303ef174a8cbd18067095a92909a0587fc6c79c29d`; report SHA256 `5dc53c3c336c417a7a6d610afd4df6929f8461ab43475f01e0e082778376df0b`; overall **FAIL**, no exact-source rerun |
+| 2026-07-15 | FIFO-v2 campaign A independent artifact audit | Evidence **CLEAN**, performance **stable FAIL**: roots and hashes exact; all completion identities and digests valid; every adjacent pair and both counterbalanced blocks retain the throughput/no-backlog regression, so no single cell explains the result |
+| 2026-07-15 | Post-failure send-path diagnosis | Sequential call-to-server-read was 182.5/371.5 microseconds baseline/current and four-worker no-backlog was 258.8/928.4 microseconds; response construction-to-route was effectively unchanged, isolating the dominant loss before wire send rather than parser, response routing, or heartbeat |
+| 2026-07-15 | Wake-only Actor drive | Selector batches record wake/TCP presence and advance in the same iteration only for wake-only batches with no decoded frames or decoder buffer. Mixed TCP batches remain READ-first and STOP/cancel is drained first. Focused Actor/Pool/Lifecycle/Failover checks passed, and a deterministic five-case batch predicate test covers TCP, decoded, and partial-buffer suppression |
+| 2026-07-15 | Broker allocation and scan optimization | Immediate idle leases retain `cancellation=None`; queued leases retain the exact waiter cancellation Event; the unused `published` Event was removed in favor of Condition-protected state; reclaim is performed exactly once per assign. A shared set cancellation sentinel preserves lazy capacity recovery after release timeout, constructor failure, and abandon |
+| 2026-07-15 | Broker isolated C/E/E/C microbenchmark | Clean `72ef660` acquire/validate/release measured 13.754/11.956 microseconds per operation. Removing the idle Event measured 6.789/7.351 microseconds; the final one-reclaim implementation measured 5.416/5.274 microseconds. Four new regressions cover event identity, release-timeout recovery, abandon, and append-to-assign concurrent cancellation for atomic batches |
+| 2026-07-15 | Low-risk loopback development C/E/E/C | Fixed 1,500 sequential, 10,000 saturated, and 500 four-worker waves ran in control/experiment/experiment/control order with all cross counters zero. Adjacent saturated throughput improved 627.975 to 639.716 and 579.449 to 586.635 rps; sequential and no-backlog showed system drift, so these samples are diagnostic only and cannot replace a formal campaign |
+| 2026-07-15 | Independent hot-path reviews | Actor wake-only review found no receive-boundary or priority violation after the batch regression was added. Broker review found and reproduced two capacity/progress gaps in early drafts; `_CANCELLED_LEASE`, abandon marking, and release-time concurrent-cancellation reclaim closed them. Final focused review was **CLEAN**, with **62 Pool tests passed** independently |
+| 2026-07-15 | Rejected runtime fast path | Lock microbenchmarks put Event, Lock/Condition, registration, Broker validate, and `_ensure_started_before` costs in the sub-microsecond to low-tens-of-microseconds range. Removing strong epoch/broker/fatal checks could not provide the required gain and would weaken late-registration and close contracts; no runtime fast-path source change remains |
+| 2026-07-15 | Rejected terminal handoff experiment | A deterministic red test proved the old successor was submitted by the waiting worker, then turned green when the Actor terminal callback submitted it outside the Broker lock. The implementation passed 63 Pool and 108 Actor/Failover tests, but added only about 0.8 percent saturated throughput versus adjacent clean `72ef660` and did not improve no-backlog. The entire handoff, socket split, and test migration were precisely reverted |
+| 2026-07-15 | Post-revert focused verification | Actor/Failover/Pool/Lifecycle regression files **202 passed in 14.84s**; compileall and diff check passed. `socket.py` has no source diff from `72ef660`; only the low-risk Actor/Broker changes and their regressions remain |
+| 2026-07-15 | Low-risk optimization checkpoint local matrix | Complete suite **468 passed in 82.20s**; wheel and sdist built successfully; MkDocs strict and `compileall -q src tests scripts` passed |
+| 2026-07-15 | Low-risk optimization source checkpoint | Commit `8296511` (`Fix-Checkpoint: F06-HOTPATH-LOW-RISK`) contains only Actor/Broker production changes and four regression groups; the user-owned result document was explicitly excluded |
 
 Post-`0b8ad54` corrections make Broker close broadcast every independently
 registered pin waiter Event without retaining proxies. A delayed assigned caller
@@ -473,9 +529,7 @@ artifacts must be regenerated at the next exact implementation SHA.
 
 ## Exact Next Action
 
-Commit the deterministic Windows test correction and this ledger while
-preserving the user-owned RESULT diff; push the append-only follow-up checkpoint
-and wait for that exact HEAD's CI and Pages. Then create a separate clean detached
-worktree at the exact checkpoint, declare a new FIFO-v2 campaign there,
-externally retain the declaration hash before any sample, and run the complete
-fixed schedule once. Do not change or resample the failed `ca43972` campaign.
+Commit this ledger follow-up while explicitly excluding the user-owned result
+document, then push the append-only checkpoint pair. Require exact-head CI and
+Pages before declaring one new FIFO-v2 campaign ID at that final pushed SHA. Do
+not change or resample either failed campaign.
