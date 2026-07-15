@@ -14,7 +14,7 @@ The result document remains historical evidence only until FINAL rewrites it.
 | Branch | `actor-transport-refactor` |
 | Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), confirmed OPEN and draft at pushed HEAD `72ef660efdbf3158a392df16ddf31bbf61200ecf` |
 | Final-review correction base | `cc46e6042e60b1d70732ae813b089f9c8b572572` |
-| Latest pushed correction checkpoint | `72ef660efdbf3158a392df16ddf31bbf61200ecf`; exact CI run `29407921165` and Pages run `29407921155` passed |
+| Latest pushed correction checkpoint | `d76ca47d69f139c1f5b1894a4f8536a95ab63794`; exact CI run `29416793618` and Pages run `29416793666` passed |
 | Current local follow-up | Formal `fifo-v2-72ef660-a` remains a permanent FAIL; low-risk wake-only and Broker steady-state optimizations are retained with deterministic race regressions, while terminal handoff was measured and fully reverted |
 | Baseline worktree | User-owned modification in `ACTOR_REFACTOR_RESULT.md`; preserve and integrate, do not overwrite |
 | Superseded result | Existing `COMPLETE` claim and 183-test evidence |
@@ -413,6 +413,7 @@ exact-source performance artifacts remain to be generated after checkpointing.
 | 2026-07-15 | Post-revert focused verification | Actor/Failover/Pool/Lifecycle regression files **202 passed in 14.84s**; compileall and diff check passed. `socket.py` has no source diff from `72ef660`; only the low-risk Actor/Broker changes and their regressions remain |
 | 2026-07-15 | Low-risk optimization checkpoint local matrix | Complete suite **468 passed in 82.20s**; wheel and sdist built successfully; MkDocs strict and `compileall -q src tests scripts` passed |
 | 2026-07-15 | Low-risk optimization source checkpoint | Commit `8296511` (`Fix-Checkpoint: F06-HOTPATH-LOW-RISK`) contains only Actor/Broker production changes and four regression groups; the user-owned result document was explicitly excluded |
+| 2026-07-15 | Exact `d76ca47` remote checks | CI run `29416793618` passed Ubuntu 3.10-3.13, Windows 3.11/3.13, and package build; Pages run `29416793666` passed. PR #12 remained OPEN and draft at the exact SHA |
 
 Post-`0b8ad54` corrections make Broker close broadcast every independently
 registered pin waiter Event without retaining proxies. A delayed assigned caller
@@ -529,7 +530,7 @@ artifacts must be regenerated at the next exact implementation SHA.
 
 ## Exact Next Action
 
-Commit this ledger follow-up while explicitly excluding the user-owned result
-document, then push the append-only checkpoint pair. Require exact-head CI and
-Pages before declaring one new FIFO-v2 campaign ID at that final pushed SHA. Do
-not change or resample either failed campaign.
+Commit and push this exact remote-evidence ledger update while explicitly
+excluding the user-owned result document. Require that final documentation-only
+HEAD's CI and Pages, then declare one new FIFO-v2 campaign ID at that SHA. Do not
+change or resample either failed campaign.
