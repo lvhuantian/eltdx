@@ -752,10 +752,17 @@ def test_success_response_keeps_existing_read_interest_without_redundant_modify(
     runtime.active_task = ticket
     runtime.generation = generation
     interest_changes: list[int] = []
+    grace_states: list[tuple[float | None, object | None, bool]] = []
     monkeypatch.setattr(
         actor_module,
         "_set_generation_interest",
         lambda _runtime, _generation, events: interest_changes.append(events),
+    )
+    runtime.successor_grace = 0.0005
+    monkeypatch.setattr(
+        runtime.control_ready,
+        "wait",
+        lambda timeout=None: grace_states.append((timeout, runtime.active_task, ticket.completed.is_set())),
     )
 
     actor_module._route_frame(
@@ -768,6 +775,209 @@ def test_success_response_keeps_existing_read_interest_without_redundant_modify(
     assert runtime.active_task is None
     assert generation.state is actor_module.TcpState.READY
     assert interest_changes == []
+    assert grace_states == [(0.0005, None, True)]
+
+
+@pytest.mark.parametrize("mode", ("grace", "yield"))
+@pytest.mark.parametrize("blocked_by", ("internal", "pending", "cancel", "stop"))
+def test_actor_cooperation_skips_when_control_work_is_already_visible(
+    monkeypatch, mode: str, blocked_by: str
+) -> None:
+    runtime = actor_module.ActorRuntime(1, ())
+    ticket = actor_module.RequestTicket(
+        1,
+        1,
+        TYPE_SECURITY_COUNT,
+        {"market": "sz"},
+        time.monotonic() + 1,
+        False,
+        request_id=1,
+        internal=blocked_by == "internal",
+    )
+    if blocked_by == "pending":
+        runtime.pending_task = ticket
+    elif blocked_by == "cancel":
+        runtime.cancel_requests[ticket.request_id] = actor_module.CancelToken(1, ticket.request_id, ticket.lease_id)
+    elif blocked_by == "stop":
+        runtime.stop_requested = True
+    if mode == "grace":
+        runtime.successor_grace = 0.1
+    else:
+        runtime.terminal_yield = True
+    monkeypatch.setattr(
+        runtime.control_ready,
+        "wait",
+        lambda _timeout=None: (_ for _ in ()).throw(AssertionError("Actor cooperation waited")),
+    )
+    monkeypatch.setattr(
+        actor_module.time,
+        "sleep",
+        lambda _delay: (_ for _ in ()).throw(AssertionError("Actor cooperation yielded")),
+    )
+
+    actor_module._wait_for_successor(runtime, ticket)
+
+
+def test_actor_notify_signals_successor_grace_before_wakeup_send() -> None:
+    runtime = actor_module.ActorRuntime(1, ())
+    runtime.successor_grace = 0.1
+    observations: list[bool] = []
+
+    class Writer:
+        def send(self, _data: bytes) -> int:
+            observations.append(runtime.control_ready.is_set())
+            return 1
+
+    actor_module._notify_actor(runtime, Writer())
+
+    assert observations == [True]
+
+
+def test_terminal_yield_is_external_only(monkeypatch) -> None:
+    runtime = actor_module.ActorRuntime(1, (), terminal_yield=True)
+    external = actor_module.RequestTicket(
+        1,
+        1,
+        TYPE_SECURITY_COUNT,
+        {"market": "sz"},
+        time.monotonic() + 1,
+        False,
+        request_id=1,
+    )
+    internal = actor_module.RequestTicket(
+        1,
+        -1,
+        TYPE_SECURITY_COUNT,
+        {"market": "sz"},
+        time.monotonic() + 1,
+        False,
+        request_id=2,
+        internal=True,
+    )
+    sleeps: list[float] = []
+    monkeypatch.setattr(actor_module.time, "sleep", sleeps.append)
+
+    actor_module._wait_for_successor(runtime, external)
+    actor_module._wait_for_successor(runtime, internal)
+
+    assert sleeps == [0]
+
+
+def test_successor_grace_cannot_lose_concurrent_control_signal(monkeypatch) -> None:
+    clear_entered = threading.Event()
+    allow_clear = threading.Event()
+    wait_returned = threading.Event()
+    wait_results: list[bool] = []
+
+    class CoordinatedEvent:
+        def __init__(self) -> None:
+            self._event = threading.Event()
+
+        def clear(self) -> None:
+            clear_entered.set()
+            assert allow_clear.wait(timeout=2)
+            self._event.clear()
+
+        def wait(self, timeout: float | None = None) -> bool:
+            result = self._event.wait(timeout)
+            wait_results.append(result)
+            wait_returned.set()
+            return result
+
+        def set(self) -> None:
+            self._event.set()
+
+    runtime = actor_module.ActorRuntime(1, ())
+    runtime.control_ready = CoordinatedEvent()
+    current = actor_module.RequestTicket(
+        1,
+        1,
+        TYPE_SECURITY_COUNT,
+        {"market": "sz"},
+        time.monotonic() + 1,
+        False,
+        request_id=1,
+    )
+    successor = actor_module.RequestTicket(
+        1,
+        2,
+        TYPE_SECURITY_COUNT,
+        {"market": "sz"},
+        time.monotonic() + 1,
+        False,
+        request_id=2,
+    )
+    runtime.successor_grace = 0.5
+
+    grace = threading.Thread(target=actor_module._wait_for_successor, args=(runtime, current))
+
+    def publish() -> None:
+        with runtime.control_lock:
+            runtime.pending_task = successor
+        actor_module._notify_actor(runtime)
+
+    notifier = threading.Thread(target=publish)
+    grace.start()
+    assert clear_entered.wait(timeout=2)
+    notifier.start()
+    allow_clear.set()
+    assert wait_returned.wait(timeout=2)
+    grace.join(timeout=2)
+    notifier.join(timeout=2)
+
+    assert not grace.is_alive() and not notifier.is_alive()
+    assert runtime.pending_task is successor
+    assert wait_results == [True]
+
+
+def test_successor_grace_cannot_clear_finalizer_stop_signal() -> None:
+    clear_entered = threading.Event()
+    allow_clear = threading.Event()
+    wait_calls: list[float | None] = []
+
+    class CoordinatedEvent:
+        def __init__(self) -> None:
+            self._event = threading.Event()
+
+        def clear(self) -> None:
+            clear_entered.set()
+            assert allow_clear.wait(timeout=2)
+            self._event.clear()
+
+        def wait(self, timeout: float | None = None) -> bool:
+            wait_calls.append(timeout)
+            return self._event.wait(timeout)
+
+        def set(self) -> None:
+            self._event.set()
+
+    runtime = actor_module.ActorRuntime(1, (), successor_grace=0.5)
+    runtime.control_ready = CoordinatedEvent()
+
+    class Writer:
+        def send(self, _data: bytes) -> int:
+            return 1
+
+    runtime.wake_writer = Writer()
+    ticket = actor_module.RequestTicket(
+        1,
+        1,
+        TYPE_SECURITY_COUNT,
+        {"market": "sz"},
+        time.monotonic() + 1,
+        False,
+        request_id=1,
+    )
+    grace = threading.Thread(target=actor_module._wait_for_successor, args=(runtime, ticket))
+    grace.start()
+    assert clear_entered.wait(timeout=2)
+    actor_module.abandon_actor(runtime)
+    allow_clear.set()
+    grace.join(timeout=2)
+
+    assert not grace.is_alive()
+    assert runtime.stop_requested
+    assert wait_calls == []
 
 
 class WouldBlockSocket:

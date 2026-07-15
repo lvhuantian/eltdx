@@ -105,6 +105,23 @@ class DelayedReturnEvent:
         return self._event.is_set()
 
 
+@pytest.mark.parametrize(
+    ("platform", "pool_size", "expected"),
+    (
+        ("linux", 1, (0.0, False)),
+        ("linux", 4, (0.0, False)),
+        ("win32", 1, (0.0, True)),
+        ("win32", 4, (0.0005, False)),
+    ),
+)
+def test_actor_cooperation_policy_is_windows_pool_specific(
+    monkeypatch, platform: str, pool_size: int, expected: tuple[float, bool]
+) -> None:
+    monkeypatch.setattr(pool_module.sys, "platform", platform)
+
+    assert pool_module._actor_cooperation(pool_size) == expected
+
+
 def test_immediate_lease_avoids_event_but_waiter_handoff_keeps_exact_cancellation() -> None:
     broker = LeaseBroker(1, pool_size=1, max_pending_requests=2)
     immediate = broker.acquire(time.monotonic() + 1)

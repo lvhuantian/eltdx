@@ -415,7 +415,10 @@ class ActorRuntime:
     request_timeout: float = 8.0
     owns_push_buffer: bool = True
     fatal_callback: Callable[[ActorRuntime, BaseException], None] | None = None
+    successor_grace: float = 0.0
+    terminal_yield: bool = False
     control_lock: IdentityGate = field(default_factory=IdentityGate)
+    control_ready: threading.Event = field(default_factory=threading.Event)
     state: RuntimeState = RuntimeState.STARTING
     stop_requested: bool = False
     pending_task: ConnectTicket | RequestTicket | None = None
@@ -489,6 +492,8 @@ def start_actor(
     request_timeout: float = 8.0,
     owns_push_buffer: bool = True,
     fatal_callback: Callable[[ActorRuntime, BaseException], None] | None = None,
+    successor_grace: float = 0.0,
+    terminal_yield: bool = False,
     candidate_callback: CandidateCallback | None = None,
     startup_timeout: float = 1.0,
 ) -> ActorRuntime:
@@ -503,6 +508,8 @@ def start_actor(
         request_timeout=request_timeout,
         owns_push_buffer=owns_push_buffer,
         fatal_callback=fatal_callback,
+        successor_grace=max(0.0, successor_grace),
+        terminal_yield=terminal_yield,
     )
     try:
         thread = threading.Thread(
@@ -1364,6 +1371,27 @@ def _route_frame(runtime: ActorRuntime, generation: TcpGeneration, received: Rec
     generation.state = TcpState.READY
     _complete_ticket(ticket, RequestState.SUCCESS, result=envelope)
     runtime.active_task = None
+    _wait_for_successor(runtime, ticket)
+
+
+def _wait_for_successor(runtime: ActorRuntime, ticket: RequestTicket) -> None:
+    if ticket.internal:
+        return
+    terminal_yield = runtime.terminal_yield
+    successor_grace = runtime.successor_grace
+    if not terminal_yield and successor_grace <= 0:
+        return
+    with runtime.control_lock:
+        if runtime.stop_requested or runtime.pending_task is not None or runtime.cancel_requests:
+            return
+        if successor_grace > 0:
+            runtime.control_ready.clear()
+            if runtime.stop_requested:
+                return
+    if terminal_yield:
+        time.sleep(0)
+    else:
+        runtime.control_ready.wait(successor_grace)
 
 
 def _handle_wire_failure(runtime: ActorRuntime, error: BaseException, *, retryable: bool) -> None:
@@ -1621,6 +1649,8 @@ def _drain_wakeup(runtime: ActorRuntime) -> None:
 
 
 def _notify_actor(runtime: ActorRuntime, writer: socket.socket | None = None) -> None:
+    if runtime.successor_grace > 0:
+        runtime.control_ready.set()
     if writer is None:
         with runtime.control_lock:
             writer = runtime.wake_writer

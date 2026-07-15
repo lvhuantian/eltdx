@@ -570,6 +570,9 @@ def test_guard_abandon_rejects_registration_after_snapshot(monkeypatch) -> None:
 def test_normal_pool_close_clears_epoch_configuration_and_reopens() -> None:
     pool = PooledSocketTransport(["127.0.0.1:9"], pool_size=2, timeout=1, heartbeat_interval=None)
     old_broker, old_push = pool._ensure_started()
+    expected_grace, expected_yield = pool_module._actor_cooperation(pool.pool_size)
+    for slot in pool._transports:
+        assert (slot._successor_grace, slot._terminal_yield) == (expected_grace, expected_yield)
     broker_ref = weakref.ref(old_broker)
     push_ref = weakref.ref(old_push)
     pool.close()
@@ -581,6 +584,7 @@ def test_normal_pool_close_clears_epoch_configuration_and_reopens() -> None:
         assert slot._actor_fatal_callback is None
         assert slot._runtime_started_callback is None
         assert slot._heartbeat_allowed is None
+        assert (slot._successor_grace, slot._terminal_yield) == (0.0, False)
 
     del old_broker, old_push
     gc.collect()
@@ -591,8 +595,44 @@ def test_normal_pool_close_clears_epoch_configuration_and_reopens() -> None:
     try:
         assert new_broker.pool_epoch > 1
         assert new_push.owner_epoch == new_broker.pool_epoch
+        for slot in pool._transports:
+            assert (slot._successor_grace, slot._terminal_yield) == (expected_grace, expected_yield)
     finally:
         pool.close()
+
+
+def test_socket_passes_actor_cooperation_configuration_to_runtime(monkeypatch) -> None:
+    captured: list[tuple[float, bool]] = []
+
+    def fake_start_actor(runtime_epoch, endpoints, **kwargs):
+        captured.append((kwargs["successor_grace"], kwargs["terminal_yield"]))
+        runtime = ActorRuntime(
+            runtime_epoch,
+            tuple(endpoints),
+            successor_grace=kwargs["successor_grace"],
+            terminal_yield=kwargs["terminal_yield"],
+        )
+        kwargs["candidate_callback"](runtime)
+        runtime.state = RuntimeState.RUNNING
+        return runtime
+
+    def fake_close_actor(runtime, timeout=1.0) -> None:
+        del timeout
+        runtime.stop_requested = True
+        runtime.state = RuntimeState.STOPPED
+        runtime.stopped.set()
+
+    monkeypatch.setattr(socket_module, "start_actor", fake_start_actor)
+    monkeypatch.setattr(socket_module, "close_actor", fake_close_actor)
+    transport = SocketTransport(["127.0.0.1:9"], timeout=1, heartbeat_interval=None)
+    transport._successor_grace = 0.0005
+    transport._terminal_yield = False
+    try:
+        runtime = transport._ensure_runtime(time.monotonic() + 1)
+        assert captured == [(0.0005, False)]
+        assert (runtime.successor_grace, runtime.terminal_yield) == (0.0005, False)
+    finally:
+        transport.close()
 
 
 def test_shutdown_owner_exception_publishes_failure_and_allows_retry(monkeypatch) -> None:

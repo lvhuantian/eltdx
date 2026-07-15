@@ -170,6 +170,8 @@ class SocketTransport:
         self._actor_fatal_callback = _actor_fatal_callback
         self._runtime_started_callback = _runtime_started_callback
         self._heartbeat_allowed: Any = None
+        self._successor_grace = 0.0
+        self._terminal_yield = False
         self._pool_runtime_retired = False
         self._resolver_claim: tuple[int, int] | None = None
         self._finalizer: weakref.finalize | None = None
@@ -1000,6 +1002,8 @@ class SocketTransport:
                 request_timeout=self._timeout,
                 owns_push_buffer=self._owns_push_buffer,
                 fatal_callback=self._actor_fatal_callback,
+                successor_grace=self._successor_grace,
+                terminal_yield=self._terminal_yield,
                 candidate_callback=lambda runtime: self._own_candidate(runtime, registration, deadline=deadline),
                 startup_timeout=1.0 if deadline is None else max(0.0, deadline - time.monotonic()),
             )
@@ -1224,6 +1228,8 @@ class SocketTransport:
         actor_fatal_callback: Any = None,
         runtime_started_callback: Any = None,
         heartbeat_allowed: Any = None,
+        successor_grace: float = 0.0,
+        terminal_yield: bool = False,
         deadline: float | None = None,
     ) -> None:
         self._acquire_lifecycle_for_request(deadline, "pool slot configuration")
@@ -1244,6 +1250,8 @@ class SocketTransport:
             self._actor_fatal_callback = actor_fatal_callback
             self._runtime_started_callback = runtime_started_callback
             self._heartbeat_allowed = heartbeat_allowed
+            self._successor_grace = max(0.0, successor_grace)
+            self._terminal_yield = terminal_yield
             self._pool_runtime_retired = False
         finally:
             self._lifecycle.release()
@@ -1329,6 +1337,8 @@ class SocketTransport:
                 self._actor_fatal_callback = None
                 self._runtime_started_callback = None
                 self._heartbeat_allowed = None
+                self._successor_grace = 0.0
+                self._terminal_yield = False
                 self._pool_runtime_retired = False
                 self._push_buffer = None
                 return True

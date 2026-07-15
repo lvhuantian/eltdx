@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 import threading
 import time
 import weakref
@@ -2144,6 +2145,7 @@ class PooledSocketTransport:
             )
             guard_ref = weakref.ref(self._runtime_guard)
             broker_ref = weakref.ref(broker)
+            successor_grace, terminal_yield = _actor_cooperation(self._pool_size)
             for transport, endpoints in zip(self._transports, endpoint_sets):
                 registration = RuntimeRegistration(guard_ref, candidate_epoch, broker_ref, retire_event)
                 startup_attempt.configured.append((transport, registration))
@@ -2159,6 +2161,8 @@ class PooledSocketTransport:
                     ),
                     runtime_started_callback=registration,
                     heartbeat_allowed=heartbeat_allowed,
+                    successor_grace=successor_grace,
+                    terminal_yield=terminal_yield,
                     deadline=deadline,
                 )
                 configured.append((transport, registration))
@@ -2711,6 +2715,14 @@ def _rotate_hosts(hosts: list[str], offset: int) -> list[str]:
         return []
     index = offset % len(hosts)
     return hosts[index:] + hosts[:index]
+
+
+def _actor_cooperation(pool_size: int) -> tuple[float, bool]:
+    if sys.platform != "win32":
+        return 0.0, False
+    if pool_size == 1:
+        return 0.0, True
+    return 0.0005, False
 
 
 def _executor_worker_threads(executor: Any) -> tuple[threading.Thread, ...]:
