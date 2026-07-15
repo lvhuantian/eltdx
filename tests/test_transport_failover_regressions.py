@@ -284,7 +284,32 @@ def test_windows_closed_first_endpoint_reaches_healthy_before_shared_deadline() 
             assert wait_ticket(submit_connect(runtime, time.monotonic() + 1.0)) == healthy.host
             assert time.monotonic() - started < 1.0
             assert healthy.wait_for_connections(1)
+            assert runtime.generation_counter == 2
+            assert runtime.reconnect_count == 1
         finally:
             release.set()
             close_actor(runtime)
             closed.close()
+
+
+def test_malformed_handshake_payload_rotates_to_healthy_endpoint() -> None:
+    release = threading.Event()
+
+    def malformed(conn: socket.socket) -> None:
+        msg_id, msg_type, _ = read_request(conn)
+        assert msg_type == TYPE_HANDSHAKE
+        conn.sendall(response_bytes(msg_id, msg_type, b"\x00"))
+        assert release.wait(timeout=2)
+
+    with (
+        Scripted7709Server([malformed]) as first,
+        Scripted7709Server([_healthy_handler(777, release)]) as healthy,
+    ):
+        runtime = start_actor(206, resolve_hosts([first.host, healthy.host]))
+        try:
+            assert _execute_count(runtime) == 777
+            assert (first.accepted_count, healthy.accepted_count) == (1, 1)
+            assert runtime.generation_counter == 2
+        finally:
+            release.set()
+            close_actor(runtime)

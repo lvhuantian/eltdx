@@ -10,7 +10,7 @@ import weakref
 import pytest
 
 from actor_support import Scripted7709Server, handshake_payload, read_request, response_bytes
-from eltdx.exceptions import ConnectionClosedError, TransportCloseTimeoutError
+from eltdx.exceptions import ConnectionClosedError, ResponseTimeoutError, TransportCloseTimeoutError
 from eltdx.protocol.constants import TYPE_SECURITY_COUNT
 from eltdx.transport import actor as actor_module
 from eltdx.transport import pool as pool_module
@@ -196,7 +196,7 @@ def test_pool_connect_failure_stops_siblings_before_waiting_for_completion(monke
         monkeypatch.setattr(
             transport,
             "_request_stop",
-            lambda: (stop_seen.set(), release_slow.set()),
+            lambda **_kwargs: (stop_seen.set(), release_slow.set()),
         )
         monkeypatch.setattr(transport, "_close_with_timeout", lambda timeout: None)
 
@@ -216,6 +216,127 @@ def test_pool_connect_failure_stops_siblings_before_waiting_for_completion(monke
     assert not thread.is_alive()
     assert stopped_before_fallback
     assert len(result) == 1 and isinstance(result[0], ConnectionClosedError)
+
+
+def test_pool_close_submission_gate_wait_obeys_one_second_deadline() -> None:
+    pool = PooledSocketTransport(["127.0.0.1:9"], pool_size=1, timeout=1, heartbeat_interval=None)
+    pool._ensure_started()
+    gate = pool._transports[0]._submission_gate
+    assert gate.acquire(timeout=1)
+    done = threading.Event()
+    results: list[object] = []
+
+    def close() -> None:
+        try:
+            results.append(pool.close())
+        except BaseException as exc:
+            results.append(exc)
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=close)
+    started = time.monotonic()
+    thread.start()
+    try:
+        assert done.wait(timeout=1.25)
+        assert time.monotonic() - started < 1.25
+        assert len(results) == 1 and isinstance(results[0], TransportCloseTimeoutError)
+        assert pool._state is PoolState.FAILED_CLOSING
+    finally:
+        gate.release()
+        done.wait(timeout=2)
+        thread.join(timeout=2)
+        try:
+            pool.close()
+        except TransportCloseTimeoutError:
+            pass
+
+    assert not thread.is_alive()
+    assert pool._state is PoolState.FAILED_CLOSED
+
+
+def test_standalone_close_control_lock_wait_obeys_one_second_deadline() -> None:
+    transport = SocketTransport(["127.0.0.1:9"], timeout=1, heartbeat_interval=None)
+    runtime = transport._ensure_runtime(time.monotonic() + 1)
+    done = threading.Event()
+    results: list[object] = []
+    runtime.control_lock.acquire()
+
+    def close() -> None:
+        try:
+            results.append(transport.close())
+        except BaseException as exc:
+            results.append(exc)
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=close)
+    started = time.monotonic()
+    thread.start()
+    try:
+        assert done.wait(timeout=1.25)
+        assert time.monotonic() - started < 1.25
+        assert len(results) == 1 and isinstance(results[0], TransportCloseTimeoutError)
+        assert transport._close_failed
+        assert transport._runtime is runtime
+    finally:
+        runtime.control_lock.release()
+        thread.join(timeout=2)
+
+    transport.close()
+    assert runtime.actor_thread is not None and not runtime.actor_thread.is_alive()
+    assert runtime.state is RuntimeState.FAILED_CLOSED
+
+
+def test_connect_rollback_stops_slots_before_waiting_for_submission_gate(monkeypatch) -> None:
+    pool = PooledSocketTransport(["127.0.0.1:9"], pool_size=2, timeout=1, heartbeat_interval=None)
+    pool._ensure_started()
+    held_gate = pool._transports[0]._submission_gate
+    assert held_gate.acquire(timeout=1)
+    slow_started = threading.Event()
+    failure_raised = threading.Event()
+    stop_seen = threading.Event()
+    release_slow = threading.Event()
+    results: list[object] = []
+
+    def slow_connect(**_kwargs) -> None:
+        slow_started.set()
+        assert release_slow.wait(timeout=2)
+
+    def failed_connect(**_kwargs) -> None:
+        assert slow_started.wait(timeout=2)
+        failure_raised.set()
+        raise ConnectionClosedError("slot failed")
+
+    monkeypatch.setattr(pool._transports[0], "_connect_with_deadline", slow_connect)
+    monkeypatch.setattr(pool._transports[1], "_connect_with_deadline", failed_connect)
+    for transport in pool._transports:
+        monkeypatch.setattr(transport, "_request_stop", lambda **_kwargs: (stop_seen.set(), release_slow.set()))
+        monkeypatch.setattr(transport, "_close_with_timeout", lambda _timeout: None)
+
+    def connect() -> None:
+        try:
+            pool.connect()
+        except BaseException as exc:
+            results.append(exc)
+
+    thread = threading.Thread(target=connect)
+    thread.start()
+    try:
+        assert failure_raised.wait(timeout=2)
+        assert stop_seen.wait(timeout=0.2)
+    finally:
+        held_gate.release()
+        release_slow.set()
+        thread.join(timeout=2)
+        if pool._state is not PoolState.STOPPED:
+            try:
+                pool.close()
+            except TransportCloseTimeoutError:
+                pass
+
+    assert not thread.is_alive()
+    assert len(results) == 1 and isinstance(results[0], ConnectionClosedError)
 
 
 def test_actor_startup_timeout_remains_owned_until_failed_closed(monkeypatch) -> None:
@@ -300,9 +421,9 @@ def test_pool_connect_stops_real_candidate_blocked_during_startup(monkeypatch) -
         assert selector_entered.wait(timeout=2)
         raise ConnectionClosedError("slot failed")
 
-    def observing_stop(runtime: ActorRuntime) -> None:
+    def observing_stop(runtime: ActorRuntime, **kwargs) -> None:
         assert runtime is slow._candidate
-        real_request_stop(runtime)
+        real_request_stop(runtime, **kwargs)
         assert runtime.stop_requested
         candidate_stopped.set()
         release_selector.set()
@@ -481,12 +602,12 @@ def test_shutdown_owner_exception_publishes_failure_and_allows_retry(monkeypatch
     real_request_stop = slot._request_stop
     stop_calls = 0
 
-    def fail_first_stop() -> None:
+    def fail_first_stop(**kwargs) -> None:
         nonlocal stop_calls
         stop_calls += 1
         if stop_calls == 1:
             raise RuntimeError("stop injection")
-        real_request_stop()
+        real_request_stop(**kwargs)
 
     monkeypatch.setattr(slot, "_request_stop", fail_first_stop)
     with pytest.raises(RuntimeError, match="stop injection"):
@@ -671,6 +792,8 @@ def test_pool_retire_is_atomic_with_request_submission(monkeypatch) -> None:
 def test_pooled_connect_future_cannot_resume_as_standalone_after_close(monkeypatch) -> None:
     future_entered = threading.Event()
     allow_future = threading.Event()
+    close_done = threading.Event()
+    close_result: list[object] = []
 
     def handler(conn: socket.socket) -> None:
         raise AssertionError("retired pool connect reached the server")
@@ -695,15 +818,30 @@ def test_pooled_connect_future_cannot_resume_as_standalone_after_close(monkeypat
                 result.append(exc)
 
         thread = threading.Thread(target=connect)
+        def close() -> None:
+            try:
+                close_result.append(pool.close())
+            except BaseException as exc:
+                close_result.append(exc)
+            finally:
+                close_done.set()
+
+        closer = threading.Thread(target=close)
         thread.start()
         assert future_entered.wait(timeout=2)
-        pool.close()
-        assert pool._state is PoolState.STOPPED
+        closer.start()
+        with pool._condition:
+            assert pool._condition.wait_for(lambda: pool._state is PoolState.CLOSING, timeout=2)
+        assert not close_done.wait(timeout=0.05)
+        with pytest.raises(ConnectionClosedError, match="CLOSING"):
+            pool._ensure_started()
         allow_future.set()
         thread.join(timeout=2)
+        closer.join(timeout=2)
 
-        assert not thread.is_alive()
+        assert not thread.is_alive() and not closer.is_alive()
         assert len(result) == 1 and isinstance(result[0], ConnectionClosedError)
+        assert close_result == [None]
         assert server.accepted_count == 0
         assert slot._runtime is None and slot._candidate is None
         assert pool._state is PoolState.STOPPED
@@ -730,19 +868,19 @@ def test_connect_rollback_attempt_blocks_close_until_old_futures_join(monkeypatc
         assert slow_entered.wait(timeout=2)
         raise ConnectionClosedError("old epoch failed")
 
-    def gated_begin(broker, push_buffer) -> None:
-        original_begin(broker, push_buffer)
+    def gated_begin(broker, push_buffer, **kwargs) -> None:
+        original_begin(broker, push_buffer, **kwargs)
         rollback_entered.set()
         assert allow_rollback.wait(timeout=2)
 
-    def observed_attempt_wait(attempt) -> None:
+    def observed_attempt_wait(attempt, **kwargs) -> None:
         close_waiting.set()
-        original_wait_attempt(attempt)
+        original_wait_attempt(attempt, **kwargs)
 
     monkeypatch.setattr(pool._transports[0], "_connect_with_deadline", slow_connect)
     monkeypatch.setattr(pool._transports[1], "_connect_with_deadline", failed_connect)
     for slot in pool._transports:
-        monkeypatch.setattr(slot, "_request_stop", release_slow.set)
+        monkeypatch.setattr(slot, "_request_stop", lambda **_kwargs: release_slow.set())
     monkeypatch.setattr(pool, "_begin_connect_rollback", gated_begin)
     monkeypatch.setattr(pool, "_wait_shutdown_attempt", observed_attempt_wait)
 
@@ -780,6 +918,179 @@ def test_connect_rollback_attempt_blocks_close_until_old_futures_join(monkeypatc
     new_broker, _ = pool._ensure_started()
     assert new_broker.pool_epoch > 1
     pool.close()
+
+
+def test_connect_failure_with_stuck_future_fails_closed_at_request_deadline(monkeypatch) -> None:
+    pool = PooledSocketTransport(["127.0.0.1:9"], pool_size=2, timeout=0.1, heartbeat_interval=None)
+    slow_entered = threading.Event()
+    release_slow = threading.Event()
+    slow_done = threading.Event()
+    connect_done = threading.Event()
+    results: list[BaseException] = []
+
+    def slow_connect(**_kwargs) -> None:
+        slow_entered.set()
+        try:
+            assert release_slow.wait(timeout=2)
+        finally:
+            slow_done.set()
+
+    def failed_connect(**_kwargs) -> None:
+        assert slow_entered.wait(timeout=2)
+        raise ConnectionClosedError("slot failed")
+
+    monkeypatch.setattr(pool._transports[0], "_connect_with_deadline", slow_connect)
+    monkeypatch.setattr(pool._transports[1], "_connect_with_deadline", failed_connect)
+
+    def connect() -> None:
+        try:
+            pool.connect()
+        except BaseException as exc:
+            results.append(exc)
+        finally:
+            connect_done.set()
+
+    thread = threading.Thread(target=connect)
+    started = time.monotonic()
+    thread.start()
+    try:
+        assert slow_entered.wait(timeout=2)
+        assert connect_done.wait(timeout=0.4)
+        assert time.monotonic() - started < 0.4
+        assert len(results) == 1 and isinstance(results[0], TransportCloseTimeoutError)
+        assert pool._state is PoolState.FAILED_CLOSING
+        attempt = pool._shutdown_attempt
+        assert attempt is not None and attempt.completed.is_set()
+        assert isinstance(attempt.error, TransportCloseTimeoutError)
+        with pytest.raises(ConnectionClosedError, match="FAILED_CLOSING"):
+            pool._ensure_started()
+    finally:
+        release_slow.set()
+        slow_done.wait(timeout=2)
+        thread.join(timeout=2)
+
+    pool.close()
+    assert pool._state is PoolState.FAILED_CLOSED
+
+
+def test_partial_connect_worker_submission_is_stopped_and_joined(monkeypatch) -> None:
+    pool = PooledSocketTransport(["127.0.0.1:9"], pool_size=2, timeout=1, heartbeat_interval=None)
+    release_slow = threading.Event()
+    slow_done = threading.Event()
+    real_executor = pool_module.ThreadPoolExecutor
+
+    class FailingSecondSubmit:
+        def __init__(self, *args, **kwargs) -> None:
+            self.inner = real_executor(*args, **kwargs)
+            self.calls = 0
+
+        def submit(self, function, *args, **kwargs):
+            self.calls += 1
+            if self.calls == 2:
+                raise RuntimeError("connect submit failed")
+            return self.inner.submit(function, *args, **kwargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback) -> None:
+            self.shutdown(wait=True, cancel_futures=True)
+
+        def shutdown(self, *args, **kwargs) -> None:
+            self.inner.shutdown(*args, **kwargs)
+
+    def slow_connect(**_kwargs) -> None:
+        try:
+            assert release_slow.wait(timeout=2)
+        finally:
+            slow_done.set()
+
+    monkeypatch.setattr(pool_module, "ThreadPoolExecutor", FailingSecondSubmit)
+    monkeypatch.setattr(pool._transports[0], "_connect_with_deadline", slow_connect)
+    for slot in pool._transports:
+        monkeypatch.setattr(slot, "_request_stop", lambda **_kwargs: release_slow.set())
+
+    with pytest.raises(RuntimeError, match="connect submit failed"):
+        pool.connect()
+
+    assert slow_done.wait(timeout=2)
+    assert pool._state is PoolState.STOPPED
+    assert pool._connect_executor is None
+    assert pool._connect_futures == ()
+    assert not any(
+        thread.name.startswith("eltdx-pool-connect") and thread.is_alive()
+        for thread in threading.enumerate()
+    )
+
+
+def test_shutdown_claim_prevents_connect_worker_after_future_snapshot(monkeypatch) -> None:
+    pool = PooledSocketTransport(["127.0.0.1:9"], pool_size=2, timeout=1, heartbeat_interval=None)
+    pool._ensure_started()
+    original_transports = list(pool._transports)
+    between_submissions = threading.Event()
+    allow_iteration = threading.Event()
+    release_first = threading.Event()
+    second_entered = threading.Event()
+    connect_results: list[object] = []
+    close_results: list[object] = []
+
+    class PausedTransports:
+        def __init__(self, items) -> None:
+            self.items = items
+            self.paused = False
+
+        def __len__(self) -> int:
+            return len(self.items)
+
+        def __getitem__(self, index):
+            return self.items[index]
+
+        def __iter__(self):
+            yield self.items[0]
+            if not self.paused:
+                self.paused = True
+                between_submissions.set()
+                assert allow_iteration.wait(timeout=2)
+            yield self.items[1]
+
+    pool._transports = PausedTransports(original_transports)  # type: ignore[assignment]
+
+    def first_connect(**_kwargs) -> None:
+        assert release_first.wait(timeout=2)
+
+    def second_connect(**_kwargs) -> None:
+        second_entered.set()
+
+    monkeypatch.setattr(original_transports[0], "_connect_with_deadline", first_connect)
+    monkeypatch.setattr(original_transports[1], "_connect_with_deadline", second_connect)
+    for slot in original_transports:
+        monkeypatch.setattr(slot, "_request_stop", lambda **_kwargs: release_first.set())
+
+    connector = threading.Thread(target=lambda: _capture_result(pool.connect, connect_results))
+    closer = threading.Thread(target=lambda: _capture_result(pool.close, close_results))
+    connector.start()
+    assert between_submissions.wait(timeout=2)
+    closer.start()
+    with pool._condition:
+        assert pool._condition.wait_for(lambda: pool._state is PoolState.CLOSING, timeout=2)
+        attempt = pool._shutdown_attempt
+        assert attempt is not None and len(attempt.connect_futures) == 1
+    allow_iteration.set()
+    connector.join(timeout=2)
+    closer.join(timeout=2)
+
+    assert not connector.is_alive() and not closer.is_alive()
+    assert not second_entered.is_set()
+    assert len(connect_results) == 1 and isinstance(connect_results[0], ConnectionClosedError)
+    assert close_results == [None]
+    assert pool._state is PoolState.STOPPED
+
+
+def _capture_result(function, results: list[object]) -> None:
+    try:
+        results.append(function())
+    except BaseException as exc:
+        results.append(exc)
 
 
 def test_close_waits_for_unpublished_pool_startup_cleanup(monkeypatch) -> None:
@@ -889,6 +1200,69 @@ def test_old_connect_claim_is_noop_after_close_and_reopen(monkeypatch) -> None:
     assert pool._state is PoolState.RUNNING
     assert not new_broker.snapshot().closed
     assert slot._runtime is None and slot._candidate is None
+    pool.close()
+
+
+def test_stale_connect_condition_timeout_cannot_fail_reopened_epoch(monkeypatch) -> None:
+    pool = PooledSocketTransport(["127.0.0.1:9"], pool_size=1, timeout=0.25, heartbeat_interval=None)
+    slot = pool._transports[0]
+    claim_entered = threading.Event()
+    allow_claim = threading.Event()
+    holder_ready = threading.Event()
+    release_holder = threading.Event()
+    result: list[object] = []
+    original_claim = pool._claim_shutdown_attempt
+
+    def failed_connect(**_kwargs) -> None:
+        raise ConnectionClosedError("old connect failed")
+
+    def gated_claim(**kwargs):
+        if kwargs.get("expected_broker") is not None:
+            claim_entered.set()
+            assert allow_claim.wait(timeout=2)
+        return original_claim(**kwargs)
+
+    monkeypatch.setattr(slot, "_connect_with_deadline", failed_connect)
+    monkeypatch.setattr(pool, "_claim_shutdown_attempt", gated_claim)
+    connector = threading.Thread(target=lambda: _capture_result(pool.connect, result))
+    connector.start()
+    assert claim_entered.wait(timeout=2)
+    old_broker = pool._broker
+    old_retire = pool._epoch_retire_event
+    old_failure = pool._shutdown_failed
+    assert old_broker is not None and old_retire is not None
+
+    pool.close()
+    new_broker, _ = pool._ensure_started()
+    new_retire = pool._epoch_retire_event
+    new_failure = pool._shutdown_failed
+    assert new_broker is not old_broker and new_retire is not None
+
+    def hold_new_condition() -> None:
+        with pool._condition:
+            holder_ready.set()
+            assert release_holder.wait(timeout=2)
+
+    holder = threading.Thread(target=hold_new_condition)
+    holder.start()
+    assert holder_ready.wait(timeout=2)
+    allow_claim.set()
+    try:
+        connector.join(timeout=0.6)
+        assert not connector.is_alive()
+        assert len(result) == 1 and isinstance(result[0], TransportCloseTimeoutError)
+        assert old_retire.is_set() and old_failure.is_set()
+        assert not new_retire.is_set() and not new_failure.is_set()
+    finally:
+        release_holder.set()
+        allow_claim.set()
+        connector.join(timeout=2)
+        holder.join(timeout=2)
+
+    assert pool._broker is new_broker
+    assert pool._state is PoolState.RUNNING
+    assert pool._registrations[0].is_active()
+    assert not new_broker.snapshot().closed
     pool.close()
 
 
@@ -1203,7 +1577,7 @@ def test_close_stop_failure_still_cleans_every_owned_runtime(monkeypatch) -> Non
     stop_calls: list[ActorRuntime] = []
     close_calls: list[ActorRuntime] = []
 
-    def stop(item: ActorRuntime) -> None:
+    def stop(item: ActorRuntime, **_kwargs) -> None:
         stop_calls.append(item)
         if item is runtime:
             raise RuntimeError("stop request injection")
@@ -1543,13 +1917,13 @@ def test_old_startup_waiter_cannot_inherit_runtime_created_after_close(monkeypat
             waiter_waiting.set()
         return original_wait(timeout)
 
-    def gated_active(expected_runtime_epoch=None):
+    def gated_active(expected_runtime_epoch=None, **kwargs):
         ident = threading.get_ident()
         active_calls[ident] = active_calls.get(ident, 0) + 1
         if threading.current_thread().name == "old-startup-waiter" and active_calls[ident] >= 2:
             waiter_gated.set()
             assert allow_waiter.wait(timeout=2)
-        return original_active(expected_runtime_epoch)
+        return original_active(expected_runtime_epoch, **kwargs)
 
     monkeypatch.setattr(transport._lifecycle, "wait", observed_wait)
     monkeypatch.setattr(transport, "_pool_runtime_is_active", gated_active)
@@ -1685,7 +2059,7 @@ def test_configure_failure_cleanup_exception_does_not_stick_startup(monkeypatch)
     def configure_second(**kwargs) -> None:
         raise RuntimeError("configure injection")
 
-    def fail_first_retire(registration) -> bool:
+    def fail_first_retire(registration, **_kwargs) -> bool:
         nonlocal retire_calls
         retire_calls += 1
         if retire_calls == 1:
@@ -1725,12 +2099,12 @@ def test_publish_false_cleanup_exception_fails_waiting_close(monkeypatch) -> Non
         configured.set()
         assert allow_configure.wait(timeout=2)
 
-    def fail_first_retire(registration) -> bool:
+    def fail_first_retire(registration, **kwargs) -> bool:
         nonlocal retire_calls
         retire_calls += 1
         if retire_calls == 1:
             raise RuntimeError("publish cleanup injection")
-        return original_retire(registration)
+        return original_retire(registration, **kwargs)
 
     monkeypatch.setattr(slot, "_configure_pool_runtime", gated_configure)
     monkeypatch.setattr(slot, "_retire_pool_runtime", fail_first_retire)
@@ -1779,10 +2153,10 @@ def test_submission_gate_close_timeout_rejects_runtime_before_stop_publication(m
     close_result: list[BaseException] = []
     real_stop = socket_module.request_actor_stop
 
-    def gated_stop(item: ActorRuntime) -> None:
+    def gated_stop(item: ActorRuntime, **kwargs) -> None:
         stop_entered.set()
         assert allow_stop.wait(timeout=2)
-        real_stop(item)
+        real_stop(item, **kwargs)
 
     monkeypatch.setattr(socket_module, "request_actor_stop", gated_stop)
     assert transport._submission_gate.acquire(timeout=1)
@@ -1811,3 +2185,1011 @@ def test_submission_gate_close_timeout_rejects_runtime_before_stop_publication(m
     assert runtime.stopped.wait(timeout=2)
     transport.close()
     assert runtime.state is RuntimeState.FAILED_CLOSED
+
+
+def test_socket_close_lifecycle_lock_obeys_single_deadline() -> None:
+    transport = SocketTransport(["127.0.0.1:9"], timeout=1, heartbeat_interval=None)
+    lock_held = threading.Event()
+    release_lock = threading.Event()
+
+    def hold_lifecycle_lock() -> None:
+        with transport._lifecycle:
+            lock_held.set()
+            release_lock.wait(timeout=0.5)
+
+    holder = threading.Thread(target=hold_lifecycle_lock)
+    holder.start()
+    assert lock_held.wait(timeout=2)
+
+    started = time.monotonic()
+    try:
+        with pytest.raises(TransportCloseTimeoutError, match="lifecycle"):
+            transport._close_with_timeout(0.05)
+    finally:
+        elapsed = time.monotonic() - started
+        release_lock.set()
+        holder.join(timeout=2)
+
+    assert not holder.is_alive()
+    assert elapsed < 0.25
+    assert transport._close_failed
+    transport.close()
+
+
+def test_close_attempt_event_wakes_waiter_when_abort_cannot_notify(monkeypatch) -> None:
+    transport = SocketTransport(["127.0.0.1:9"], timeout=1, heartbeat_interval=None)
+    finish_entered = threading.Event()
+    fail_first_finish = threading.Event()
+    waiter_waiting = threading.Event()
+    holder_locked = threading.Event()
+    release_holder = threading.Event()
+    owner_result: list[object] = []
+    waiter_result: list[object] = []
+    finish_calls = 0
+
+    def controlled_finish(*_args, **_kwargs) -> None:
+        nonlocal finish_calls
+        finish_calls += 1
+        if finish_calls == 1:
+            finish_entered.set()
+            assert fail_first_finish.wait(timeout=2)
+            raise RuntimeError("close owner injection")
+
+    monkeypatch.setattr(transport, "_finish_close_owner", controlled_finish)
+    owner = threading.Thread(
+        target=lambda: _capture_result(lambda: transport._close_with_timeout(0.15), owner_result),
+        name="close-owner",
+    )
+    owner.start()
+    assert finish_entered.wait(timeout=2)
+    with transport._lifecycle:
+        attempt = transport._close_attempt
+        assert attempt is not None
+        real_wait = attempt.completed.wait
+
+        def observed_wait(timeout=None) -> bool:
+            if threading.current_thread().name == "close-waiter":
+                waiter_waiting.set()
+            return real_wait(timeout)
+
+        monkeypatch.setattr(attempt.completed, "wait", observed_wait)
+
+    waiter = threading.Thread(
+        target=lambda: _capture_result(lambda: transport._close_with_timeout(0.6), waiter_result),
+        name="close-waiter",
+    )
+    waiter.start()
+    assert waiter_waiting.wait(timeout=2)
+
+    def hold_lifecycle() -> None:
+        with transport._lifecycle:
+            holder_locked.set()
+            assert release_holder.wait(timeout=2)
+
+    holder = threading.Thread(target=hold_lifecycle)
+    holder.start()
+    assert holder_locked.wait(timeout=2)
+    fail_first_finish.set()
+    owner.join(timeout=0.4)
+    assert not owner.is_alive()
+
+    released_at = time.monotonic()
+    release_holder.set()
+    waiter.join(timeout=0.3)
+    holder.join(timeout=2)
+
+    assert not waiter.is_alive() and not holder.is_alive()
+    assert time.monotonic() - released_at < 0.3
+    assert len(owner_result) == 1 and isinstance(owner_result[0], RuntimeError)
+    assert waiter_result == [None]
+    assert finish_calls == 2
+
+
+def test_late_candidate_after_lifecycle_close_timeout_is_rejected(monkeypatch) -> None:
+    transport = SocketTransport(["127.0.0.1:9"], timeout=1, heartbeat_interval=None)
+    start_entered = threading.Event()
+    allow_start = threading.Event()
+    created: list[ActorRuntime] = []
+    result: list[object] = []
+    real_start_actor = socket_module.start_actor
+
+    def blocked_start(*args, **kwargs):
+        start_entered.set()
+        assert allow_start.wait(timeout=2)
+        runtime = real_start_actor(*args, **kwargs)
+        created.append(runtime)
+        return runtime
+
+    monkeypatch.setattr(socket_module, "start_actor", blocked_start)
+    starter = threading.Thread(
+        target=lambda: _capture_result(lambda: transport._ensure_runtime(time.monotonic() + 1), result)
+    )
+    starter.start()
+    assert start_entered.wait(timeout=2)
+
+    with pytest.raises(TransportCloseTimeoutError, match="startup did not finish"):
+        transport._close_with_timeout(0.05)
+    assert transport._close_failed and not transport._closing
+
+    allow_start.set()
+    starter.join(timeout=2)
+    assert not starter.is_alive()
+    assert len(result) == 1 and isinstance(result[0], ConnectionClosedError)
+    assert len(created) == 1
+    runtime = created[0]
+    assert runtime.stop_requested and runtime.stopped.is_set()
+    assert runtime.actor_thread is not None and not runtime.actor_thread.is_alive()
+    assert transport._runtime is runtime
+    assert runtime.state is RuntimeState.FAILED_CLOSED
+    with pytest.raises(ConnectionClosedError, match="FAILED_CLOSED"):
+        transport._ensure_runtime(time.monotonic() + 0.1)
+    transport.close()
+
+
+def test_pool_close_stops_actor_when_shutdown_condition_hits_deadline() -> None:
+    pool = PooledSocketTransport(["127.0.0.1:9"], pool_size=1, timeout=1, heartbeat_interval=None)
+    broker, _ = pool._ensure_started()
+    runtime = pool._transports[0]._ensure_runtime(
+        time.monotonic() + 1,
+        expected_runtime_epoch=broker.pool_epoch,
+    )
+    condition_held = threading.Event()
+    release_condition = threading.Event()
+
+    def hold_condition() -> None:
+        with pool._condition:
+            condition_held.set()
+            release_condition.wait(timeout=2)
+
+    holder = threading.Thread(target=hold_condition)
+    holder.start()
+    assert condition_held.wait(timeout=2)
+
+    started = time.monotonic()
+    try:
+        with pytest.raises(TransportCloseTimeoutError, match="shutdown claim"):
+            pool.close()
+        elapsed = time.monotonic() - started
+        assert elapsed < 1.25
+        assert runtime.stop_requested
+        assert runtime.stopped.wait(timeout=0.25)
+        assert pool._shutdown_failed.is_set()
+    finally:
+        release_condition.set()
+        holder.join(timeout=2)
+
+    assert not holder.is_alive()
+    assert pool.diagnostics.state is PoolState.FAILED_CLOSING
+    pool.close()
+    assert pool._state is PoolState.FAILED_CLOSED
+    assert runtime.actor_thread is not None and not runtime.actor_thread.is_alive()
+
+
+def test_pool_connect_condition_cleanup_obeys_request_deadline(monkeypatch) -> None:
+    pool = PooledSocketTransport(["127.0.0.1:9"], pool_size=1, timeout=0.1, heartbeat_interval=None)
+    task_entered = threading.Event()
+    release_task = threading.Event()
+    holder_ready = threading.Event()
+    release_holder = threading.Event()
+    connect_done = threading.Event()
+    results: list[object] = []
+
+    def fake_connect(**_kwargs) -> None:
+        task_entered.set()
+        assert release_task.wait(timeout=2)
+
+    monkeypatch.setattr(pool._transports[0], "_connect_with_deadline", fake_connect)
+
+    def connect() -> None:
+        try:
+            _capture_result(pool.connect, results)
+        finally:
+            connect_done.set()
+
+    connector = threading.Thread(target=connect)
+    started = time.monotonic()
+    connector.start()
+    assert task_entered.wait(timeout=2)
+
+    def hold_condition() -> None:
+        with pool._condition:
+            holder_ready.set()
+            assert release_holder.wait(timeout=2)
+
+    holder = threading.Thread(target=hold_condition)
+    holder.start()
+    assert holder_ready.wait(timeout=2)
+    release_task.set()
+    try:
+        assert connect_done.wait(timeout=0.35)
+        assert time.monotonic() - started < 0.35
+        assert len(results) == 1 and isinstance(results[0], TransportCloseTimeoutError)
+        assert pool._shutdown_failed.is_set()
+    finally:
+        release_holder.set()
+        release_task.set()
+        connector.join(timeout=2)
+        holder.join(timeout=2)
+
+    assert not connector.is_alive() and not holder.is_alive()
+    pool.close()
+    assert pool._state is PoolState.FAILED_CLOSED
+
+
+def test_pool_connect_does_not_wait_unbounded_for_done_callback(monkeypatch) -> None:
+    pool = PooledSocketTransport(["127.0.0.1:9"], pool_size=1, timeout=0.1, heartbeat_interval=None)
+    task_entered = threading.Event()
+    release_task = threading.Event()
+    wait_entered = threading.Event()
+    callback_entered = threading.Event()
+    callback_done = threading.Event()
+    release_callback = threading.Event()
+    connect_done = threading.Event()
+    results: list[object] = []
+    real_wait = pool_module.wait
+    real_terminal = pool._connect_future_terminal
+    wait_calls = 0
+
+    def fake_connect(**_kwargs) -> None:
+        task_entered.set()
+        assert release_task.wait(timeout=2)
+
+    def observed_wait(*args, **kwargs):
+        nonlocal wait_calls
+        wait_calls += 1
+        if wait_calls == 1:
+            wait_entered.set()
+        return real_wait(*args, **kwargs)
+
+    def blocked_callback(executor, **kwargs) -> None:
+        worker_callback = threading.current_thread().name.startswith("eltdx-pool-connect")
+        try:
+            if worker_callback:
+                callback_entered.set()
+                assert release_callback.wait(timeout=2)
+            real_terminal(executor, **kwargs)
+        finally:
+            if worker_callback:
+                callback_done.set()
+
+    monkeypatch.setattr(pool._transports[0], "_connect_with_deadline", fake_connect)
+    monkeypatch.setattr(pool_module, "wait", observed_wait)
+    monkeypatch.setattr(pool, "_connect_future_terminal", blocked_callback)
+
+    def connect() -> None:
+        try:
+            _capture_result(pool.connect, results)
+        finally:
+            connect_done.set()
+
+    connector = threading.Thread(target=connect)
+    started = time.monotonic()
+    connector.start()
+    assert task_entered.wait(timeout=2)
+    assert wait_entered.wait(timeout=2)
+    release_task.set()
+    assert callback_entered.wait(timeout=2)
+    try:
+        assert connect_done.wait(timeout=0.35)
+        assert time.monotonic() - started < 0.35
+        assert len(results) == 1 and isinstance(results[0], TransportCloseTimeoutError)
+        assert pool._shutdown_failed.is_set()
+    finally:
+        release_callback.set()
+        release_task.set()
+        connector.join(timeout=2)
+
+    assert not connector.is_alive()
+    assert callback_done.wait(timeout=2)
+    pool.close()
+    assert pool._state is PoolState.FAILED_CLOSED
+    assert pool._connect_executor is None
+    assert pool._connect_futures == ()
+    assert not any(
+        thread.name.startswith("eltdx-pool-connect") and thread.is_alive()
+        for thread in threading.enumerate()
+    )
+
+
+def test_socket_cached_endpoint_lifecycle_wait_obeys_request_deadline(monkeypatch) -> None:
+    transport = SocketTransport(["127.0.0.1:9"], timeout=0.05, heartbeat_interval=None)
+    transport._resolved_endpoints = socket_module.resolve_hosts(transport._hosts)
+    runtime = ActorRuntime(1, transport._resolved_endpoints)
+    monkeypatch.setattr(transport, "_ensure_runtime", lambda *_args, **_kwargs: runtime)
+    monkeypatch.setattr(transport, "_execute_with_lease", lambda *_args, **_kwargs: 123)
+    lifecycle_held = threading.Event()
+    release_lifecycle = threading.Event()
+
+    def hold_lifecycle() -> None:
+        with transport._lifecycle:
+            lifecycle_held.set()
+            release_lifecycle.wait(timeout=0.5)
+
+    holder = threading.Thread(target=hold_lifecycle)
+    holder.start()
+    assert lifecycle_held.wait(timeout=2)
+    started = time.monotonic()
+    try:
+        with pytest.raises(ResponseTimeoutError, match="endpoint preflight"):
+            transport.execute(TYPE_SECURITY_COUNT, {"market": "sz"})
+        assert time.monotonic() - started < 0.25
+    finally:
+        release_lifecycle.set()
+        holder.join(timeout=2)
+
+    assert not holder.is_alive()
+    transport.close()
+
+
+def test_pool_started_condition_wait_obeys_request_deadline(monkeypatch) -> None:
+    pool = PooledSocketTransport(["127.0.0.1:9"], pool_size=1, timeout=0.05, heartbeat_interval=None)
+    pool._ensure_started()
+    monkeypatch.setattr(pool._transports[0], "_execute_with_lease", lambda *_args, **_kwargs: 456)
+    condition_held = threading.Event()
+    release_condition = threading.Event()
+
+    def hold_condition() -> None:
+        with pool._condition:
+            condition_held.set()
+            release_condition.wait(timeout=0.5)
+
+    holder = threading.Thread(target=hold_condition)
+    holder.start()
+    assert condition_held.wait(timeout=2)
+    started = time.monotonic()
+    try:
+        with pytest.raises(ResponseTimeoutError):
+            pool.execute(TYPE_SECURITY_COUNT, {"market": "sz"})
+        assert time.monotonic() - started < 0.25
+    finally:
+        release_condition.set()
+        holder.join(timeout=2)
+
+    assert not holder.is_alive()
+    pool.close()
+
+
+def test_socket_runtime_lifecycle_stage_obeys_request_deadline(monkeypatch) -> None:
+    transport = SocketTransport(["127.0.0.1:9"], timeout=0.05, heartbeat_interval=None)
+    endpoints = socket_module.resolve_hosts(transport._hosts)
+    runtime = ActorRuntime(1, endpoints)
+    runtime.state = RuntimeState.RUNNING
+    runtime.started.set()
+    transport._resolved_endpoints = endpoints
+    transport._runtime = runtime
+    transport._push_buffer = PushBuffer(1)
+    transport._epoch = 1
+    first_preflight = threading.Event()
+    holder_ready = threading.Event()
+    release_holder = threading.Event()
+    preflight_calls = 0
+    real_preflight = transport._preflight_endpoints
+
+    def controlled_preflight(deadline=None):
+        nonlocal preflight_calls
+        preflight_calls += 1
+        if preflight_calls == 1:
+            result = real_preflight(deadline)
+            first_preflight.set()
+            assert holder_ready.wait(timeout=2)
+            return result
+        return endpoints, transport._close_generation, deadline
+
+    monkeypatch.setattr(transport, "_preflight_endpoints", controlled_preflight)
+    monkeypatch.setattr(transport, "_execute_with_lease", lambda *_args, **_kwargs: 999)
+
+    def hold_lifecycle() -> None:
+        assert first_preflight.wait(timeout=2)
+        with transport._lifecycle:
+            holder_ready.set()
+            assert release_holder.wait(timeout=0.5)
+
+    holder = threading.Thread(target=hold_lifecycle)
+    holder.start()
+    started = time.monotonic()
+    try:
+        with pytest.raises(ResponseTimeoutError, match="Actor startup"):
+            transport.execute(TYPE_SECURITY_COUNT, {"market": "sz"})
+        assert time.monotonic() - started < 0.25
+    finally:
+        release_holder.set()
+        holder.join(timeout=2)
+
+    assert not holder.is_alive()
+    transport.close()
+
+
+def test_socket_submission_gate_obeys_request_deadline(monkeypatch) -> None:
+    transport = SocketTransport(["127.0.0.1:9"], timeout=0.05, heartbeat_interval=None)
+    endpoints = socket_module.resolve_hosts(transport._hosts)
+    runtime = ActorRuntime(1, endpoints)
+    runtime.state = RuntimeState.RUNNING
+    runtime.started.set()
+    transport._resolved_endpoints = endpoints
+    transport._runtime = runtime
+    transport._push_buffer = PushBuffer(1)
+    transport._epoch = 1
+    assert transport._submission_gate.acquire(timeout=1)
+    started = time.monotonic()
+    try:
+        with pytest.raises(ResponseTimeoutError, match="request submission"):
+            transport.execute(TYPE_SECURITY_COUNT, {"market": "sz"})
+        assert time.monotonic() - started < 0.25
+        assert runtime.pending_task is None and runtime.request_id_counter == 0
+        assert transport._request_lock.acquire(timeout=0.1)
+        transport._request_lock.release()
+    finally:
+        transport._submission_gate.release()
+    transport.close()
+
+
+def test_actor_control_lock_submission_obeys_request_deadline() -> None:
+    transport = SocketTransport(["127.0.0.1:9"], timeout=0.05, heartbeat_interval=None)
+    endpoints = socket_module.resolve_hosts(transport._hosts)
+    runtime = ActorRuntime(1, endpoints)
+    runtime.state = RuntimeState.RUNNING
+    runtime.started.set()
+    transport._resolved_endpoints = endpoints
+    transport._runtime = runtime
+    transport._push_buffer = PushBuffer(1)
+    transport._epoch = 1
+    control_held = threading.Event()
+    release_control = threading.Event()
+
+    def hold_control() -> None:
+        with runtime.control_lock:
+            control_held.set()
+            release_control.wait(timeout=0.5)
+
+    holder = threading.Thread(target=hold_control)
+    holder.start()
+    assert control_held.wait(timeout=2)
+    started = time.monotonic()
+    try:
+        with pytest.raises(ResponseTimeoutError, match="Actor request submission"):
+            transport.execute(TYPE_SECURITY_COUNT, {"market": "sz"})
+        assert time.monotonic() - started < 0.25
+        assert runtime.pending_task is None and runtime.request_id_counter == 0
+        assert transport._request_lock.acquire(timeout=0.1)
+        transport._request_lock.release()
+    finally:
+        release_control.set()
+        holder.join(timeout=2)
+
+    assert not holder.is_alive()
+    transport.close()
+
+
+def test_unpublished_candidate_cleanup_failure_remains_owned_and_retryable(monkeypatch) -> None:
+    buffers: list[PushBuffer] = []
+
+    class RetryPushBuffer(PushBuffer):
+        def __init__(self, owner_epoch, **kwargs) -> None:
+            super().__init__(owner_epoch, **kwargs)
+            self.allow_close = False
+
+        def close(self, error=None) -> None:
+            if not self.allow_close:
+                raise RuntimeError("unpublished push cleanup injection")
+            super().close(error)
+
+    real_push = socket_module.PushBuffer
+
+    def make_push(*args, **kwargs):
+        push = RetryPushBuffer(*args, **kwargs)
+        buffers.append(push)
+        return push
+
+    monkeypatch.setattr(socket_module, "PushBuffer", make_push)
+    transport = SocketTransport(["127.0.0.1:9"], timeout=0.08, heartbeat_interval=None)
+    callback_entered = threading.Event()
+    holder_ready = threading.Event()
+    release_holder = threading.Event()
+    result: list[object] = []
+    real_own = transport._own_candidate
+
+    def gated_own(runtime, registration, **kwargs) -> None:
+        callback_entered.set()
+        assert holder_ready.wait(timeout=2)
+        real_own(runtime, registration, **kwargs)
+
+    monkeypatch.setattr(transport, "_own_candidate", gated_own)
+
+    def hold_lifecycle() -> None:
+        assert callback_entered.wait(timeout=2)
+        with transport._lifecycle:
+            holder_ready.set()
+            release_holder.wait(timeout=0.5)
+
+    holder = threading.Thread(target=hold_lifecycle)
+    holder.start()
+    starter = threading.Thread(
+        target=lambda: _capture_result(lambda: transport._ensure_runtime(time.monotonic() + 0.08), result)
+    )
+    starter.start()
+    assert callback_entered.wait(timeout=2)
+    starter.join(timeout=0.3)
+    try:
+        assert not starter.is_alive()
+        assert len(result) == 1 and isinstance(result[0], ActorStartupError)
+        candidate = transport._unpublished_candidate
+        assert candidate is not None and candidate is result[0].runtime
+        assert isinstance(candidate.cleanup_error, RuntimeError)
+        assert buffers and not buffers[0].snapshot().closed
+    finally:
+        release_holder.set()
+        holder.join(timeout=2)
+
+    with pytest.raises(TransportCloseTimeoutError, match="resource cleanup failed"):
+        transport.close()
+    assert transport._runtime is candidate or transport._unpublished_candidate is candidate
+
+    buffers[0].allow_close = True
+    transport.close()
+    assert buffers[0].snapshot().closed
+    assert transport._unpublished_candidate is None
+    assert transport._runtime is candidate
+    assert candidate.state is RuntimeState.FAILED_CLOSED
+    assert candidate.cleanup_error is None
+    monkeypatch.setattr(socket_module, "PushBuffer", real_push)
+
+
+def test_close_owner_abort_stops_exact_unpublished_candidate(monkeypatch) -> None:
+    transport = SocketTransport(["127.0.0.1:9"], timeout=1, heartbeat_interval=None)
+    candidate = ActorRuntime(4, ())
+    transport._unpublished_candidate = candidate
+    real_notify = transport._lifecycle.notify_all
+    calls = 0
+
+    def fail_first_notify() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("close publication injection")
+        real_notify()
+
+    monkeypatch.setattr(transport._lifecycle, "notify_all", fail_first_notify)
+    with pytest.raises(RuntimeError, match="close publication injection"):
+        transport.close()
+
+    assert candidate.stop_requested
+    assert candidate.state is RuntimeState.FAILED_CLOSING
+    assert transport._unpublished_candidate is candidate
+    assert not transport._closing
+
+    transport.close()
+    assert candidate.state is RuntimeState.FAILED_CLOSED
+    assert transport._runtime is candidate
+    assert transport._unpublished_candidate is None
+
+
+def test_pool_startup_attempt_survives_deadline_cleanup_locks(monkeypatch) -> None:
+    pool = PooledSocketTransport(["127.0.0.1:9"], pool_size=1, timeout=0.08, heartbeat_interval=None)
+    slot = pool._transports[0]
+    configured = threading.Event()
+    allow_configure = threading.Event()
+    result: list[object] = []
+    original_configure = slot._configure_pool_runtime
+
+    def gated_configure(**kwargs) -> None:
+        original_configure(**kwargs)
+        configured.set()
+        assert allow_configure.wait(timeout=2)
+
+    monkeypatch.setattr(slot, "_configure_pool_runtime", gated_configure)
+    worker = threading.Thread(
+        target=lambda: _capture_result(
+            lambda: pool.execute(TYPE_SECURITY_COUNT, {"market": "sz"}),
+            result,
+        )
+    )
+    worker.start()
+    assert configured.wait(timeout=2)
+    assert pool._condition.acquire(timeout=1)
+    assert slot._submission_gate.acquire(timeout=1)
+    allow_configure.set()
+    try:
+        worker.join(timeout=0.3)
+        assert not worker.is_alive()
+        assert len(result) == 1 and isinstance(result[0], BaseException)
+        attempt = pool._startup_attempt
+        assert attempt is not None
+        assert attempt.broker is not None and attempt.push_buffer is not None
+        assert len(attempt.configured) == 1
+    finally:
+        slot._submission_gate.release()
+        pool._condition.release()
+        worker.join(timeout=2)
+
+    pool.close()
+    assert pool._state is PoolState.FAILED_CLOSED
+    assert pool._startup_attempt is None
+    assert pool._runtime_guard._state is pool_module.GuardState.INACTIVE
+    assert slot._fixed_runtime_epoch is None
+    assert slot._shared_push_buffer is None
+    assert slot._runtime_started_callback is None
+
+
+def test_never_started_pool_close_timeout_retries_to_failed_closed() -> None:
+    pool = PooledSocketTransport(["127.0.0.1:9"], pool_size=1, timeout=1, heartbeat_interval=None)
+    condition_held = threading.Event()
+    release_condition = threading.Event()
+
+    def hold_condition() -> None:
+        with pool._condition:
+            condition_held.set()
+            release_condition.wait(timeout=1.5)
+
+    holder = threading.Thread(target=hold_condition)
+    holder.start()
+    assert condition_held.wait(timeout=2)
+    try:
+        with pytest.raises(TransportCloseTimeoutError, match="shutdown claim"):
+            pool.close()
+        assert pool._shutdown_failed.is_set()
+    finally:
+        release_condition.set()
+        holder.join(timeout=2)
+
+    pool.close()
+    assert pool._state is PoolState.FAILED_CLOSED
+
+
+def test_normal_pool_close_rotates_failure_event_before_stale_cleanup() -> None:
+    pool = PooledSocketTransport(["127.0.0.1:9"], pool_size=1, timeout=1, heartbeat_interval=None)
+    pool._ensure_started()
+    old_failure = pool._shutdown_failed
+    old_retire = pool._epoch_retire_event
+    assert old_retire is not None
+    pool.close()
+    current_failure = pool._shutdown_failed
+
+    old_failure.set()
+    old_retire.set()
+    new_broker, _ = pool._ensure_started()
+
+    assert current_failure is not old_failure
+    assert not current_failure.is_set()
+    assert pool._state is PoolState.RUNNING
+    assert pool._broker is new_broker
+    pool.close()
+
+
+def test_successful_connect_cannot_return_after_pool_close(monkeypatch) -> None:
+    pool = PooledSocketTransport(["127.0.0.1:9"], pool_size=1, timeout=1, heartbeat_interval=None)
+    wait_return_ready = threading.Event()
+    allow_wait_return = threading.Event()
+    result: list[object] = []
+    real_wait = pool_module.wait
+    wait_calls = 0
+
+    monkeypatch.setattr(pool._transports[0], "_connect_with_deadline", lambda **_kwargs: None)
+
+    def gated_wait(*args, **kwargs):
+        nonlocal wait_calls
+        value = real_wait(*args, **kwargs)
+        wait_calls += 1
+        if wait_calls == 1:
+            wait_return_ready.set()
+            assert allow_wait_return.wait(timeout=2)
+        return value
+
+    monkeypatch.setattr(pool_module, "wait", gated_wait)
+    connector = threading.Thread(target=lambda: _capture_result(pool.connect, result))
+    connector.start()
+    assert wait_return_ready.wait(timeout=2)
+
+    pool.close()
+    assert pool._state is PoolState.STOPPED
+    allow_wait_return.set()
+    connector.join(timeout=2)
+
+    assert not connector.is_alive()
+    assert len(result) == 1 and isinstance(result[0], ConnectionClosedError)
+
+
+def test_connect_shutdown_claim_error_fails_exact_epoch_closed(monkeypatch) -> None:
+    pool = PooledSocketTransport(["127.0.0.1:9"], pool_size=1, timeout=0.2, heartbeat_interval=None)
+    original_claim = pool._claim_shutdown_attempt
+
+    def failed_connect(**_kwargs) -> None:
+        raise ConnectionClosedError("connect failed")
+
+    def fail_expected_claim(**kwargs):
+        if kwargs.get("expected_broker") is not None:
+            raise TransportCloseTimeoutError("claim injection")
+        return original_claim(**kwargs)
+
+    monkeypatch.setattr(pool._transports[0], "_connect_with_deadline", failed_connect)
+    monkeypatch.setattr(pool, "_claim_shutdown_attempt", fail_expected_claim)
+
+    with pytest.raises(TransportCloseTimeoutError, match="claim injection"):
+        pool.connect()
+
+    assert pool._shutdown_failed.is_set()
+    assert pool._epoch_retire_event is not None and pool._epoch_retire_event.is_set()
+    with pytest.raises(ConnectionClosedError, match="FAILED_CLOSING"):
+        pool._ensure_started()
+    pool.close()
+    assert pool._state is PoolState.FAILED_CLOSED
+
+
+def test_multislot_startup_attempt_cleans_post_config_failure(monkeypatch) -> None:
+    pool = PooledSocketTransport(["127.0.0.1:9"], pool_size=2, timeout=0.08, heartbeat_interval=None)
+    second = pool._transports[1]
+    configured = threading.Event()
+    allow_failure = threading.Event()
+    result: list[object] = []
+    original_configure = second._configure_pool_runtime
+
+    def fail_after_configure(**kwargs) -> None:
+        original_configure(**kwargs)
+        configured.set()
+        assert allow_failure.wait(timeout=2)
+        raise RuntimeError("post-config injection")
+
+    monkeypatch.setattr(second, "_configure_pool_runtime", fail_after_configure)
+    worker = threading.Thread(
+        target=lambda: _capture_result(
+            lambda: pool.execute(TYPE_SECURITY_COUNT, {"market": "sz"}),
+            result,
+        )
+    )
+    worker.start()
+    assert configured.wait(timeout=2)
+    assert second._submission_gate.acquire(timeout=1)
+    allow_failure.set()
+    worker.join(timeout=0.3)
+    try:
+        assert not worker.is_alive()
+        assert len(result) == 1 and isinstance(result[0], RuntimeError)
+        assert pool._startup_attempt is not None
+        assert len(pool._startup_attempt.configured) == 2
+    finally:
+        second._submission_gate.release()
+        worker.join(timeout=2)
+
+    try:
+        pool.close()
+    except BaseException:
+        pass
+    pool.close()
+
+    assert pool._state is PoolState.FAILED_CLOSED
+    assert pool._startup_attempt is None
+    assert pool._runtime_guard._state is pool_module.GuardState.INACTIVE
+    for slot in pool._transports:
+        assert slot._fixed_runtime_epoch is None
+        assert slot._shared_push_buffer is None
+        assert slot._runtime_started_callback is None
+
+
+def test_stale_fatal_timeout_cannot_retire_reconfigured_guard() -> None:
+    guard = PoolRuntimeGuard()
+    old_broker = LeaseBroker(1, pool_size=1, max_pending_requests=1)
+    old_retire = threading.Event()
+    guard.configure(old_broker, PushBuffer(1), retire_event=old_retire)
+    old_handle = pool_module.ActorFatalHandle(
+        weakref.ref(guard),
+        1,
+        weakref.ref(old_broker),
+        old_retire,
+    )
+    guard.seal(pool_epoch=1, broker=old_broker)
+    guard.finish_epoch(pool_epoch=1, broker=old_broker)
+
+    new_broker = LeaseBroker(2, pool_size=1, max_pending_requests=1)
+    new_retire = threading.Event()
+    guard.configure(new_broker, PushBuffer(2), retire_event=new_retire)
+    runtime = ActorRuntime(1, ())
+    lock_held = threading.Event()
+    release_lock = threading.Event()
+    results: list[object] = []
+    error = ResponseTimeoutError("stale fatal")
+    error._eltdx_deadline = time.monotonic() + 0.05  # type: ignore[attr-defined]
+
+    def hold_guard() -> None:
+        with guard._lock:
+            lock_held.set()
+            release_lock.wait(timeout=0.5)
+
+    holder = threading.Thread(target=hold_guard)
+    holder.start()
+    assert lock_held.wait(timeout=2)
+    caller = threading.Thread(target=lambda: _capture_result(lambda: old_handle(runtime, error), results))
+    caller.start()
+    caller.join(timeout=0.2)
+    try:
+        assert not caller.is_alive()
+        assert len(results) == 1 and isinstance(results[0], ResponseTimeoutError)
+        assert old_retire.is_set()
+        assert not new_retire.is_set()
+    finally:
+        release_lock.set()
+        holder.join(timeout=2)
+        caller.join(timeout=2)
+
+    assert guard.is_active(pool_epoch=2, broker=new_broker)
+
+
+def test_push_cleanup_error_does_not_skip_actor_close(monkeypatch) -> None:
+    transport = SocketTransport(["127.0.0.1:9"], timeout=1, heartbeat_interval=None)
+    push_buffer = PushBuffer(9)
+    runtime = ActorRuntime(9, (), push_buffer=push_buffer)
+    runtime.state = RuntimeState.STOPPED
+    runtime.stopped.set()
+    with transport._lifecycle:
+        transport._runtime = runtime
+        transport._push_buffer = push_buffer
+    closed: list[ActorRuntime] = []
+
+    def fail_push_cleanup(*_args, **_kwargs) -> None:
+        raise RuntimeError("push cleanup publication injection")
+
+    monkeypatch.setattr(socket_module, "_clear_resolved_push_cleanup", fail_push_cleanup)
+    monkeypatch.setattr(socket_module, "close_actor", lambda item, timeout: closed.append(item))
+
+    with pytest.raises(RuntimeError, match="push cleanup publication injection"):
+        transport._close_with_timeout(0.1)
+
+    assert closed == [runtime]
+
+
+def test_pool_runtime_fatal_cleanup_is_best_effort_after_broker_deadline() -> None:
+    broker = LeaseBroker(1, pool_size=2, max_pending_requests=2)
+    push = PushBuffer(1)
+    guard = PoolRuntimeGuard()
+    guard.configure(broker, push)
+    failed = ActorRuntime(1, ())
+    sibling = ActorRuntime(1, ())
+    assert guard.add_runtime(failed, pool_epoch=1, broker=broker)
+    assert guard.add_runtime(sibling, pool_epoch=1, broker=broker)
+    condition_held = threading.Event()
+    release_condition = threading.Event()
+
+    def hold_condition() -> None:
+        with broker._condition:
+            condition_held.set()
+            release_condition.wait()
+
+    holder = threading.Thread(target=hold_condition)
+    holder.start()
+    assert condition_held.wait(timeout=2)
+    try:
+        guard.fail(
+            failed,
+            RuntimeError("fatal"),
+            pool_epoch=1,
+            broker=broker,
+            deadline=time.monotonic() + 0.03,
+        )
+    finally:
+        release_condition.set()
+        holder.join(timeout=2)
+
+    assert push.snapshot().closed
+    assert failed.stop_requested and sibling.stop_requested
+
+
+def test_pool_runtime_abandon_attempts_every_cleanup_stage(monkeypatch) -> None:
+    broker = LeaseBroker(1, pool_size=2, max_pending_requests=2)
+    push = PushBuffer(1)
+    guard = PoolRuntimeGuard()
+    guard.configure(broker, push)
+    first = ActorRuntime(1, ())
+    second = ActorRuntime(1, ())
+    assert guard.add_runtime(first, pool_epoch=1, broker=broker)
+    assert guard.add_runtime(second, pool_epoch=1, broker=broker)
+    original_stop = pool_module.request_actor_stop
+
+    monkeypatch.setattr(broker, "close", lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("broker close")))
+
+    def stop(runtime, **kwargs) -> None:
+        original_stop(runtime, **kwargs)
+        if runtime is first:
+            raise RuntimeError("first stop")
+
+    monkeypatch.setattr(pool_module, "request_actor_stop", stop)
+    guard.abandon()
+
+    assert push.snapshot().closed
+    assert first.stop_requested and second.stop_requested
+
+
+def test_standalone_abandon_is_nonblocking_under_control_contention() -> None:
+    runtime = actor_module.start_actor(901, ())
+    assert runtime.control_lock.acquire(timeout=1)
+    done = threading.Event()
+    thread = threading.Thread(target=lambda: (actor_module.abandon_actor(runtime), done.set()))
+    thread.start()
+    try:
+        assert done.wait(timeout=0.08)
+        assert runtime.stop_requested
+    finally:
+        runtime.control_lock.release()
+        thread.join(timeout=2)
+    assert runtime.stopped.wait(timeout=2)
+    assert runtime.actor_thread is not None and not runtime.actor_thread.is_alive()
+
+
+def test_pool_abandon_is_nonblocking_under_broker_contention() -> None:
+    broker = LeaseBroker(1, pool_size=1, max_pending_requests=1)
+    push = PushBuffer(1)
+    guard = PoolRuntimeGuard()
+    guard.configure(broker, push)
+    runtime = actor_module.start_actor(1, ())
+    assert guard.add_runtime(runtime, pool_epoch=1, broker=broker)
+    assert broker._condition.acquire(timeout=1)
+    assert runtime.control_lock.acquire(timeout=1)
+    done = threading.Event()
+    thread = threading.Thread(target=lambda: (guard.abandon(), done.set()))
+    thread.start()
+    try:
+        assert done.wait(timeout=0.08)
+    finally:
+        runtime.control_lock.release()
+        broker._condition.release()
+        thread.join(timeout=2)
+    assert broker.snapshot().closed
+    assert runtime.stop_requested
+    assert runtime.stopped.wait(timeout=2)
+    assert runtime.actor_thread is not None and not runtime.actor_thread.is_alive()
+
+
+def test_pool_fatal_deadline_error_does_not_poison_actor_cleanup() -> None:
+    broker = LeaseBroker(1, pool_size=1, max_pending_requests=1)
+    push = PushBuffer(1)
+    retire = threading.Event()
+    guard = PoolRuntimeGuard()
+    guard.configure(broker, push, retire_event=retire)
+    handle = pool_module.ActorFatalHandle(weakref.ref(guard), 1, weakref.ref(broker), retire)
+    runtime = ActorRuntime(1, (), fatal_callback=handle)
+    error = RuntimeError("startup fatal")
+    error._eltdx_deadline = time.monotonic() + 0.03  # type: ignore[attr-defined]
+    condition_held = threading.Event()
+    release_condition = threading.Event()
+
+    def hold_condition() -> None:
+        with broker._condition:
+            condition_held.set()
+            release_condition.wait()
+
+    holder = threading.Thread(target=hold_condition)
+    holder.start()
+    assert condition_held.wait(timeout=2)
+    try:
+        actor_module._fail_actor_startup(runtime, error)
+    finally:
+        release_condition.set()
+        holder.join(timeout=2)
+
+    assert runtime.cleanup_error is None
+    assert runtime.stopped.is_set() and runtime.stop_requested
+    assert push.snapshot().closed
+    actor_module.close_actor(runtime)
+    assert runtime.state is RuntimeState.FAILED_CLOSED
+
+
+def test_standalone_close_interrupt_releases_submission_gate_owner() -> None:
+    class InterruptAfterClaimGate(socket_module._RequestGate):
+        def __init__(self) -> None:
+            super().__init__()
+            self.interrupted = False
+
+        def acquire_token(self, token: object, deadline: float | None) -> bool:
+            acquired = super().acquire_token(token, deadline)
+            if acquired and not self.interrupted:
+                self.interrupted = True
+                raise KeyboardInterrupt
+            return acquired
+
+    transport = SocketTransport(["127.0.0.1:9"], timeout=1, heartbeat_interval=None)
+    gate = InterruptAfterClaimGate()
+    transport._submission_gate = gate
+
+    with pytest.raises(KeyboardInterrupt):
+        transport.close()
+
+    assert gate.acquire(blocking=False)
+    gate.release()
+    transport.close()

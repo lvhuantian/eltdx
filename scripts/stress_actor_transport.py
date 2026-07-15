@@ -298,7 +298,7 @@ class StressServer:
                                 self.push_frames += 1
                         wire = _response(msg_id, msg_type, payload)
                         if msg_type == TYPE_FILE_CONTENT and self.poison_every and sequence % self.poison_every == 0:
-                            wire += _response((msg_id + 1) & 0xFFFFFFFF, msg_type, payload)
+                            wire += _response(msg_id, msg_type, payload)
                             with self._condition:
                                 self.push_frames += 1
                         conn.sendall(wire)

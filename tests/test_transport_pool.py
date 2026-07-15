@@ -200,7 +200,7 @@ def test_partial_pool_connect_failure_stops_and_closes_every_slot(monkeypatch) -
             )
         else:
             monkeypatch.setattr(transport, "_connect_with_deadline", lambda **kwargs: None)
-        monkeypatch.setattr(transport, "_request_stop", lambda index=index: stopped.append(index))
+        monkeypatch.setattr(transport, "_request_stop", lambda index=index, **_kwargs: stopped.append(index))
         monkeypatch.setattr(transport, "_close_with_timeout", lambda timeout, index=index: closed.append(index))
 
     with pytest.raises(ConnectionClosedError, match="slot failed"):

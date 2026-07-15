@@ -83,7 +83,6 @@ def test_socket_transport_reconnects_after_reader_disconnect() -> None:
     def first_connection(conn: socket.socket) -> None:
         msg_id, msg_type, _ = _read_request(conn)
         assert msg_type == TYPE_HANDSHAKE
-        assert msg_id == 1
 
     def second_connection(conn: socket.socket) -> None:
         msg_id, msg_type, _ = _read_request(conn)

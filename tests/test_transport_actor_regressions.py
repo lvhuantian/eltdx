@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import errno
+import inspect
+import socket
+import sys
 import threading
 import time
+from collections import deque
 
 import pytest
 
 from actor_support import Scripted7709Server, handshake_payload, read_request, response_bytes
-from eltdx.exceptions import ProtocolError, ResponseTimeoutError, UnsupportedCommandError
+from eltdx.exceptions import ConnectionClosedError, ProtocolError, ResponseTimeoutError, UnsupportedCommandError
 from eltdx.hosts import resolve_hosts
 from eltdx.protocol.commands import parse_command_response
 from eltdx.protocol.constants import TYPE_HANDSHAKE, TYPE_SECURITY_COUNT, TYPE_SECURITY_LIST
@@ -18,6 +23,7 @@ from eltdx.transport.actor import (
     cancel_ticket,
     close_actor,
     start_actor,
+    submit_connect,
     submit_request,
     wait_ticket,
 )
@@ -31,11 +37,28 @@ def _count(envelope: FrameEnvelope) -> int:
     return parse_command_response(envelope.command, envelope.response, envelope.request_payload_snapshot)
 
 
+def test_message_ids_are_keyed_nonrepeating_exchange_tokens() -> None:
+    runtime = actor_module.ActorRuntime(1, ())
+    runtime.msg_id_key = bytes(range(16))
+
+    message_ids = [actor_module._next_message_id(runtime) for _ in range(10_000)]
+
+    assert len(set(message_ids)) == len(message_ids)
+    assert message_ids[:3] == [394095216, 979823185, 424604770]
+    assert all(right != (left + 1) & 0xFFFFFFFF for left, right in zip(message_ids, message_ids[1:]))
+
+    zero_preimage = actor_module.ActorRuntime(1, ())
+    zero_preimage.msg_id_key = bytes(range(16))
+    zero_preimage.msg_id_counter = 1_765_785_446
+    assert actor_module._next_message_id(zero_preimage) != 0
+
+
 def test_old_decoded_batch_cannot_complete_next_request_after_64_frame_budget() -> None:
     b_received = threading.Event()
     release_server = threading.Event()
     b_created = threading.Event()
     b_tickets = []
+    future_ids: list[int] = []
 
     def handler(conn) -> None:
         msg_id, msg_type, _ = read_request(conn)
@@ -43,7 +66,7 @@ def test_old_decoded_batch_cannot_complete_next_request_after_64_frame_budget() 
         conn.sendall(response_bytes(msg_id, msg_type, handshake_payload()))
 
         a_msg_id, msg_type, _ = read_request(conn)
-        b_msg_id = a_msg_id + 1
+        b_msg_id = future_ids[0]
         batch = [response_bytes(a_msg_id, msg_type, (111).to_bytes(2, "little"))]
         batch.extend(
             response_bytes(10_000 + index, msg_type, index.to_bytes(2, "little"))
@@ -60,6 +83,7 @@ def test_old_decoded_batch_cannot_complete_next_request_after_64_frame_budget() 
     push_buffer = PushBuffer(101, max_frames=128)
     with Scripted7709Server([handler]) as server:
         runtime = start_actor(101, resolve_hosts([server.host]), push_buffer=push_buffer)
+        future_ids.append(actor_module._message_id_for_counter(runtime, 3))
 
         def submit_b(_ticket) -> None:
             b_tickets.append(
@@ -101,11 +125,12 @@ def test_old_decoded_batch_cannot_complete_next_request_after_64_frame_budget() 
 def test_handshake_batch_tail_cannot_complete_business_exchange() -> None:
     request_received = threading.Event()
     release_server = threading.Event()
+    future_ids: list[int] = []
 
     def handler(conn) -> None:
         handshake_id, handshake_type, _ = read_request(conn)
         assert handshake_type == TYPE_HANDSHAKE
-        business_id = handshake_id + 1
+        business_id = future_ids[0]
         conn.sendall(
             response_bytes(handshake_id, handshake_type, handshake_payload())
             + response_bytes(business_id, TYPE_SECURITY_COUNT, (999).to_bytes(2, "little"))
@@ -117,6 +142,7 @@ def test_handshake_batch_tail_cannot_complete_business_exchange() -> None:
 
     with Scripted7709Server([handler]) as server:
         runtime = start_actor(102, resolve_hosts([server.host]))
+        future_ids.append(actor_module._message_id_for_counter(runtime, 2))
         try:
             ticket = submit_request(
                 runtime,
@@ -141,6 +167,7 @@ def test_partial_handshake_batch_tail_is_classified_before_business(monkeypatch)
     request_received = threading.Event()
     release_server = threading.Event()
     original_feed = actor_module.ResponseFrameDecoder.feed
+    future_ids: list[int] = []
 
     def observed_feed(decoder, data):
         frames = original_feed(decoder, data)
@@ -152,7 +179,7 @@ def test_partial_handshake_batch_tail_is_classified_before_business(monkeypatch)
 
     def handler(conn) -> None:
         handshake_id, handshake_type, _ = read_request(conn)
-        business_id = handshake_id + 1
+        business_id = future_ids[0]
         collision = response_bytes(business_id, TYPE_SECURITY_COUNT, (999).to_bytes(2, "little"))
         conn.sendall(response_bytes(handshake_id, handshake_type, handshake_payload()) + collision[:8])
         assert send_tail.wait(timeout=2)
@@ -164,6 +191,7 @@ def test_partial_handshake_batch_tail_is_classified_before_business(monkeypatch)
 
     with Scripted7709Server([handler]) as server:
         runtime = start_actor(105, resolve_hosts([server.host]))
+        future_ids.append(actor_module._message_id_for_counter(runtime, 2))
         try:
             ticket = submit_request(
                 runtime,
@@ -332,6 +360,7 @@ def test_response_requires_new_receive_identity_and_complete_send(
         TYPE_SECURITY_COUNT,
         b"abc",
         False,
+        sent_any=True,
         rx_boundary=rx_boundary,
     )
     runtime = actor_module.ActorRuntime(1, (endpoint,))
@@ -341,12 +370,274 @@ def test_response_requires_new_receive_identity_and_complete_send(
     actor_module._route_frame(
         runtime,
         generation,
-        actor_module.ReceivedFrame(rx_sequence, decode_response(raw)),
+        actor_module.ReceivedFrame(
+            rx_sequence,
+            decode_response(raw),
+            exchange_id=generation.active_exchange.exchange_id,
+            send_complete=tx_offset == len(generation.tx_bytes),
+        ),
     )
 
     assert not ticket.completed.is_set()
     assert runtime.active_task is ticket
     assert runtime.stale_event_count == 1
+
+
+class ReadablePartialSocket:
+    def __init__(self, recv_outcomes: list[bytes | BaseException]) -> None:
+        self.recv_outcomes = recv_outcomes
+        self.send_calls = 0
+        self.closed = False
+
+    def recv(self, _size: int) -> bytes:
+        outcome = self.recv_outcomes.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    def send(self, data) -> int:
+        self.send_calls += 1
+        return len(data)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class RecordingInterestSelector:
+    def __init__(self) -> None:
+        self.events: list[int] = []
+
+    def modify(self, _sock, events: int, _token) -> None:
+        self.events.append(events)
+
+    def unregister(self, _sock) -> None:
+        return None
+
+
+def _partial_exchange_runtime(
+    recv_outcomes: list[bytes | BaseException],
+) -> tuple[actor_module.ActorRuntime, actor_module.TcpGeneration, actor_module.RequestTicket, ReadablePartialSocket]:
+    endpoint = resolve_hosts(["127.0.0.1:9"])[0]
+    ticket = actor_module.RequestTicket(
+        1,
+        1,
+        TYPE_SECURITY_COUNT,
+        {"market": "sz"},
+        time.monotonic() + 1,
+        False,
+        request_id=1,
+    )
+    ticket.state = actor_module.RequestState.SENDING
+    sock = ReadablePartialSocket(recv_outcomes)
+    generation = actor_module.TcpGeneration(1, sock, endpoint, actor_module.TcpState.READY)
+    generation.tx_bytes = b"abc"
+    generation.tx_offset = 1
+    generation.selector_events = actor_module.selectors.EVENT_READ | actor_module.selectors.EVENT_WRITE
+    generation.active_exchange = actor_module.WireExchange(
+        ticket,
+        TYPE_SECURITY_COUNT,
+        7,
+        TYPE_SECURITY_COUNT,
+        b"abc",
+        False,
+        sent_any=True,
+    )
+    runtime = actor_module.ActorRuntime(1, (endpoint,), push_buffer=PushBuffer(1, max_frames=128))
+    runtime.selector = RecordingInterestSelector()
+    runtime.active_task = ticket
+    runtime.generation = generation
+    return runtime, generation, ticket, sock
+
+
+def test_presend_read_batch_over_64_is_classified_before_write_without_starvation() -> None:
+    old_frames = [
+        response_bytes(10_000 + index, TYPE_SECURITY_COUNT, index.to_bytes(2, "little"))
+        for index in range(64)
+    ]
+    collision = response_bytes(7, TYPE_SECURITY_COUNT, (999).to_bytes(2, "little"))
+    runtime, generation, ticket, sock = _partial_exchange_runtime(
+        [b"".join(old_frames) + collision, BlockingIOError()]
+    )
+    token = actor_module.SelectorToken("tcp", 1, 1, sock)
+
+    actor_module._handle_tcp_event(
+        runtime,
+        token,
+        actor_module.selectors.EVENT_READ | actor_module.selectors.EVENT_WRITE,
+    )
+
+    assert sock.send_calls == 0
+    assert not ticket.completed.is_set()
+    assert len(generation.decoded_frames) == 1
+
+    actor_module._receive_generation_safely(runtime, generation)
+    pushed = runtime.push_buffer.drain()
+    assert any(int.from_bytes(item.response.data[:2], "little") == 999 for item in pushed)
+    assert not ticket.completed.is_set()
+
+    actor_module._handle_tcp_event(runtime, token, actor_module.selectors.EVENT_WRITE)
+    assert sock.send_calls == 1
+    real = response_bytes(7, TYPE_SECURITY_COUNT, (777).to_bytes(2, "little"))
+    sock.recv_outcomes.extend((real, BlockingIOError()))
+    actor_module._handle_tcp_event(runtime, token, actor_module.selectors.EVENT_READ)
+    assert _count(wait_ticket(ticket)) == 777
+
+
+def test_partial_collision_write_only_between_head_and_tail_cannot_match() -> None:
+    collision = response_bytes(7, TYPE_SECURITY_COUNT, (999).to_bytes(2, "little"))
+    runtime, generation, ticket, sock = _partial_exchange_runtime(
+        [collision[:8], BlockingIOError(), collision[8:], BlockingIOError()]
+    )
+    token = actor_module.SelectorToken("tcp", 1, 1, sock)
+
+    actor_module._handle_tcp_event(
+        runtime,
+        token,
+        actor_module.selectors.EVENT_READ | actor_module.selectors.EVENT_WRITE,
+    )
+    assert sock.send_calls == 0
+    assert generation.decoder.buffered_bytes == 8
+
+    actor_module._handle_tcp_event(runtime, token, actor_module.selectors.EVENT_WRITE)
+    assert sock.send_calls == 0
+    assert generation.decoder.buffered_bytes == 8
+
+    actor_module._handle_tcp_event(
+        runtime,
+        token,
+        actor_module.selectors.EVENT_READ | actor_module.selectors.EVENT_WRITE,
+    )
+    assert sock.send_calls == 1
+    assert not ticket.completed.is_set()
+    pushed = runtime.push_buffer.drain()
+    assert [int.from_bytes(item.response.data[:2], "little") for item in pushed] == [999]
+
+    real = response_bytes(7, TYPE_SECURITY_COUNT, (777).to_bytes(2, "little"))
+    sock.recv_outcomes.extend((real, BlockingIOError()))
+    actor_module._handle_tcp_event(runtime, token, actor_module.selectors.EVENT_READ)
+    assert _count(wait_ticket(ticket)) == 777
+
+
+def test_presend_drain_crossing_deadline_does_not_write(monkeypatch) -> None:
+    runtime, generation, ticket, sock = _partial_exchange_runtime([BlockingIOError()])
+    token = actor_module.SelectorToken("tcp", 1, 1, sock)
+    now = [0.0]
+    ticket.deadline = 5.0
+
+    def drain(_runtime, _generation) -> bool:
+        now[0] = 10.0
+        return True
+
+    monkeypatch.setattr(actor_module, "_receive_generation_safely", drain)
+    monkeypatch.setattr(actor_module.time, "monotonic", lambda: now[0])
+
+    actor_module._handle_tcp_event(
+        runtime,
+        token,
+        actor_module.selectors.EVENT_READ | actor_module.selectors.EVENT_WRITE,
+    )
+
+    assert sock.send_calls == 0
+    assert ticket.state is actor_module.RequestState.FAILED
+    assert isinstance(ticket.error, ResponseTimeoutError)
+    assert runtime.generation is None
+
+
+@pytest.mark.parametrize("control", ("cancel", "stop"))
+def test_control_arriving_during_presend_drain_prevents_write(monkeypatch, control: str) -> None:
+    runtime, generation, ticket, sock = _partial_exchange_runtime([BlockingIOError()])
+    token = actor_module.SelectorToken("tcp", 1, 1, sock)
+    drain_entered = threading.Event()
+    allow_drain = threading.Event()
+
+    def drain(_runtime, _generation) -> bool:
+        drain_entered.set()
+        assert allow_drain.wait(timeout=2)
+        return True
+
+    monkeypatch.setattr(actor_module, "_receive_generation_safely", drain)
+    thread = threading.Thread(
+        target=actor_module._handle_tcp_event,
+        args=(runtime, token, actor_module.selectors.EVENT_READ | actor_module.selectors.EVENT_WRITE),
+    )
+    thread.start()
+    assert drain_entered.wait(timeout=2)
+    if control == "cancel":
+        cancel_ticket(runtime, ticket)
+    else:
+        actor_module.request_actor_stop(runtime)
+    allow_drain.set()
+    thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    assert sock.send_calls == 0
+    if control == "cancel":
+        assert ticket.state is actor_module.RequestState.CANCELLED
+        assert runtime.generation is None
+    else:
+        assert runtime.stop_requested
+        assert ticket.state is actor_module.RequestState.SENDING
+
+
+def test_cancel_before_wire_send_claim_prevents_new_bytes(monkeypatch) -> None:
+    runtime, generation, ticket, sock = _partial_exchange_runtime([BlockingIOError()])
+    token = actor_module.SelectorToken("tcp", 1, 1, sock)
+    expiry_entered = threading.Event()
+    allow_expiry = threading.Event()
+    original_expire = actor_module._expire_active_task
+
+    monkeypatch.setattr(actor_module, "_receive_generation_safely", lambda *_args: True)
+
+    def controlled_expire(target_runtime) -> None:
+        expiry_entered.set()
+        assert allow_expiry.wait(timeout=2)
+        original_expire(target_runtime)
+
+    monkeypatch.setattr(actor_module, "_expire_active_task", controlled_expire)
+    thread = threading.Thread(
+        target=actor_module._handle_tcp_event,
+        args=(runtime, token, actor_module.selectors.EVENT_READ | actor_module.selectors.EVENT_WRITE),
+    )
+    thread.start()
+    assert expiry_entered.wait(timeout=2)
+    cancel_ticket(runtime, ticket)
+    allow_expiry.set()
+    thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    assert sock.send_calls == 0
+    assert ticket.state is actor_module.RequestState.CANCELLED
+    assert runtime.generation is None
+
+
+def test_deadline_crossing_while_send_claim_waits_does_not_write(monkeypatch) -> None:
+    runtime, generation, ticket, sock = _partial_exchange_runtime([BlockingIOError()])
+    exchange = generation.active_exchange
+    assert exchange is not None
+    now = [0.0]
+    ticket.deadline = 1.0
+    claim_started = threading.Event()
+    claimed: list[bool] = []
+    monkeypatch.setattr(actor_module.time, "monotonic", lambda: now[0])
+    runtime.control_lock.acquire()
+
+    def claim() -> None:
+        claim_started.set()
+        claimed.append(actor_module._claim_generation_send(runtime, generation, exchange))
+
+    thread = threading.Thread(target=claim)
+    thread.start()
+    assert claim_started.wait(timeout=2)
+    now[0] = 2.0
+    runtime.control_lock.release()
+    thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    assert claimed == [False]
+    assert sock.send_calls == 0
+    assert ticket.state is actor_module.RequestState.FAILED
+    assert isinstance(ticket.error, ResponseTimeoutError)
+    assert runtime.generation is None
 
 
 def test_matching_response_after_absolute_deadline_cannot_succeed() -> None:
@@ -382,7 +673,7 @@ def test_matching_response_after_absolute_deadline_cannot_succeed() -> None:
         actor_module._route_frame(
             runtime,
             generation,
-            actor_module.ReceivedFrame(1, decode_response(raw)),
+            actor_module.ReceivedFrame(1, decode_response(raw), exchange_id=0, send_complete=True),
         )
         assert ticket.state is actor_module.RequestState.FAILED
         assert isinstance(ticket.error, ResponseTimeoutError)
@@ -429,7 +720,7 @@ def test_success_response_keeps_existing_read_interest_without_redundant_modify(
     actor_module._route_frame(
         runtime,
         generation,
-        actor_module.ReceivedFrame(1, decode_response(raw)),
+        actor_module.ReceivedFrame(1, decode_response(raw), exchange_id=0, send_complete=True),
     )
 
     assert ticket.state is actor_module.RequestState.SUCCESS
@@ -538,6 +829,288 @@ def test_late_cancel_of_completed_ticket_does_not_cancel_next_lease_zero_request
             respond_to_b.set()
             release_server.set()
             close_actor(runtime)
+
+
+class StalledConnectSocket:
+    def __init__(self, family: int, socktype: int, proto: int) -> None:
+        self._socket, self._peer = socket.socketpair()
+
+    def setblocking(self, value: bool) -> None:
+        self._socket.setblocking(value)
+
+    def connect_ex(self, _address) -> int:
+        return errno.EINPROGRESS
+
+    def getsockopt(self, _level: int, _option: int) -> int:
+        return errno.EINPROGRESS
+
+    def fileno(self) -> int:
+        return self._socket.fileno()
+
+    def close(self) -> None:
+        self._socket.close()
+        self._peer.close()
+
+
+class ImmediateConnectSocket(StalledConnectSocket):
+    def connect_ex(self, _address) -> int:
+        return 0
+
+
+def test_cancel_request_during_connect_drops_generation_before_terminal() -> None:
+    created = 0
+
+    def factory(family: int, socktype: int, proto: int):
+        nonlocal created
+        created += 1
+        socket_type = StalledConnectSocket if created == 1 else ImmediateConnectSocket
+        return socket_type(family, socktype, proto)
+
+    runtime = start_actor(108, resolve_hosts(["127.0.0.1:9"]), socket_factory=factory)
+    try:
+        ticket = submit_request(
+            runtime,
+            lease_id=0,
+            command=TYPE_SECURITY_COUNT,
+            payload={"market": "sz"},
+            deadline=time.monotonic() + 1,
+            retry_safe=False,
+        )
+        assert runtime.generation_started.wait(timeout=2)
+        cancel_ticket(runtime, ticket)
+
+        with pytest.raises(ConnectionClosedError, match="cancelled"):
+            wait_ticket(ticket)
+        assert runtime.generation is None
+        assert wait_ticket(submit_connect(runtime, time.monotonic() + 1)) == "127.0.0.1:9"
+        assert runtime.state is RuntimeState.RUNNING
+    finally:
+        close_actor(runtime)
+
+
+def test_cancel_arriving_during_control_drain_prevents_pending_promotion(monkeypatch) -> None:
+    endpoint = resolve_hosts(["127.0.0.1:9"])[0]
+    runtime = actor_module.ActorRuntime(1, (endpoint,))
+    runtime.state = RuntimeState.RUNNING
+    pending = actor_module.RequestTicket(
+        1,
+        0,
+        TYPE_SECURITY_COUNT,
+        {"market": "sz"},
+        time.monotonic() + 1,
+        False,
+        request_id=2,
+    )
+    runtime.pending_task = pending
+    old_cancel = actor_module.CancelToken(1, 1, 99)
+    runtime.cancel_requests[old_cancel.request_id] = old_cancel
+    apply_entered = threading.Event()
+    allow_apply = threading.Event()
+    original_apply = actor_module._apply_cancel
+
+    def controlled_apply(target_runtime, token) -> None:
+        if token is old_cancel:
+            apply_entered.set()
+            assert allow_apply.wait(timeout=2)
+        original_apply(target_runtime, token)
+
+    monkeypatch.setattr(actor_module, "_apply_cancel", controlled_apply)
+    thread = threading.Thread(target=actor_module._drain_control, args=(runtime,))
+    thread.start()
+    assert apply_entered.wait(timeout=2)
+    cancel_ticket(runtime, pending)
+    allow_apply.set()
+    thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    assert pending.state is actor_module.RequestState.CANCELLED
+    assert pending.completed.is_set()
+    assert runtime.active_task is None
+    assert runtime.pending_task is None
+    assert not runtime.cancel_requests
+
+
+def test_connect_interrupt_enqueues_exact_cancel_and_holds_lock_until_actor_ack(monkeypatch) -> None:
+    endpoint = resolve_hosts(["127.0.0.1:9"])[0]
+    runtime = actor_module.ActorRuntime(1, (endpoint,))
+    runtime.state = RuntimeState.RUNNING
+    transport = SocketTransport(["127.0.0.1:9"], timeout=1, heartbeat_interval=None)
+    transport._runtime = runtime
+    transport._resolved_endpoints = (endpoint,)
+    tickets: list[ConnectTicket] = []
+    original_submit = socket_module.submit_connect
+
+    def capture_submit(*args, **kwargs):
+        ticket = original_submit(*args, **kwargs)
+        tickets.append(ticket)
+        return ticket
+
+    monkeypatch.setattr(socket_module, "submit_connect", capture_submit)
+    monkeypatch.setattr(
+        socket_module,
+        "wait_ticket",
+        lambda _ticket: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        transport._connect_with_deadline(
+            deadline=time.monotonic() + 1,
+            completion=None,
+            runtime=runtime,
+        )
+
+    assert len(tickets) == 1
+    ticket = tickets[0]
+    token = runtime.cancel_requests[ticket.request_id]
+    assert (token.runtime_epoch, token.request_id, token.lease_id) == (
+        ticket.runtime_epoch,
+        ticket.request_id,
+        ticket.lease_id,
+    )
+    assert not transport._request_lock.acquire(blocking=False)
+
+    actor_module._drain_control(runtime)
+    assert ticket.state is actor_module.RequestState.CANCELLED
+    assert ticket.completed.is_set()
+    assert transport._request_lock.acquire(blocking=False)
+    transport._request_lock.release()
+
+
+@pytest.mark.parametrize("ticket_kind", ("connect", "request"))
+def test_interrupt_after_ticket_publication_retains_terminal_ownership(monkeypatch, ticket_kind: str) -> None:
+    endpoint = resolve_hosts(["127.0.0.1:9"])[0]
+    runtime = actor_module.ActorRuntime(1, (endpoint,))
+    runtime.state = RuntimeState.RUNNING
+    transport = SocketTransport(["127.0.0.1:9"], timeout=1, heartbeat_interval=None)
+    transport._runtime = runtime
+    transport._resolved_endpoints = (endpoint,)
+    tickets: list[ConnectTicket | actor_module.RequestTicket] = []
+
+    if ticket_kind == "connect":
+        original_submit = socket_module.submit_connect
+
+        def interrupted_submit(*args, **kwargs):
+            ticket = original_submit(*args, **kwargs)
+            tickets.append(ticket)
+            raise KeyboardInterrupt()
+
+        monkeypatch.setattr(socket_module, "submit_connect", interrupted_submit)
+    else:
+        original_submit = socket_module.submit_request
+
+        def interrupted_submit(*args, **kwargs):
+            ticket = original_submit(*args, **kwargs)
+            tickets.append(ticket)
+            raise KeyboardInterrupt()
+
+        monkeypatch.setattr(socket_module, "submit_request", interrupted_submit)
+
+    with pytest.raises(KeyboardInterrupt):
+        if ticket_kind == "connect":
+            transport._connect_with_deadline(
+                deadline=time.monotonic() + 1,
+                completion=None,
+                runtime=runtime,
+            )
+        else:
+            transport._execute_with_lease(
+                TYPE_SECURITY_COUNT,
+                {"market": "sz"},
+                lease_id=0,
+                deadline=time.monotonic() + 1,
+                completion=None,
+                runtime=runtime,
+            )
+
+    assert len(tickets) == 1
+    ticket = tickets[0]
+    assert runtime.pending_task is ticket
+    token = runtime.cancel_requests[ticket.request_id]
+    assert (token.runtime_epoch, token.request_id, token.lease_id) == (
+        ticket.runtime_epoch,
+        ticket.request_id,
+        ticket.lease_id,
+    )
+    assert not transport._request_lock.acquire(blocking=False)
+
+    actor_module._drain_control(runtime)
+    assert ticket.state is actor_module.RequestState.CANCELLED
+    assert ticket.completed.is_set()
+    assert transport._request_lock.acquire(blocking=False)
+    transport._request_lock.release()
+
+
+@pytest.mark.parametrize("ticket_kind", ("connect", "request"))
+def test_interrupt_after_request_lock_before_submission_releases_lock(monkeypatch, ticket_kind: str) -> None:
+    endpoint = resolve_hosts(["127.0.0.1:9"])[0]
+    runtime = actor_module.ActorRuntime(1, (endpoint,))
+    runtime.state = RuntimeState.RUNNING
+    transport = SocketTransport(["127.0.0.1:9"], timeout=1, heartbeat_interval=None)
+    transport._runtime = runtime
+    transport._resolved_endpoints = (endpoint,)
+    monkeypatch.setattr(
+        socket_module,
+        "_TerminalCompletion",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        if ticket_kind == "connect":
+            transport._connect_with_deadline(
+                deadline=time.monotonic() + 1,
+                completion=None,
+                runtime=runtime,
+            )
+        else:
+            transport._execute_with_lease(
+                TYPE_SECURITY_COUNT,
+                {"market": "sz"},
+                lease_id=0,
+                deadline=time.monotonic() + 1,
+                completion=None,
+                runtime=runtime,
+            )
+
+    assert runtime.pending_task is None and runtime.active_task is None
+    assert transport._request_lock.acquire(blocking=False)
+    transport._request_lock.release()
+
+
+@pytest.mark.parametrize("ticket_kind", ("connect", "request"))
+def test_interrupt_after_request_lock_acquired_before_return_releases_lock(monkeypatch, ticket_kind: str) -> None:
+    endpoint = resolve_hosts(["127.0.0.1:9"])[0]
+    runtime = actor_module.ActorRuntime(1, (endpoint,))
+    runtime.state = RuntimeState.RUNNING
+    transport = SocketTransport(["127.0.0.1:9"], timeout=1, heartbeat_interval=None)
+    transport._runtime = runtime
+    transport._resolved_endpoints = (endpoint,)
+    original_acquire = transport._acquire_request_lock
+
+    def interrupted_acquire(deadline: float, *, ownership=None) -> bool:
+        assert original_acquire(deadline, ownership=ownership)
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(transport, "_acquire_request_lock", interrupted_acquire)
+    with pytest.raises(KeyboardInterrupt):
+        if ticket_kind == "connect":
+            transport._connect_with_deadline(
+                deadline=time.monotonic() + 1,
+                completion=None,
+                runtime=runtime,
+            )
+        else:
+            transport._execute_with_lease(
+                TYPE_SECURITY_COUNT,
+                {"market": "sz"},
+                lease_id=0,
+                deadline=time.monotonic() + 1,
+                completion=None,
+                runtime=runtime,
+            )
+
+    assert runtime.pending_task is None and runtime.active_task is None
+    assert transport._request_lock.acquire(blocking=False)
+    transport._request_lock.release()
 
 
 @pytest.mark.parametrize(
@@ -674,3 +1247,819 @@ def test_execute_timeout_retains_slot_until_exact_cancel_ack(monkeypatch) -> Non
         finally:
             allow_terminal.set()
             transport.close()
+
+
+@pytest.mark.parametrize("ticket_kind", ("connect", "request"))
+def test_interrupt_inside_request_gate_claim_releases_exact_owner(ticket_kind: str) -> None:
+    class InterruptAfterClaimGate:
+        def __init__(self) -> None:
+            self._lock = threading.Lock()
+            self._owner: object | None = None
+            self._interrupted = False
+
+        def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+            acquired = self._lock.acquire(blocking) if timeout < 0 else self._lock.acquire(blocking, timeout)
+            if acquired and not self._interrupted:
+                self._interrupted = True
+                raise KeyboardInterrupt
+            return acquired
+
+        def acquire_token(self, token: object, deadline: float) -> bool:
+            acquired = self._lock.acquire(timeout=max(0.0, deadline - time.monotonic()))
+            if acquired:
+                self._owner = token
+            if acquired and not self._interrupted:
+                self._interrupted = True
+                raise KeyboardInterrupt
+            return acquired
+
+        def release_token(self, token: object) -> bool:
+            if self._owner is not token:
+                return False
+            self._owner = None
+            self._lock.release()
+            return True
+
+        def release(self) -> None:
+            self._lock.release()
+
+    endpoint = resolve_hosts(["127.0.0.1:9"])[0]
+    runtime = actor_module.ActorRuntime(1, (endpoint,))
+    runtime.state = RuntimeState.RUNNING
+    transport = SocketTransport(["127.0.0.1:9"], timeout=1, heartbeat_interval=None)
+    transport._runtime = runtime
+    transport._resolved_endpoints = (endpoint,)
+    gate = InterruptAfterClaimGate()
+    transport._request_lock = gate
+
+    with pytest.raises(KeyboardInterrupt):
+        if ticket_kind == "connect":
+            transport._connect_with_deadline(
+                deadline=time.monotonic() + 1,
+                completion=None,
+                runtime=runtime,
+            )
+        else:
+            transport._execute_with_lease(
+                TYPE_SECURITY_COUNT,
+                {"market": "sz"},
+                lease_id=0,
+                deadline=time.monotonic() + 1,
+                completion=None,
+                runtime=runtime,
+            )
+
+    assert gate.acquire(blocking=False)
+    gate.release()
+
+
+@pytest.mark.parametrize("ticket_kind", ("connect", "request"))
+def test_interrupt_inside_submission_gate_claim_releases_exact_owner(ticket_kind: str) -> None:
+    class InterruptAfterClaimGate:
+        def __init__(self) -> None:
+            self._lock = threading.Lock()
+            self._owner: object | None = None
+            self._interrupted = False
+
+        def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+            acquired = self._lock.acquire(blocking) if timeout < 0 else self._lock.acquire(blocking, timeout)
+            if acquired and not self._interrupted:
+                self._interrupted = True
+                raise KeyboardInterrupt
+            return acquired
+
+        def acquire_token(self, token: object, deadline: float) -> bool:
+            acquired = self._lock.acquire(timeout=max(0.0, deadline - time.monotonic()))
+            if acquired:
+                self._owner = token
+            if acquired and not self._interrupted:
+                self._interrupted = True
+                raise KeyboardInterrupt
+            return acquired
+
+        def release_token(self, token: object) -> bool:
+            if self._owner is not token:
+                return False
+            self._owner = None
+            self._lock.release()
+            return True
+
+        def release(self) -> None:
+            self._lock.release()
+
+    endpoint = resolve_hosts(["127.0.0.1:9"])[0]
+    runtime = actor_module.ActorRuntime(1, (endpoint,))
+    runtime.state = RuntimeState.RUNNING
+    transport = SocketTransport(["127.0.0.1:9"], timeout=1, heartbeat_interval=None)
+    transport._runtime = runtime
+    transport._resolved_endpoints = (endpoint,)
+    gate = InterruptAfterClaimGate()
+    transport._submission_gate = gate
+
+    with pytest.raises(KeyboardInterrupt):
+        if ticket_kind == "connect":
+            transport._connect_with_deadline(
+                deadline=time.monotonic() + 1,
+                completion=None,
+                runtime=runtime,
+            )
+        else:
+            transport._execute_with_lease(
+                TYPE_SECURITY_COUNT,
+                {"market": "sz"},
+                lease_id=0,
+                deadline=time.monotonic() + 1,
+                completion=None,
+                runtime=runtime,
+            )
+
+    assert gate.acquire(blocking=False)
+    gate.release()
+    assert transport._request_lock.acquire(blocking=False)
+    transport._request_lock.release()
+
+
+@pytest.mark.parametrize("ticket_kind", ("connect", "request"))
+def test_interrupt_inside_actor_control_claim_releases_exact_owner(ticket_kind: str) -> None:
+    class InterruptAfterClaimGate:
+        def __init__(self) -> None:
+            self._lock = threading.Lock()
+            self._owner: object | None = None
+            self._interrupted = False
+
+        def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+            acquired = self._lock.acquire(blocking) if timeout < 0 else self._lock.acquire(blocking, timeout)
+            if acquired and not self._interrupted:
+                self._interrupted = True
+                raise KeyboardInterrupt
+            return acquired
+
+        def acquire_token(self, token: object, deadline: float | None) -> bool:
+            timeout = -1 if deadline is None else max(0.0, deadline - time.monotonic())
+            acquired = self._lock.acquire() if timeout < 0 else self._lock.acquire(timeout=timeout)
+            if acquired:
+                self._owner = token
+            if acquired and not self._interrupted:
+                self._interrupted = True
+                raise KeyboardInterrupt
+            return acquired
+
+        def release_token(self, token: object) -> bool:
+            if self._owner is not token:
+                return False
+            self._owner = None
+            self._lock.release()
+            return True
+
+        def release(self) -> None:
+            self._lock.release()
+
+    endpoint = resolve_hosts(["127.0.0.1:9"])[0]
+    runtime = actor_module.ActorRuntime(1, (endpoint,))
+    runtime.state = RuntimeState.RUNNING
+    gate = InterruptAfterClaimGate()
+    runtime.control_lock = gate
+
+    with pytest.raises(KeyboardInterrupt):
+        if ticket_kind == "connect":
+            submit_connect(runtime, time.monotonic() + 1)
+        else:
+            submit_request(
+                runtime,
+                lease_id=0,
+                command=TYPE_SECURITY_COUNT,
+                payload={"market": "sz"},
+                deadline=time.monotonic() + 1,
+                retry_safe=False,
+            )
+
+    assert gate.acquire(blocking=False)
+    gate.release()
+    assert runtime.pending_task is None
+
+
+def test_request_build_failure_keeps_actor_owner_until_ticket_terminal(monkeypatch) -> None:
+    endpoint = resolve_hosts(["127.0.0.1:9"])[0]
+    ticket = actor_module.RequestTicket(
+        1,
+        0,
+        0x9999,
+        {},
+        time.monotonic() + 1,
+        False,
+        request_id=1,
+    )
+    generation = actor_module.TcpGeneration(1, object(), endpoint, actor_module.TcpState.READY)
+    runtime = actor_module.ActorRuntime(1, (endpoint,))
+    runtime.state = RuntimeState.RUNNING
+    runtime.generation = generation
+    runtime.active_task = ticket
+    original_complete = actor_module._complete_ticket
+    owner_observed: list[bool] = []
+
+    def observe_owner(target, *args, **kwargs):
+        owner_observed.append(runtime.active_task is target)
+        return original_complete(target, *args, **kwargs)
+
+    monkeypatch.setattr(actor_module, "_complete_ticket", observe_owner)
+    assert not actor_module._begin_exchange(runtime, ticket, ticket.command, handshake=False)
+
+    assert owner_observed == [True]
+    assert ticket.state is actor_module.RequestState.FAILED
+    assert runtime.active_task is None
+
+
+@pytest.mark.parametrize("gate_factory", (actor_module.IdentityGate, socket_module._RequestGate))
+def test_identity_gate_recovers_physical_condition_acquire_interrupt(gate_factory) -> None:
+    gate = gate_factory()
+    original = gate._condition
+
+    class InterruptingCondition:
+        def __init__(self) -> None:
+            self.interrupted = False
+
+        def acquire(self, *args, **kwargs):
+            acquired = original.acquire(*args, **kwargs)
+            if acquired and not self.interrupted:
+                self.interrupted = True
+                raise KeyboardInterrupt
+            return acquired
+
+        def release(self) -> None:
+            original.release()
+
+        def wait(self, *args, **kwargs):
+            return original.wait(*args, **kwargs)
+
+        def notify(self, *args, **kwargs) -> None:
+            original.notify(*args, **kwargs)
+
+        def __enter__(self):
+            return original.__enter__()
+
+        def __exit__(self, *args):
+            return original.__exit__(*args)
+
+    gate._condition = InterruptingCondition()
+    first_token = object()
+    with pytest.raises(KeyboardInterrupt):
+        gate.acquire_token(first_token, time.monotonic() + 1)
+
+    acquired: list[bool] = []
+    second_token = object()
+
+    def acquire_from_other_thread() -> None:
+        result = gate.acquire_token(second_token, time.monotonic() + 0.1)
+        acquired.append(result)
+        if result:
+            gate.release_token(second_token)
+
+    thread = threading.Thread(target=acquire_from_other_thread)
+    thread.start()
+    thread.join(timeout=0.2)
+    try:
+        assert acquired == [True]
+    finally:
+        try:
+            original.release()
+        except RuntimeError:
+            pass
+        thread.join(timeout=2)
+
+
+@pytest.mark.parametrize("gate_factory", (actor_module.IdentityGate, socket_module._RequestGate))
+def test_identity_gate_release_recovers_physical_condition_interrupt(gate_factory) -> None:
+    gate = gate_factory()
+    token = object()
+    assert gate.acquire_token(token, time.monotonic() + 1)
+    original = gate._condition
+
+    class InterruptingCondition:
+        def acquire(self, *args, **kwargs):
+            acquired = original.acquire(*args, **kwargs)
+            if acquired:
+                raise KeyboardInterrupt
+            return acquired
+
+        def release(self) -> None:
+            original.release()
+
+        def notify(self, *args, **kwargs) -> None:
+            original.notify(*args, **kwargs)
+
+        def __enter__(self):
+            self.acquire()
+            return self
+
+        def __exit__(self, *_args):
+            self.release()
+
+    gate._condition = InterruptingCondition()
+    assert gate.release_token(token)
+
+    gate._condition = original
+    replacement = object()
+    assert gate.acquire_token(replacement, time.monotonic() + 0.1)
+    assert gate.release_token(replacement)
+
+
+@pytest.mark.parametrize("gate_factory", (actor_module.IdentityGate, socket_module._RequestGate))
+def test_identity_gate_release_wakes_existing_unbounded_waiter(gate_factory) -> None:
+    class RecordingWaiters(deque):
+        def __init__(self) -> None:
+            super().__init__()
+            self.registered = threading.Event()
+
+        def append(self, item) -> None:
+            super().append(item)
+            if self:
+                self.registered.set()
+
+    gate = gate_factory()
+    gate._waiters = RecordingWaiters()
+    owner = object()
+    assert gate.acquire_token(owner, time.monotonic() + 1)
+    gate._waiters.registered.clear()
+    acquired: list[bool] = []
+    waiter_token = object()
+
+    def wait_for_gate() -> None:
+        acquired.append(gate.acquire_token(waiter_token, None))
+        gate.release_token(waiter_token)
+
+    thread = threading.Thread(target=wait_for_gate)
+    thread.start()
+    assert gate._waiters.registered.wait(timeout=2)
+    assert gate.release_token(owner)
+    thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    assert acquired == [True]
+
+
+@pytest.mark.parametrize("gate_factory", (actor_module.IdentityGate, socket_module._RequestGate))
+def test_identity_gate_hands_owner_to_waiters_in_registration_order(gate_factory) -> None:
+    class ControlledWaiters(deque):
+        def __init__(self) -> None:
+            super().__init__()
+            self.registered = [threading.Event(), threading.Event()]
+            self.waiting = [threading.Event(), threading.Event()]
+            self.allow_first = threading.Event()
+
+        def _record(self, item) -> None:
+            index = len(self)
+            event = getattr(item, "event", item)
+            original_wait = event.wait
+
+            def wait(timeout=None):
+                self.waiting[index].set()
+                signalled = original_wait(timeout)
+                if index == 0 and signalled:
+                    assert self.allow_first.wait(timeout=2)
+                return signalled
+
+            event.wait = wait
+            self.registered[index].set()
+
+        def append(self, item) -> None:
+            self._record(item)
+            super().append(item)
+
+        def add(self, item) -> None:
+            self.append(item)
+
+        def discard(self, item) -> None:
+            try:
+                self.remove(item)
+            except ValueError:
+                pass
+
+    gate = gate_factory()
+    gate._waiters = ControlledWaiters()
+    owner = object()
+    assert gate.acquire_token(owner, time.monotonic() + 1)
+    order: list[str] = []
+    order_lock = threading.Lock()
+    second_done = threading.Event()
+
+    def wait_for_gate(label: str, token: object) -> None:
+        assert gate.acquire_token(token, None)
+        with order_lock:
+            order.append(label)
+        assert gate.release_token(token)
+        if label == "second":
+            second_done.set()
+
+    first = threading.Thread(target=wait_for_gate, args=("first", object()))
+    second = threading.Thread(target=wait_for_gate, args=("second", object()))
+    first.start()
+    assert gate._waiters.registered[0].wait(timeout=2)
+    assert gate._waiters.waiting[0].wait(timeout=2)
+    second.start()
+    assert gate._waiters.registered[1].wait(timeout=2)
+    assert gate._waiters.waiting[1].wait(timeout=2)
+
+    assert gate.release_token(owner)
+    second_done.wait(timeout=0.1)
+    gate._waiters.allow_first.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert order == ["first", "second"]
+
+
+@pytest.mark.parametrize("gate_factory", (actor_module.IdentityGate, socket_module._RequestGate))
+def test_identity_gate_concurrent_stale_release_cannot_clear_new_owner(gate_factory) -> None:
+    gate = gate_factory()
+    old_token = object()
+    new_token = object()
+    assert gate.acquire_token(old_token, time.monotonic() + 1)
+    handoff = gate._handoff_locked
+    source, first_line = inspect.getsourcelines(handoff)
+    clear_line = first_line + next(index for index, line in enumerate(source) if "self._owner = None" in line)
+    paused = threading.Event()
+    resume = threading.Event()
+    stale_result: list[bool] = []
+    competing_result: list[bool] = []
+
+    def trace(frame, event, _arg):
+        if event == "line" and frame.f_code is handoff.__func__.__code__ and frame.f_lineno == clear_line:
+            paused.set()
+            assert resume.wait(timeout=2)
+        return trace
+
+    def stale_release() -> None:
+        sys.settrace(trace)
+        try:
+            stale_result.append(gate.release_token(old_token))
+        finally:
+            sys.settrace(None)
+
+    def competing_release() -> None:
+        competing_result.append(gate.release_token(old_token))
+
+    stale = threading.Thread(target=stale_release)
+    competing = threading.Thread(target=competing_release)
+    stale.start()
+    assert paused.wait(timeout=2)
+    competing.start()
+    competing.join(timeout=0.1)
+
+    acquired_before_resume = False
+    if not competing.is_alive():
+        acquired_before_resume = gate.acquire_token(new_token, time.monotonic() + 0.1)
+        assert acquired_before_resume
+    resume.set()
+    stale.join(timeout=2)
+    competing.join(timeout=2)
+
+    assert not stale.is_alive()
+    assert not competing.is_alive()
+    assert stale_result.count(True) + competing_result.count(True) == 1
+    if not acquired_before_resume:
+        assert gate.acquire_token(new_token, time.monotonic() + 0.1)
+    assert gate._owner is new_token
+    assert gate.release_token(new_token)
+
+
+@pytest.mark.parametrize("gate_factory", (actor_module.IdentityGate, socket_module._RequestGate))
+def test_identity_gate_does_not_handoff_to_waiter_after_deadline(gate_factory) -> None:
+    class DelayedTimeoutWaiters(deque):
+        def __init__(self) -> None:
+            super().__init__()
+            self.registered = threading.Event()
+            self.waiting = threading.Event()
+            self.allow_timeout = threading.Event()
+
+        def append(self, item) -> None:
+            event = item.event
+
+            def delayed_timeout(_timeout=None):
+                self.waiting.set()
+                assert self.allow_timeout.wait(timeout=2)
+                return False
+
+            event.wait = delayed_timeout
+            super().append(item)
+            self.registered.set()
+
+    gate = gate_factory()
+    gate._waiters = DelayedTimeoutWaiters()
+    owner = object()
+    waiter_token = object()
+    assert gate.acquire_token(owner, time.monotonic() + 1)
+    deadline = time.monotonic() + 0.05
+    result: list[bool] = []
+    waiter = threading.Thread(target=lambda: result.append(gate.acquire_token(waiter_token, deadline)))
+    waiter.start()
+    assert gate._waiters.registered.wait(timeout=2)
+    assert gate._waiters.waiting.wait(timeout=2)
+    while time.monotonic() <= deadline:
+        time.sleep(0.001)
+
+    assert gate.release_token(owner)
+    gate._waiters.allow_timeout.set()
+    waiter.join(timeout=2)
+
+    assert not waiter.is_alive()
+    assert result == [False]
+    assert gate._owner is None
+
+
+@pytest.mark.parametrize("gate_factory", (actor_module.IdentityGate, socket_module._RequestGate))
+def test_identity_gate_failed_waiter_wakeup_is_revoked_and_next_waiter_advances(gate_factory) -> None:
+    class FailingWakeWaiters(deque):
+        def __init__(self) -> None:
+            super().__init__()
+            self.registered = [threading.Event(), threading.Event()]
+            self.failed_event = None
+            self.original_set = None
+
+        def append(self, item) -> None:
+            index = len(self)
+            if index == 0:
+                self.failed_event = item.event
+                self.original_set = item.event.set
+                item.event.set = lambda: (_ for _ in ()).throw(KeyboardInterrupt())
+            super().append(item)
+            self.registered[index].set()
+
+    gate = gate_factory()
+    gate._waiters = FailingWakeWaiters()
+    owner = object()
+    assert gate.acquire_token(owner, time.monotonic() + 1)
+    results: dict[str, bool] = {}
+
+    def wait_for_gate(label: str, token: object) -> None:
+        acquired = gate.acquire_token(token, None)
+        results[label] = acquired
+        if acquired:
+            assert gate.release_token(token)
+
+    first = threading.Thread(target=wait_for_gate, args=("first", object()))
+    second = threading.Thread(target=wait_for_gate, args=("second", object()))
+    first.start()
+    assert gate._waiters.registered[0].wait(timeout=2)
+    second.start()
+    assert gate._waiters.registered[1].wait(timeout=2)
+
+    release_error = None
+    try:
+        released = gate.release_token(owner)
+    except BaseException as exc:
+        release_error = exc
+        released = False
+    finally:
+        if gate._waiters.failed_event is not None and gate._waiters.original_set is not None:
+            gate._waiters.failed_event.set = gate._waiters.original_set
+            gate._waiters.original_set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    assert release_error is None
+    assert released
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert results == {"first": False, "second": True}
+    assert gate._owner is None
+
+
+@pytest.mark.parametrize("gate_factory", (actor_module.IdentityGate, socket_module._RequestGate))
+def test_identity_gate_recovers_physical_state_lock_acquire_interrupt(gate_factory) -> None:
+    gate = gate_factory()
+    original = gate._state_lock
+
+    class InterruptingStateLock:
+        def __init__(self) -> None:
+            self.interrupted = False
+
+        def acquire(self, *args, **kwargs):
+            acquired = original.acquire(*args, **kwargs)
+            if acquired and not self.interrupted:
+                self.interrupted = True
+                raise KeyboardInterrupt
+            return acquired
+
+        def release(self) -> None:
+            original.release()
+
+        def _is_owned(self) -> bool:
+            checker = getattr(original, "_is_owned", None)
+            return bool(checker()) if checker is not None else original.locked()
+
+        def __enter__(self):
+            self.acquire()
+            return self
+
+        def __exit__(self, *_args):
+            self.release()
+
+    gate._state_lock = InterruptingStateLock()
+    with pytest.raises(KeyboardInterrupt):
+        gate.acquire_token(object(), time.monotonic() + 1)
+
+    acquired: list[bool] = []
+    replacement = object()
+
+    def acquire_replacement() -> None:
+        result = gate.acquire_token(replacement, time.monotonic() + 0.1)
+        acquired.append(result)
+        if result:
+            gate.release_token(replacement)
+
+    thread = threading.Thread(target=acquire_replacement)
+    thread.start()
+    thread.join(timeout=0.2)
+    try:
+        assert not thread.is_alive()
+        assert acquired == [True]
+    finally:
+        if getattr(original, "locked", lambda: False)():
+            original.release()
+        thread.join(timeout=2)
+
+
+@pytest.mark.parametrize("gate_factory", (actor_module.IdentityGate, socket_module._RequestGate))
+def test_identity_gate_compat_acquire_survives_condition_release_interrupt(gate_factory) -> None:
+    gate = gate_factory()
+    original = gate._condition
+
+    class InterruptAfterReleaseCondition:
+        def __init__(self) -> None:
+            self.interrupted = False
+
+        def acquire(self, *args, **kwargs):
+            return original.acquire(*args, **kwargs)
+
+        def release(self) -> None:
+            original.release()
+            if not self.interrupted:
+                self.interrupted = True
+                raise KeyboardInterrupt
+
+    gate._condition = InterruptAfterReleaseCondition()
+    error = None
+    try:
+        acquired = gate.acquire(timeout=0.1)
+    except BaseException as exc:
+        error = exc
+        acquired = False
+
+    try:
+        assert error is None
+        assert acquired
+        gate.release()
+        assert gate.acquire(blocking=False)
+        gate.release()
+    finally:
+        owner = gate._owner
+        if owner is not None:
+            gate.release_token(owner)
+
+
+@pytest.mark.parametrize("gate_factory", (actor_module.IdentityGate, socket_module._RequestGate))
+def test_identity_gate_waiter_registration_survives_condition_release_interrupt(gate_factory) -> None:
+    gate = gate_factory()
+    owner = object()
+    orphan = object()
+    assert gate.acquire_token(owner, time.monotonic() + 1)
+    original = gate._condition
+
+    class InterruptAfterReleaseCondition:
+        def __init__(self) -> None:
+            self.interrupted = False
+
+        def acquire(self, *args, **kwargs):
+            return original.acquire(*args, **kwargs)
+
+        def release(self) -> None:
+            original.release()
+            if not self.interrupted:
+                self.interrupted = True
+                raise KeyboardInterrupt
+
+    gate._condition = InterruptAfterReleaseCondition()
+    error = None
+    try:
+        acquired = gate.acquire_token(orphan, time.monotonic() + 0.05)
+    except BaseException as exc:
+        error = exc
+        acquired = False
+
+    assert error is None
+    assert not acquired
+    assert not gate._waiters
+    assert gate.release_token(owner)
+    replacement = object()
+    assert gate.acquire_token(replacement, time.monotonic() + 0.1)
+    assert gate.release_token(replacement)
+
+
+@pytest.mark.parametrize("gate_factory", (actor_module.IdentityGate, socket_module._RequestGate))
+def test_identity_gate_release_does_not_wait_for_condition_owner(gate_factory) -> None:
+    gate = gate_factory()
+    token = object()
+    assert gate.acquire_token(token, time.monotonic() + 1)
+    condition_held = threading.Event()
+    release_condition = threading.Event()
+    released: list[bool] = []
+
+    def hold_condition() -> None:
+        with gate._condition:
+            condition_held.set()
+            release_condition.wait()
+
+    def release_token() -> None:
+        released.append(gate.release_token(token))
+
+    holder = threading.Thread(target=hold_condition)
+    releaser = threading.Thread(target=release_token)
+    holder.start()
+    assert condition_held.wait(timeout=2)
+    releaser.start()
+    releaser.join(timeout=0.1)
+    try:
+        assert not releaser.is_alive()
+        assert released == [True]
+        assert gate._owner is None
+    finally:
+        release_condition.set()
+        holder.join(timeout=2)
+        releaser.join(timeout=2)
+
+
+def test_terminal_completion_publishes_while_request_gate_condition_is_held() -> None:
+    gate = socket_module._RequestGate()
+    token = object()
+    assert gate.acquire_token(token, time.monotonic() + 1)
+    ticket = actor_module.RequestTicket(
+        runtime_epoch=1,
+        lease_id=1,
+        command=TYPE_SECURITY_COUNT,
+        request_payload_snapshot={},
+        deadline=time.monotonic() + 1,
+        retry_safe=True,
+        completion=socket_module._TerminalCompletion(request_gate=gate, request_token=token),
+    )
+    condition_held = threading.Event()
+    release_condition = threading.Event()
+
+    def hold_condition() -> None:
+        with gate._condition:
+            condition_held.set()
+            release_condition.wait()
+
+    completer = threading.Thread(
+        target=actor_module._complete_ticket,
+        args=(ticket, actor_module.RequestState.SUCCESS),
+    )
+    holder = threading.Thread(target=hold_condition)
+    holder.start()
+    assert condition_held.wait(timeout=2)
+    completer.start()
+    try:
+        assert ticket.completed.wait(timeout=0.1)
+        assert ticket.state is actor_module.RequestState.SUCCESS
+        assert gate._owner is None
+    finally:
+        release_condition.set()
+        holder.join(timeout=2)
+        completer.join(timeout=2)
+
+
+def test_pending_cancel_claims_terminal_before_completion_submits_next_ticket() -> None:
+    endpoint = resolve_hosts(["127.0.0.1:9"])[0]
+    runtime = actor_module.ActorRuntime(1, (endpoint,))
+    runtime.state = RuntimeState.RUNNING
+    created: list[actor_module.RequestTicket] = []
+
+    def submit_next(_ticket) -> None:
+        created.append(
+            submit_request(
+                runtime,
+                lease_id=0,
+                command=TYPE_SECURITY_COUNT,
+                payload={"market": "sz"},
+                deadline=time.monotonic() + 1,
+                retry_safe=False,
+            )
+        )
+
+    pending = actor_module.RequestTicket(
+        1,
+        0,
+        TYPE_SECURITY_COUNT,
+        {"market": "sz"},
+        time.monotonic() + 1,
+        False,
+        request_id=1,
+        completion=submit_next,
+    )
+    runtime.pending_task = pending
+    actor_module._apply_cancel(runtime, actor_module.CancelToken(1, 1, 0))
+
+    assert pending.state is actor_module.RequestState.CANCELLED
+    assert pending.completion_error is None
+    assert len(created) == 1 and runtime.pending_task is created[0]

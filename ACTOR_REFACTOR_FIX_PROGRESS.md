@@ -12,11 +12,11 @@ The result document remains historical evidence only until FINAL rewrites it.
 | Baseline HEAD | `994c49b51f47255bdcd9cdc3308a5a554f37588b` |
 | Base | `71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
 | Branch | `actor-transport-refactor` |
-| Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), confirmed OPEN and draft at pushed HEAD `ca43972` |
+| Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), confirmed OPEN and draft at pushed HEAD `8303405` |
 | Final-review correction base | `cc46e6042e60b1d70732ae813b089f9c8b572572` |
-| Latest pushed correction checkpoint | `ca439727b44a02d9396b3d6dcd21b78d06addb8b`; exact CI and Pages successful |
-| Current local follow-up | First exact FIFO-v1 campaign retained as FAIL only on no-backlog p99; production hot-path profiling in progress before any new campaign |
-| Baseline worktree | Clean (`git status --short --branch`) |
+| Latest pushed correction checkpoint | `83034059d0baa759a1e90b1752626b315f5d907f`; exact CI and Pages successful |
+| Current local follow-up | Post-campaign correctness checkpoint candidate is locally green at 443 tests; protocol and concurrency/lifecycle adversarial reviews are CLEAN; commit/push and exact-head CI are next |
+| Baseline worktree | User-owned modification in `ACTOR_REFACTOR_RESULT.md`; preserve and integrate, do not overwrite |
 | Superseded result | Existing `COMPLETE` claim and 183-test evidence |
 
 The PR state and exact pushed head must be refreshed before each checkpoint and
@@ -35,13 +35,13 @@ again before FINAL evidence is accepted.
 | Checkpoint | State | Exit evidence |
 | --- | --- | --- |
 | F00 baseline, review, regression design | COMPLETE (`05a5e9b`) | Ledger and deterministic A-E failing baselines recorded before implementation |
-| F01 receive ordering and boundaries | COMPLETE (`8aa089d`) | Sequence boundary, full-send gate, pre-send drain, heartbeat gate, partial-tail handling, and unified receive failure path |
-| F02 request identity and build isolation | COMPLETE (`8aa089d`) | Monotonic request ID, exact cancel, request-local build errors, strict deadline, terminal-owned slot, callback isolation |
+| F01 receive ordering and boundaries | CORRECTNESS CLOSED; CHECKPOINT CANDIDATE | READ-first batches, immutable exchange identity, fixed-key collision regressions, and keyed nonrepeating nonzero msg IDs pass; protocol-compliant peer boundary is explicit |
+| F02 request identity and build isolation | CORRECTNESS CLOSED; CHECKPOINT CANDIDATE | Exact cancel, terminal claim, FIFO request/control/submission identity gates, physical-lock interruption recovery, and build isolation pass |
 | F03 connect and failover | COMPLETE (`2e48be0`) | Candidate/attempt budgets, next-endpoint retry, Windows peer verification, non-busy rearm, and seven real/fault-injected regressions |
-| F04 Broker and pinned leases | COMPLETE (`117b8c6`, corrections `0b8ad54`, `b66a7a8`) | Per-waiter Event, exact lease/ticket cancellation, FIFO admission, close broadcast to every pin-local waiter, and failed-pin capacity recovery |
-| F05 lifecycle and shutdown | COMPLETE (`117b8c6`, corrections `0b8ad54`, `b66a7a8`) | Candidate ownership, epoch guard, single close owner, exact resource retention, best-effort cleanup, and monotonic failed-close states |
+| F04 Broker and pinned leases | CORRECTNESS CLOSED; CHECKPOINT CANDIDATE | BaseException-safe waiter withdrawal, assigned-waiter lazy reap, pin close lease recovery, atomic batch admission, and FIFO pass |
+| F05 lifecycle and shutdown | CORRECTNESS CLOSED; CHECKPOINT CANDIDATE | Tokenized lifecycle gates, nonblocking finalizers, deadline-bounded best-effort fatal cleanup, and monotonic shutdown pass |
 | F06 stress, performance, resources, compatibility | FIFO-v1 A FAIL (`ca43972`; prior failures retained) | Stress/resources/heartbeat/matrix and all throughput/structure/sequential/no-backlog-p50 gates pass; no-backlog p99 exceeds its allowance by 0.13318 ms |
-| Final-review correctness correction | PUSHED (`b66a7a8`, performance/contracts through `ca43972`) | Correctness, cleanup, strict FIFO, Actor hot-path selector state, and prospective verifier contract are pushed with exact CI/Pages; first formal campaign still fails one latency gate |
+| Final-review correctness correction | LOCAL CHECKPOINT CANDIDATE after `8303405` | Current 443-test snapshot closes all post-campaign deterministic blockers with two final CLEAN reviews; push and exact-head CI/Pages remain required |
 | FINAL independent review and CI | PENDING | Two clean adversarial reviews; local matrix/build/docs and exact-HEAD CI/Pages green |
 
 ## Current Acceptance Blocker
@@ -103,6 +103,41 @@ was 7.0652 ms baseline versus 7.9049 ms current: delta 0.8397 ms against a
 0.70652 ms allowance, exceeding the ceiling by 0.13318 ms. Bundle SHA256
 `C9F75FBC72B69AA26307EDCF967FA369914F266676374158453C795D62AAEAEA` is
 retained as FAIL. The same exact source will not be sampled again.
+
+## Post-Campaign Adversarial Reopening At `8303405`
+
+Fresh read-only review after recovery found deterministic gaps that the 340-test
+suite did not cover. Correctness is reopened before profiling or changing the
+performance hot path:
+
+- A combined selector `READ | WRITE` event completes a partial send before
+  receiving data that was already readable. A colliding frame can therefore be
+  routed using the later mutable `tx_offset` and complete the request even
+  though the frame crossed the wire boundary before full send.
+- Cancelling a `RequestTicket` while its generation is `CONNECTING` completes
+  the ticket but leaves the connecting generation without an active owner or a
+  selector deadline.
+- A caller exception while `SocketTransport._connect_with_deadline()` waits does
+  not cancel its exact `ConnectTicket`, retaining the slot/request lock until an
+  unrelated terminal event.
+- `_drain_control()` snapshots cancels and promotes pending work in separate
+  critical sections. A cancel linearized between those sections can still let
+  the exact pending request start network work before the next control drain.
+- The first pin-local call can return from `_admit()`, lose a race to `close()`,
+  and still enter the slot while the proxy is `CLOSING`.
+- Pool shutdown and connect rollback call the slot retirement path while it can
+  block indefinitely on `_submission_gate`; stop is delayed and the nominal
+  one-second pool close deadline is not enforced.
+- `pool.connect()` acquires N leases one at a time. A later single request can
+  take a remaining idle slot between those calls instead of queuing behind the
+  all-slot connect admission.
+
+The Windows refused-first loopback regression also needs to assert that the
+failed endpoint created the first generation; success on the healthy endpoint
+alone would not detect an implementation that skipped endpoint zero.
+
+No production code is changed until deterministic red regressions for these
+findings are retained in the worktree and recorded below.
 
 ## Confirmed Blockers
 
@@ -260,6 +295,29 @@ exact-source performance artifacts remain to be generated after checkpointing.
 | 2026-07-15 | Exact-`ca43972` full 1/2/4 x 1/10/100 matrix | All nine cases returned exactly 3,000 timed server requests; pool4/c100 reached 657.34 rps, p50/p99 150.98/157.25 ms, max active 4; artifact SHA256 `3A43D07E3A1724458CF0CB0027A84B5C87A227BC604CB4FDBAEC32253A8D5D46` |
 | 2026-07-15 | FIFO-v1 campaign A declaration and run | Declaration file SHA256 `E66FAB4F1576B801F1D95CCA075ACF754A94C17D5B3F4B469EE5C85DBE877A7A`, canonical SHA256 `47221CD9611C91B43C11F64651A675BF3A7CCFC9063D7686356E8098CC50915A`; eight trials completed once in frozen order; bundle SHA256 `C9F75FBC72B69AA26307EDCF967FA369914F266676374158453C795D62AAEAEA`; verification report SHA256 `04DDB7208B067AED37DC6A884BD1867123455064791F3A7FCDEF298EE413DCFC`; overall **FAIL** only on no-backlog p99 by 0.13318 ms |
 | 2026-07-15 | FIFO-v1 campaign A trial hashes in order | `565177A7899AF2C27D092519973AE2098DAE06AA2D190CAD9096CAEFB12FDCB7`, `115AC79700C1A3AEEC3392EA2A609461884BF098BBD853C99219357F80D41E00`, `3E8B1FD88F1A5F60A7A6B5C2E55137ADDB045600FAC90A7A1772C88AE65C17D0`, `7B7A3ED6A3B5C1AEE37E5E6AB61FFB08B8831A9C5116810DEC72BD0A845B6348`, `553201B58379E1EBBC48A8D16282101D2867ABE36D8ADB1CB978907E559BE2EC`, `EF92985718078A60082173EE0B90E1FC6F15F616145D31AFEB1612344DEBCDCA`, `5E7D96F021FCED56F6F2CB5FDDBF2FDF9341BC3813C22F5149BFF956131A02A5`, `2B984DB208C22DC01EC67F719592AA356A8387B3FAA382126F0788899D127F5E` |
+| 2026-07-15 | Recovery identity and PR refresh | Local/remote/PR head `83034059d0baa759a1e90b1752626b315f5d907f`; PR OPEN and draft; exact Ubuntu 3.10-3.13, Windows 3.11/3.13, and Pages checks successful; user-owned `ACTOR_REFACTOR_RESULT.md` diff preserved |
+| 2026-07-15 | Recovery `python -m pytest -q` | **340 passed in 72.36s** on Windows CPython 3.12.6; this does not supersede the failed FIFO-v1 campaign |
+| 2026-07-15 | Three fresh read-only recovery reviews | A/B and pin correctness reopened by deterministic in-memory races; test/CI evidence review confirmed the campaign FAIL and identified a refused-first assertion gap |
+| 2026-07-15 | Post-campaign deterministic red matrix: `python -m pytest -q tests/test_transport_actor_regressions.py tests/test_transport_pool_regressions.py tests/test_transport_lifecycle_regressions.py tests/test_transport_failover_regressions.py --tb=short` | **10 failed, 90 passed in 9.01s**. Exact failures: two pre-send receive boundary nodes, RequestTicket CONNECTING cancel, cancel-during-control promotion, interrupted connect exact cancel, atomic batch admission, pin connect/execute after close, pool close submission-gate deadline, and rollback stop-before-retire |
+| 2026-07-15 | First post-campaign implementation focused matrix | **150 passed in 13.12s** across Actor/Pool/Lifecycle/Failover regression files |
+| 2026-07-15 | First expanded full suite on the uncommitted worktree | **397 passed, 3 failed in 83.38s**. Deterministic regressions: ticket completion published before lease callback and pool fatal hidden as CLOSING; both corrected. Heartbeat ratio 0.984775 remains retained as a failed sample, not erased by a later pass |
+| 2026-07-15 | Correctness matrix after the two full-suite corrections | **234 passed in 14.21s** across Actor/Socket/Pool/Lifecycle/Failover/Resources; isolated strict heartbeat node subsequently passed in 60.96s, but formal heartbeat evidence remains pending |
+| 2026-07-15 | Second adversarial deterministic red matrix | **7 failed in 1.74s**. Exact failures: connect/request gate acquired-before-owner-publication interrupt (2), Broker admission wait interrupt, pin-local admission wait interrupt, pin close lock-timeout followed by wire terminal lease loss, runtime fatal cleanup short-circuit, and abandon/finalizer cleanup short-circuit |
+| 2026-07-15 | Second adversarial owner-publication extension | **5 failed in 0.66s**. Exact failures: connect/request submission-gate acquire-return interrupt (2), Actor control-gate acquire-return interrupt (2), and request build failure clearing active ownership before terminal completion |
+| 2026-07-15 | Receive-identity threat-model regression | **1 failed in 0.54s** because ActorRuntime had no keyed, nonrepeating message-token identity; monotonic `msg_id + 1` remained predictable despite receive/exchange batch boundaries |
+| 2026-07-15 | Handshake semantic failover regression | **1 failed in 0.53s**: a structurally complete one-byte handshake payload raised non-retryable `ProtocolError`; the healthy second loopback endpoint received zero connections |
+| 2026-07-15 | Second red-set implementation verification | **12 passed in 0.45s** for request/submission/control identity, waiter interruption, pin lease recovery, and fatal/finalizer best-effort nodes |
+| 2026-07-15 | Third adversarial extensions before implementation | Deterministic red probes retained for physical Condition acquire interruption, pending-cancel mailbox ownership, assigned pin waiter cleanup timeout, finalizer lock contention, reserved msg_id zero, lifecycle direct-gate interruption, and handshake semantic failover |
+| 2026-07-15 | Latest four-regression matrix | **172 passed in 13.63s** |
+| 2026-07-15 | Latest Actor/Socket/Pool/Lifecycle/Resources/performance-evidence correctness matrix | **297 passed in 14.82s** |
+| 2026-07-15 | Latest `python -m pytest -q` | **422 passed in 79.05s** on Windows CPython 3.12.6 |
+| 2026-07-15 | Stress poison contract after keyed IDs | Current harness uses same-batch duplicate-response poison; exact future-ID collision is retained in fixed-key deterministic Actor regressions. Historical sequential-ID artifacts remain unchanged |
+| 2026-07-15 | Identity-gate adversarial red evidence | Broadcast waiter Events reproduced FIFO inversion and concurrent stale-release ABA (**4 failed**); direct handoff then reproduced expired-waiter grant, `Event.set()` owner stranding, and physical state-lock acquire leakage (**6 failed**); Condition release-after-success reproduced lost compat owner/orphan waiter (**4 failed**); Condition contention reproduced blocked exact release and unpublished terminal completion (**3 failed**) |
+| 2026-07-15 | Identity-gate final verification | Shared Actor/Socket gate uses FIFO direct handoff, exact-token state locking, waiter deadline/granted/terminal identity, wake-failure revocation, and Condition-independent release; **23 focused nodes passed**. Ten pre-final rounds were stable, and independent pressure ran IdentityGate and `_RequestGate` for **25 x 800 attempts each** with unique owner and empty terminal state |
+| 2026-07-15 | Heartbeat development samples on correction worktree | Two retained strict-gate failures measured **0.989967** and **0.989338** with zero timed heartbeats/cross counters; one raw 32-phase run then measured **0.996441**, and the final isolated node passed in **60.98s** after removing Condition from release. These development samples are not exact-checkpoint F06 artifacts |
+| 2026-07-15 | Final local correctness matrices before checkpoint | Four regression files **193 passed in 14.07s**; expanded Actor/Socket/Pool/Lifecycle/Resources/evidence matrix **318 passed in 15.68s**; complete suite **443 passed in 80.33s** on Windows CPython 3.12.6 |
+| 2026-07-15 | Final local static/process checks before checkpoint | `python -m compileall -q src tests scripts` passed; `git diff --check` passed with only existing LF/CRLF warnings; no background pytest remained |
+| 2026-07-15 | Final post-fix read-only reviews | Protocol review **CLEAN** after all Condition/State/Event before/after fault injections, FIFO/ABA/deadline probes, and 40,000 aggregate gate attempts; concurrency/lifecycle review **CLEAN** after terminal publication under Condition contention, five lifecycle nodes, exact cancel recovery, and gate-focused regressions |
 
 Post-`0b8ad54` corrections make Broker close broadcast every independently
 registered pin waiter Event without retaining proxies. A delayed assigned caller
@@ -303,8 +361,9 @@ consumed by shutdown instead of publishing a false `STOPPED` state.
 F06 stress requests now use the existing retry-safe file-content command. A
 uint32 request nonce is echoed with the real loopback server ID, connection ID,
 and wire-attempt sequence. Two real listeners share a provenance ledger and
-inject same-batch future-ID poison frames, partial-frame EOF, reconnects, push,
-and concurrency. Artifacts explicitly report unique, duplicate, missing,
+inject same-batch duplicate-response poison frames, partial-frame EOF,
+reconnects, push, and concurrency; exact future-ID collision remains covered by
+the fixed-key receive-boundary regressions. Artifacts explicitly report unique, duplicate, missing,
 unexpected, cross-request, and cross-generation completions. Runtime references
 are retained across close to prove the Actor thread, TCP generation, selector,
 wakeup pair, pending/active tickets, cancel map, Broker waiters/pin waiters/
@@ -375,10 +434,9 @@ artifacts must be regenerated at the next exact implementation SHA.
 
 ## Exact Next Action
 
-Profile the exact campaign A no-backlog tail and implement only a measured,
-strict-FIFO-safe production hot-path correction with deterministic regressions.
-Do not change FIFO-v1, discard campaign A, or resample `ca43972`. Push a new
-implementation checkpoint, wait for exact CI/Pages, regenerate exact-SHA common
-evidence, then create a new externally recorded campaign ID/declaration and run
-its frozen eight trials once. Only after every gate passes may evidence move to
-RESULT and final adversarial review/cleanup begin.
+Commit all correctness code/tests/scripts plus this ledger while preserving the
+user-owned RESULT diff, push the append-only checkpoint, and wait for that exact
+HEAD's Ubuntu 3.10-3.13, Windows 3.11/3.13, wheel/sdist, MkDocs, and Pages
+checks. Only after exact-head correctness is green may F06 convert the
+performance producer from constant 23285 to unique verifiable responses and
+freeze a new campaign. Do not change or resample the failed `ca43972` campaign.

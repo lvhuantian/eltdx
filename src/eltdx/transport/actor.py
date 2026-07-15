@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import errno
+import hashlib
+import secrets
 import selectors
 import socket
 import threading
@@ -31,6 +33,209 @@ from .push import PushBuffer, PushFrame
 SelectorFactory = Callable[[], selectors.BaseSelector]
 SocketFactory = Callable[[int, int, int], socket.socket]
 CandidateCallback = Callable[["ActorRuntime"], None]
+_IDENTITY_GATE_RECHECK_INTERVAL = 0.05
+
+
+@dataclass(slots=True, eq=False)
+class _IdentityWaiter:
+    token: object
+    deadline: float | None
+    event: threading.Event = field(default_factory=threading.Event)
+    granted: bool = False
+    terminal: bool = False
+
+
+class IdentityGate:
+    """Cross-thread gate whose owner is released by exact token identity."""
+
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._state_lock = threading.RLock()
+        self._owner: object | None = None
+        self._waiters: deque[_IdentityWaiter] = deque()
+        self._compat = threading.local()
+
+    def _state_is_owned(self) -> bool:
+        checker = getattr(self._state_lock, "_is_owned", None)
+        return bool(checker()) if checker is not None else False
+
+    def _release_condition(self) -> None:
+        while True:
+            try:
+                self._condition.release()
+                return
+            except RuntimeError:
+                return
+            except BaseException:
+                continue
+
+    def _release_state(self) -> None:
+        while True:
+            try:
+                self._state_lock.release()
+                return
+            except RuntimeError:
+                return
+            except BaseException:
+                if not self._state_is_owned():
+                    return
+
+    def _acquire_state(self, deadline: float | None, *, uninterruptible: bool = False) -> bool:
+        while True:
+            timeout = None if deadline is None else max(0.0, deadline - time.monotonic())
+            try:
+                if timeout is None:
+                    acquired = self._state_lock.acquire()
+                elif timeout == 0:
+                    acquired = self._state_lock.acquire(blocking=False)
+                else:
+                    acquired = self._state_lock.acquire(timeout=timeout)
+            except BaseException:
+                if self._state_is_owned():
+                    if uninterruptible:
+                        return True
+                    self._release_state()
+                if uninterruptible:
+                    continue
+                raise
+            return bool(acquired)
+
+    def acquire_token(self, token: object, deadline: float | None) -> bool:
+        timeout = None if deadline is None else max(0.0, deadline - time.monotonic())
+        try:
+            acquired = self._condition.acquire() if timeout is None else self._condition.acquire(timeout=timeout)
+        except BaseException:
+            self._release_condition()
+            raise
+        if not acquired:
+            return False
+        state_acquired = False
+        try:
+            state_acquired = self._acquire_state(deadline)
+            if not state_acquired:
+                return False
+            try:
+                if self._owner is None and not self._waiters:
+                    self._owner = token
+                    return True
+                if deadline is not None and deadline <= time.monotonic():
+                    return False
+                waiter = _IdentityWaiter(token, deadline)
+                self._waiters.append(waiter)
+            finally:
+                self._release_state()
+                state_acquired = False
+        finally:
+            self._release_condition()
+
+        try:
+            while True:
+                remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+                wait_for = (
+                    _IDENTITY_GATE_RECHECK_INTERVAL
+                    if remaining is None
+                    else min(_IDENTITY_GATE_RECHECK_INTERVAL, remaining)
+                )
+                if wait_for > 0:
+                    waiter.event.wait(wait_for)
+                state_acquired = self._acquire_state(deadline)
+                if not state_acquired:
+                    state_acquired = self._acquire_state(None, uninterruptible=True)
+                try:
+                    if waiter.granted and self._owner is token:
+                        return True
+                    if waiter.terminal:
+                        return False
+                    if deadline is not None and deadline <= time.monotonic():
+                        self._remove_waiter_locked(waiter)
+                        waiter.terminal = True
+                        return False
+                finally:
+                    self._release_state()
+                    state_acquired = False
+        except BaseException:
+            self._withdraw_waiter(waiter, abandon_owner=True)
+            raise
+
+    def _remove_waiter_locked(self, waiter: _IdentityWaiter) -> None:
+        try:
+            self._waiters.remove(waiter)
+        except ValueError:
+            pass
+
+    def _handoff_locked(self, token: object) -> bool:
+        if self._owner is not token:
+            return False
+        self._owner = None
+        while self._waiters:
+            waiter = self._waiters.popleft()
+            if waiter.terminal:
+                continue
+            if waiter.deadline is not None and waiter.deadline <= time.monotonic():
+                waiter.terminal = True
+                try:
+                    waiter.event.set()
+                except BaseException:
+                    pass
+                continue
+            self._owner = waiter.token
+            waiter.granted = True
+            try:
+                waiter.event.set()
+            except BaseException:
+                waiter.granted = False
+                waiter.terminal = True
+                self._owner = None
+                continue
+            break
+        return True
+
+    def _withdraw_waiter(self, waiter: _IdentityWaiter, *, abandon_owner: bool) -> None:
+        self._acquire_state(None, uninterruptible=True)
+        try:
+            if abandon_owner and waiter.granted and self._owner is waiter.token:
+                waiter.granted = False
+                waiter.terminal = True
+                self._handoff_locked(waiter.token)
+            else:
+                self._remove_waiter_locked(waiter)
+                waiter.terminal = True
+        finally:
+            self._release_state()
+
+    def release_token(self, token: object) -> bool:
+        self._acquire_state(None, uninterruptible=True)
+        try:
+            released = self._handoff_locked(token)
+        finally:
+            self._release_state()
+        return released
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        token = object()
+        if not blocking:
+            deadline = time.monotonic()
+        elif timeout >= 0:
+            deadline = time.monotonic() + timeout
+        else:
+            deadline = None
+        acquired = self.acquire_token(token, deadline)
+        if acquired:
+            self._compat.token = token
+        return acquired
+
+    def release(self) -> None:
+        token = getattr(self._compat, "token", None)
+        if token is None or not self.release_token(token):
+            raise RuntimeError("cannot release an unowned identity gate")
+        self._compat.token = None
+
+    def __enter__(self) -> IdentityGate:
+        self.acquire()
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.release()
 
 
 class ActorStartupError(TransportError):
@@ -82,6 +287,7 @@ class ConnectTicket:
     error: BaseException | None = None
     completed_at: float | None = None
     completion_error: BaseException | None = None
+    terminal_claimed: bool = False
     completed: threading.Event = field(default_factory=threading.Event)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -105,6 +311,7 @@ class RequestTicket:
     error: BaseException | None = None
     completed_at: float | None = None
     completion_error: BaseException | None = None
+    terminal_claimed: bool = False
     completed: threading.Event = field(default_factory=threading.Event)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -124,6 +331,7 @@ class TcpGeneration:
     active_exchange: WireExchange | None = None
     decoded_frames: deque[ReceivedFrame] = field(default_factory=deque)
     rx_sequence: int = 0
+    exchange_counter: int = 0
     receive_drained: bool = False
     connected_at: float = 0.0
     last_activity_at: float = 0.0
@@ -139,7 +347,9 @@ class WireExchange:
     frame: bytes
     handshake: bool
     rx_boundary: int = 0
+    exchange_id: int = 0
     sent_any: bool = False
+    send_claimed: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,6 +363,8 @@ class CancelToken:
 class ReceivedFrame:
     sequence: int
     response: ResponseFrame
+    exchange_id: int | None = None
+    send_complete: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,7 +415,7 @@ class ActorRuntime:
     request_timeout: float = 8.0
     owns_push_buffer: bool = True
     fatal_callback: Callable[[ActorRuntime, BaseException], None] | None = None
-    control_lock: threading.Lock = field(default_factory=threading.Lock)
+    control_lock: IdentityGate = field(default_factory=IdentityGate)
     state: RuntimeState = RuntimeState.STARTING
     stop_requested: bool = False
     pending_task: ConnectTicket | RequestTicket | None = None
@@ -228,6 +440,7 @@ class ActorRuntime:
     connected_host: str | None = None
     last_error: BaseException | None = None
     msg_id_counter: int = 0
+    msg_id_key: bytes = field(default_factory=lambda: secrets.token_bytes(16))
     request_id_counter: int = 0
     stale_event_count: int = 0
     last_handshake: object | None = None
@@ -318,8 +531,10 @@ def submit_connect(
     deadline: float,
     lease_id: int = 0,
     completion: Callable[[ConnectTicket | None], None] | None = None,
+    submission_claim: Callable[[ConnectTicket], None] | None = None,
 ) -> ConnectTicket:
-    with runtime.control_lock:
+    control_token = _acquire_control_lock(runtime, deadline, "connect submission", timeout_error=True)
+    try:
         if runtime.state is not RuntimeState.RUNNING or runtime.stop_requested:
             raise ConnectionClosedError(f"7709 Actor is not running: {runtime.state.name}")
         if runtime.pending_task is not None:
@@ -332,8 +547,12 @@ def submit_connect(
             request_id=runtime.request_id_counter,
             completion=completion,
         )
+        if submission_claim is not None:
+            submission_claim(ticket)
         runtime.pending_task = ticket
         writer = runtime.wake_writer
+    finally:
+        runtime.control_lock.release_token(control_token)
     _notify_submitted_ticket(runtime, ticket, writer)
     return ticket
 
@@ -347,8 +566,10 @@ def submit_request(
     deadline: float,
     retry_safe: bool,
     completion: Callable[[RequestTicket | None], None] | None = None,
+    submission_claim: Callable[[RequestTicket], None] | None = None,
 ) -> RequestTicket:
-    with runtime.control_lock:
+    control_token = _acquire_control_lock(runtime, deadline, "request submission", timeout_error=True)
+    try:
         if runtime.state is not RuntimeState.RUNNING or runtime.stop_requested:
             raise ConnectionClosedError(f"7709 Actor is not running: {runtime.state.name}")
         if runtime.pending_task is not None:
@@ -364,25 +585,39 @@ def submit_request(
             request_id=runtime.request_id_counter,
             completion=completion,
         )
+        if submission_claim is not None:
+            submission_claim(ticket)
         runtime.pending_task = ticket
         writer = runtime.wake_writer
+    finally:
+        runtime.control_lock.release_token(control_token)
     _notify_submitted_ticket(runtime, ticket, writer)
     return ticket
 
 
-def cancel_ticket(runtime: ActorRuntime, ticket: ConnectTicket | RequestTicket) -> None:
-    with runtime.control_lock:
+def cancel_ticket(
+    runtime: ActorRuntime,
+    ticket: ConnectTicket | RequestTicket,
+    *,
+    deadline: float | None = None,
+) -> bool:
+    control_token = _acquire_control_lock(runtime, deadline, "cancel")
+    try:
         if ticket.runtime_epoch != runtime.runtime_epoch or (
             ticket is not runtime.active_task and ticket is not runtime.pending_task
         ):
-            return
+            with ticket.lock:
+                return ticket.terminal_claimed and ticket.state not in TERMINAL_REQUEST_STATES
         runtime.cancel_requests[ticket.request_id] = CancelToken(
             runtime_epoch=runtime.runtime_epoch,
             request_id=ticket.request_id,
             lease_id=ticket.lease_id,
         )
         writer = runtime.wake_writer
+    finally:
+        runtime.control_lock.release_token(control_token)
     _notify_actor(runtime, writer)
+    return True
 
 
 def wait_ticket(ticket: ConnectTicket | RequestTicket) -> Any:
@@ -407,8 +642,9 @@ def wait_ticket(ticket: ConnectTicket | RequestTicket) -> Any:
     return ticket.result
 
 
-def request_actor_stop(runtime: ActorRuntime) -> None:
-    with runtime.control_lock:
+def request_actor_stop(runtime: ActorRuntime, *, deadline: float | None = None) -> None:
+    control_token = _acquire_control_lock(runtime, deadline, "stop")
+    try:
         runtime.stop_requested = True
         thread = runtime.actor_thread
         if runtime.state in (RuntimeState.STARTING, RuntimeState.RUNNING) or (
@@ -416,30 +652,62 @@ def request_actor_stop(runtime: ActorRuntime) -> None:
         ):
             runtime.state = RuntimeState.CLOSING
         writer = runtime.wake_writer
+    finally:
+        runtime.control_lock.release_token(control_token)
     _notify_actor(runtime, writer)
 
 
+def _acquire_control_lock(
+    runtime: ActorRuntime,
+    deadline: float | None,
+    operation: str,
+    *,
+    timeout_error: bool = False,
+) -> object:
+    token = object()
+    try:
+        acquired = runtime.control_lock.acquire_token(token, deadline)
+    except BaseException:
+        runtime.control_lock.release_token(token)
+        raise
+    if acquired:
+        return token
+    if timeout_error:
+        raise ResponseTimeoutError(f"7709 response timed out during Actor {operation}")
+    raise TransportCloseTimeoutError(f"7709 Actor control lock blocked {operation} before deadline")
+
+
 def close_actor(runtime: ActorRuntime, timeout: float = 1.0) -> None:
-    with runtime.control_lock:
+    deadline = time.monotonic() + max(0.0, timeout)
+    control_token = _acquire_control_lock(runtime, deadline, "close inspection")
+    try:
         failed_before_close = runtime.fatal_error is not None or runtime.state in (
             RuntimeState.FAILED,
             RuntimeState.FAILED_CLOSING,
             RuntimeState.FAILED_CLOSED,
         )
-    request_actor_stop(runtime)
+    finally:
+        runtime.control_lock.release_token(control_token)
+    request_actor_stop(runtime, deadline=deadline)
     thread = runtime.actor_thread
     if thread is not None and thread.ident is not None and thread is not threading.current_thread():
-        thread.join(max(0.0, timeout))
+        thread.join(max(0.0, deadline - time.monotonic()))
     if thread is not None and thread.is_alive():
-        with runtime.control_lock:
+        control_token = _acquire_control_lock(runtime, deadline, "failed-close publication")
+        try:
             runtime.state = RuntimeState.FAILED_CLOSING
+        finally:
+            runtime.control_lock.release_token(control_token)
         raise TransportCloseTimeoutError("7709 Actor did not stop within 1 second")
-    with runtime.control_lock:
+    control_token = _acquire_control_lock(runtime, deadline, "close completion")
+    try:
         cleanup_error = runtime.cleanup_error
         if cleanup_error is not None:
             runtime.state = RuntimeState.FAILED_CLOSING
         elif failed_before_close or runtime.state is RuntimeState.FAILED_CLOSING:
             runtime.state = RuntimeState.FAILED_CLOSED
+    finally:
+        runtime.control_lock.release_token(control_token)
     if cleanup_error is not None:
         raise TransportCloseTimeoutError("7709 Actor resource cleanup failed") from cleanup_error
 
@@ -447,7 +715,11 @@ def close_actor(runtime: ActorRuntime, timeout: float = 1.0) -> None:
 def abandon_actor(runtime: ActorRuntime) -> None:
     """Best-effort non-blocking finalizer callback for one exact runtime."""
 
-    request_actor_stop(runtime)
+    runtime.stop_requested = True
+    try:
+        _notify_actor(runtime, runtime.wake_writer)
+    except BaseException:
+        pass
 
 
 def actor_snapshot(runtime: ActorRuntime) -> ActorSnapshot:
@@ -535,20 +807,26 @@ def _run_actor(runtime: ActorRuntime) -> None:
 
 
 def _drain_control(runtime: ActorRuntime) -> None:
-    with runtime.control_lock:
-        cancels = tuple(runtime.cancel_requests.values())
-        runtime.cancel_requests.clear()
-    for cancel in cancels:
-        _apply_cancel(runtime, cancel)
-    with runtime.control_lock:
-        if runtime.stop_requested or runtime.active_task is not None:
-            return
-        task = runtime.pending_task
-        runtime.pending_task = None
-        runtime.active_task = task
-    generation = runtime.generation
-    if isinstance(task, RequestTicket) and generation is not None and generation.active_exchange is None:
-        generation.receive_drained = False
+    while True:
+        with runtime.control_lock:
+            cancels = tuple(runtime.cancel_requests.values())
+            runtime.cancel_requests.clear()
+            if not cancels:
+                if runtime.stop_requested or runtime.active_task is not None:
+                    return
+                task = runtime.pending_task
+                runtime.pending_task = None
+                runtime.active_task = task
+                generation = runtime.generation
+                if (
+                    isinstance(task, RequestTicket)
+                    and generation is not None
+                    and generation.active_exchange is None
+                ):
+                    generation.receive_drained = False
+                return
+        for cancel in cancels:
+            _apply_cancel(runtime, cancel)
 
 
 def _advance_active_task(runtime: ActorRuntime) -> None:
@@ -606,7 +884,9 @@ def _apply_cancel(runtime: ActorRuntime, cancel: CancelToken) -> None:
                 _drop_generation(runtime, ConnectionClosedError("7709 connect cancelled"))
         else:
             exchange = generation.active_exchange if generation is not None else None
-            if exchange is not None and exchange.ticket is ticket:
+            if generation is not None and generation.state is TcpState.CONNECTING:
+                _drop_generation(runtime, ConnectionClosedError("7709 request cancelled during connect"))
+            elif exchange is not None and exchange.ticket is ticket:
                 if exchange.sent_any:
                     _drop_generation(runtime, ConnectionClosedError("7709 request cancelled after send"))
                 else:
@@ -623,6 +903,7 @@ def _apply_cancel(runtime: ActorRuntime, cancel: CancelToken) -> None:
         if isinstance(pending, (ConnectTicket, RequestTicket)) and (
             pending.request_id == cancel.request_id and pending.lease_id == cancel.lease_id
         ):
+            _claim_ticket_terminal(pending)
             runtime.pending_task = None
         else:
             pending = None
@@ -658,7 +939,7 @@ def _begin_exchange(runtime: ActorRuntime, ticket: RequestTicket, command: int, 
     generation = runtime.generation
     if generation is None:
         raise RuntimeError("cannot start wire exchange without a TCP generation")
-    next_msg_id = 1 if runtime.msg_id_counter >= 0xFFFFFFFF else runtime.msg_id_counter + 1
+    next_msg_id = _next_message_id(runtime)
     payload = {} if handshake else ticket.request_payload_snapshot
     try:
         if not isinstance(payload, dict):
@@ -666,11 +947,11 @@ def _begin_exchange(runtime: ActorRuntime, ticket: RequestTicket, command: int, 
         request = build_command_frame(command, payload, next_msg_id)
         frame = request.to_bytes()
     except Exception as exc:
+        _complete_ticket(ticket, RequestState.FAILED, error=exc)
         if runtime.active_task is ticket:
             runtime.active_task = None
-        _complete_ticket(ticket, RequestState.FAILED, error=exc)
         return False
-    runtime.msg_id_counter = next_msg_id
+    generation.exchange_counter += 1
     generation.tx_bytes = frame
     generation.tx_offset = 0
     generation.active_exchange = WireExchange(
@@ -681,6 +962,7 @@ def _begin_exchange(runtime: ActorRuntime, ticket: RequestTicket, command: int, 
         frame=frame,
         handshake=handshake,
         rx_boundary=generation.rx_sequence,
+        exchange_id=generation.exchange_counter,
     )
     generation.state = TcpState.HANDSHAKING if handshake else TcpState.READY
     if not handshake:
@@ -756,6 +1038,28 @@ def _start_next_endpoint(runtime: ActorRuntime) -> None:
     _fail_active_task(runtime, error, retryable=True)
 
 
+def _next_message_id(runtime: ActorRuntime) -> int:
+    while runtime.msg_id_counter < 0xFFFFFFFF:
+        runtime.msg_id_counter += 1
+        message_id = _message_id_for_counter(runtime, runtime.msg_id_counter)
+        if message_id != 0:
+            return message_id
+    raise TransportError("7709 message identity space exhausted")
+
+
+def _message_id_for_counter(runtime: ActorRuntime, value: int) -> int:
+    left = (value >> 16) & 0xFFFF
+    right = value & 0xFFFF
+    for round_index in range(4):
+        digest = hashlib.blake2s(
+            right.to_bytes(2, "little") + bytes((round_index,)),
+            key=runtime.msg_id_key,
+            digest_size=2,
+        ).digest()
+        left, right = right, left ^ int.from_bytes(digest, "little")
+    return ((left & 0xFFFF) << 16) | (right & 0xFFFF)
+
+
 def _attempt_budget_deadline(ticket: ConnectTicket | RequestTicket) -> float:
     if isinstance(ticket, RequestTicket) and ticket.attempt_deadline > 0:
         return min(ticket.deadline, ticket.attempt_deadline)
@@ -799,15 +1103,25 @@ def _handle_tcp_event(runtime: ActorRuntime, token: SelectorToken, mask: int) ->
         runtime.stale_event_count += 1
         return
     if generation.state is not TcpState.CONNECTING:
+        if runtime.generation is generation and mask & selectors.EVENT_READ:
+            generation.receive_drained = False
+            drained = _receive_generation_safely(runtime, generation)
+            if runtime.generation is not generation:
+                return
+            if (
+                not drained
+                or generation.decoded_frames
+                or generation.decoder.buffered_bytes
+            ):
+                return
+        if generation.decoded_frames or generation.decoder.buffered_bytes:
+            return
         try:
             if mask & selectors.EVENT_WRITE:
                 _send_generation(runtime, generation)
         except (OSError, ConnectionClosedError) as exc:
             _handle_wire_failure(runtime, exc, retryable=True)
             return
-        if runtime.generation is generation and mask & selectors.EVENT_READ:
-            generation.receive_drained = False
-            _receive_generation_safely(runtime, generation)
         return
     try:
         error_code = generation.sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
@@ -856,6 +1170,18 @@ def _send_generation(runtime: ActorRuntime, generation: TcpGeneration) -> None:
     exchange = generation.active_exchange
     if exchange is None or generation.tx_offset >= len(generation.tx_bytes):
         return
+    _drain_control(runtime)
+    if runtime.stop_requested:
+        return
+    _expire_active_task(runtime)
+    if (
+        runtime.generation is not generation
+        or runtime.active_task is not exchange.ticket
+        or generation.active_exchange is not exchange
+    ):
+        return
+    if not _claim_generation_send(runtime, generation, exchange):
+        return
     try:
         sent = generation.sock.send(memoryview(generation.tx_bytes)[generation.tx_offset:])
     except BlockingIOError:
@@ -871,9 +1197,32 @@ def _send_generation(runtime: ActorRuntime, generation: TcpGeneration) -> None:
     if generation.tx_offset < len(generation.tx_bytes):
         _set_generation_interest(runtime, generation, selectors.EVENT_READ | selectors.EVENT_WRITE)
         return
+    exchange.rx_boundary = generation.rx_sequence
     if not exchange.handshake:
         exchange.ticket.state = RequestState.WAITING_RESPONSE
     _set_generation_interest(runtime, generation, selectors.EVENT_READ)
+
+
+def _claim_generation_send(
+    runtime: ActorRuntime,
+    generation: TcpGeneration,
+    exchange: WireExchange,
+) -> bool:
+    with runtime.control_lock:
+        claimed = (
+            not runtime.stop_requested
+            and exchange.ticket.request_id not in runtime.cancel_requests
+            and time.monotonic() < _attempt_budget_deadline(exchange.ticket)
+            and runtime.generation is generation
+            and runtime.active_task is exchange.ticket
+            and generation.active_exchange is exchange
+        )
+        if claimed:
+            exchange.send_claimed = True
+    if not claimed:
+        _drain_control(runtime)
+        _expire_active_task(runtime)
+    return claimed
 
 
 def _receive_generation_safely(runtime: ActorRuntime, generation: TcpGeneration) -> bool:
@@ -915,9 +1264,22 @@ def _receive_generation(runtime: ActorRuntime, generation: TcpGeneration) -> boo
         frames = generation.decoder.feed(chunk)
         if len(generation.decoded_frames) + len(frames) > 1024:
             raise ProtocolError("decoded response frame queue exceeds limit: 1024")
+        exchange = generation.active_exchange
+        exchange_id = exchange.exchange_id if exchange is not None else None
+        send_complete = bool(
+            exchange is not None
+            and generation.tx_offset >= len(generation.tx_bytes)
+        )
         for response in frames:
             generation.rx_sequence += 1
-            generation.decoded_frames.append(ReceivedFrame(generation.rx_sequence, response))
+            generation.decoded_frames.append(
+                ReceivedFrame(
+                    generation.rx_sequence,
+                    response,
+                    exchange_id=exchange_id,
+                    send_complete=send_complete,
+                )
+            )
     return False
 
 
@@ -932,6 +1294,8 @@ def _route_frame(runtime: ActorRuntime, generation: TcpGeneration, received: Rec
         exchange is None
         or exchange.ticket is not active
         or exchange.ticket.runtime_epoch != runtime.runtime_epoch
+        or received.exchange_id != exchange.exchange_id
+        or not received.send_complete
         or received.sequence <= exchange.rx_boundary
         or generation.tx_offset < len(generation.tx_bytes)
         or response.msg_id != exchange.msg_id
@@ -947,8 +1311,15 @@ def _route_frame(runtime: ActorRuntime, generation: TcpGeneration, received: Rec
         return
 
     ticket = exchange.ticket
+    handshake_result: object | None = None
+    if exchange.handshake or ticket.command == TYPE_HANDSHAKE:
+        try:
+            handshake_result = parse_command_response(TYPE_HANDSHAKE, response, {})
+        except ProtocolError as exc:
+            _handle_wire_failure(runtime, exc, retryable=True)
+            return
     if exchange.handshake:
-        runtime.last_handshake = parse_command_response(TYPE_HANDSHAKE, response, {})
+        runtime.last_handshake = handshake_result
         generation.active_exchange = None
         generation.tx_bytes = b""
         generation.tx_offset = 0
@@ -958,7 +1329,7 @@ def _route_frame(runtime: ActorRuntime, generation: TcpGeneration, received: Rec
             _set_generation_interest(runtime, generation, selectors.EVENT_READ)
             return
     elif ticket.command == TYPE_HANDSHAKE:
-        runtime.last_handshake = parse_command_response(TYPE_HANDSHAKE, response, {})
+        runtime.last_handshake = handshake_result
     elif ticket.command == TYPE_HEARTBEAT:
         runtime.last_heartbeat = parse_command_response(TYPE_HEARTBEAT, response, {})
     envelope = FrameEnvelope(
@@ -977,8 +1348,8 @@ def _route_frame(runtime: ActorRuntime, generation: TcpGeneration, received: Rec
     generation.tx_bytes = b""
     generation.tx_offset = 0
     generation.state = TcpState.READY
-    runtime.active_task = None
     _complete_ticket(ticket, RequestState.SUCCESS, result=envelope)
+    runtime.active_task = None
 
 
 def _handle_wire_failure(runtime: ActorRuntime, error: BaseException, *, retryable: bool) -> None:
@@ -1164,6 +1535,7 @@ def _complete_ticket(
     with ticket.lock:
         if ticket.state in TERMINAL_REQUEST_STATES:
             return False
+        ticket.terminal_claimed = True
         ticket.state = state
         ticket.error = error
         ticket.completed_at = time.monotonic()
@@ -1260,6 +1632,7 @@ def _notify_submitted_ticket(
         with runtime.control_lock:
             withdrawn = runtime.pending_task is ticket
             if withdrawn:
+                _claim_ticket_terminal(ticket)
                 runtime.pending_task = None
         if withdrawn:
             _complete_ticket(ticket, RequestState.FAILED, error=exc)
@@ -1305,8 +1678,12 @@ def _finish_runtime(runtime: ActorRuntime, initial_cleanup_error: BaseException 
     try:
         with runtime.control_lock:
             pending = runtime.pending_task
+            if pending is not None:
+                _claim_ticket_terminal(pending)
             runtime.pending_task = None
             active = runtime.active_task
+            if active is not None:
+                _claim_ticket_terminal(active)
             runtime.active_task = None
             runtime.cancel_requests.clear()
         for ticket in (pending, active):
@@ -1396,3 +1773,11 @@ def _first_non_push_cleanup_error(
             continue
         return error
     return None
+
+
+def _claim_ticket_terminal(ticket: ConnectTicket | RequestTicket) -> bool:
+    with ticket.lock:
+        if ticket.state in TERMINAL_REQUEST_STATES:
+            return False
+        ticket.terminal_claimed = True
+        return True

@@ -174,13 +174,13 @@ class BenchmarkServer:
                     try:
                         if self._delay:
                             time.sleep(self._delay)
-                        conn.sendall(_response(msg_id, msg_type, payload))
                     finally:
                         with self._idle:
                             self._active -= 1
                             self.requests += 1
                             if self._active == 0:
                                 self._idle.notify_all()
+                    conn.sendall(_response(msg_id, msg_type, payload))
         except (EOFError, OSError):
             return
         except BaseException as exc:

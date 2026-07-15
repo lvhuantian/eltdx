@@ -73,8 +73,11 @@ def test_download_file_pins_pooled_transport(monkeypatch) -> None:
             runtime=None,
             lock_slot=False,
             expected_runtime_epoch=None,
+            submission_check=None,
             index=index,
         ):
+            if submission_check is not None:
+                submission_check()
             assert command == TYPE_FILE_CONTENT
             request = dict(payload or {})
             calls[index].append(request)

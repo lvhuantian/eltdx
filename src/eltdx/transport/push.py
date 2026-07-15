@@ -7,7 +7,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 
-from eltdx.exceptions import PushOverflowError
+from eltdx.exceptions import PushOverflowError, TransportCloseTimeoutError
 from eltdx.protocol.frame import ResponseFrame
 
 
@@ -124,6 +124,27 @@ class PushBuffer:
             self._bytes = 0
             self._condition.notify_all()
 
+    def close_before_deadline(self, deadline: float, error: BaseException | None = None) -> None:
+        acquired = self._condition.acquire(timeout=max(0.0, deadline - time.monotonic()))
+        if not acquired:
+            raise TransportCloseTimeoutError("7709 push buffer close blocked before deadline")
+        try:
+            self.close(error)
+        finally:
+            self._condition.release()
+
+    def abandon(self) -> None:
+        self._closed = True
+        acquired = self._condition.acquire(blocking=False)
+        if not acquired:
+            return
+        try:
+            self._frames.clear()
+            self._bytes = 0
+            self._condition.notify_all()
+        finally:
+            self._condition.release()
+
     def snapshot(self) -> PushBufferSnapshot:
         with self._condition:
             return PushBufferSnapshot(
@@ -136,6 +157,15 @@ class PushBuffer:
                 gap_pending=self._gap_pending,
                 closed=self._closed,
             )
+
+    def snapshot_before_deadline(self, deadline: float) -> PushBufferSnapshot:
+        acquired = self._condition.acquire(timeout=max(0.0, deadline - time.monotonic()))
+        if not acquired:
+            raise TransportCloseTimeoutError("7709 push buffer snapshot blocked before deadline")
+        try:
+            return self.snapshot()
+        finally:
+            self._condition.release()
 
     def _raise_gap_locked(self) -> None:
         if not self._gap_pending:

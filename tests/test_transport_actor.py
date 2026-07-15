@@ -609,6 +609,8 @@ def test_partial_send_preserves_every_offset_and_blocking_error() -> None:
     generation.active_exchange = actor_module.WireExchange(ticket, TYPE_SECURITY_COUNT, 1, TYPE_SECURITY_COUNT, b"abcdef", False)
     runtime = actor_module.ActorRuntime(1, (endpoint,))
     runtime.selector = InterestSelector()
+    runtime.generation = generation
+    runtime.active_task = ticket
 
     observed = []
     for _ in range(4):
@@ -650,6 +652,7 @@ def test_send_zero_is_connection_closed_and_old_socket_token_is_stale() -> None:
     generation.active_exchange = actor_module.WireExchange(ticket, TYPE_SECURITY_COUNT, 1, TYPE_SECURITY_COUNT, b"abc", False)
     runtime = actor_module.ActorRuntime(1, (endpoint,))
     runtime.generation = generation
+    runtime.active_task = ticket
     with pytest.raises(ConnectionClosedError, match="during send"):
         actor_module._send_generation(runtime, generation)
 
