@@ -14,8 +14,8 @@ The result document remains historical evidence only until FINAL rewrites it.
 | Branch | `actor-transport-refactor` |
 | Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), confirmed OPEN and draft at pushed HEAD `2da76518a785c6c167474b9826863c1d3cf98953` |
 | Final-review correction base | `cc46e6042e60b1d70732ae813b089f9c8b572572` |
-| Latest pushed correction checkpoint | `76c3a953f45dc7e9547b247c810f781c2169a557`; exact CI run `29423544748` and Pages run `29423544439` passed |
-| Current local follow-up | Formal `fifo-v2-2da7651-a` remains a permanent FAIL. Cross-thread timing localized the remaining Windows cost; a pool-size-specific Actor cooperation policy is locally clean and ready for a new source checkpoint |
+| Latest pushed correction checkpoint | `e106ad484ff90aa5602a24926ca527486197fda9`; exact CI run `29429941357` and Pages run `29429941406` passed |
+| Current local follow-up | Formal `fifo-v2-2da7651-a` remains a permanent FAIL. Windows Actor cooperation is checkpointed and exact remote checks are green; one remote-evidence ledger commit precedes the next new declaration |
 | Baseline worktree | User-owned modification in `ACTOR_REFACTOR_RESULT.md`; preserve and integrate, do not overwrite |
 | Superseded result | Existing `COMPLETE` claim and 183-test evidence |
 
@@ -40,7 +40,7 @@ again before FINAL evidence is accepted.
 | F03 connect and failover | COMPLETE (`2e48be0`) | Candidate/attempt budgets, next-endpoint retry, Windows peer verification, non-busy rearm, and seven real/fault-injected regressions |
 | F04 Broker and pinned leases | CORRECTNESS CLOSED; CHECKPOINT CANDIDATE | BaseException-safe waiter withdrawal, assigned-waiter lazy reap, pin close lease recovery, atomic batch admission, and FIFO pass |
 | F05 lifecycle and shutdown | CORRECTNESS CLOSED; CHECKPOINT CANDIDATE | Tokenized lifecycle gates, nonblocking finalizers, deadline-bounded best-effort fatal cleanup, and monotonic shutdown pass |
-| F06 stress, performance, resources, compatibility | LOW-RISK HOT-PATH CHECKPOINT (`8296511`); Windows cooperation checkpoint candidate; FIFO-v2 campaign FAIL | Pool-size-specific yield/Event grace passes 485 local tests, builds/docs, two clean post-fix reviews, and directionally clean C/E/E/C; a new exact source checkpoint, CI/Pages, and formal campaign are required |
+| F06 stress, performance, resources, compatibility | WINDOWS ACTOR COOPERATION CHECKPOINT (`e106ad4`); FIFO-v2 campaign FAIL | Pool-size-specific yield/Event grace passes 485 local tests, builds/docs, two clean post-fix reviews, directionally clean C/E/E/C, and exact CI/Pages; a new one-shot formal campaign is required |
 | Final-review correctness correction | COMPLETE (`a53cc09`) | 443-test correctness snapshot plus deterministic two-endpoint generation failover; exact CI and Pages passed |
 | FINAL independent review and CI | PENDING | Two clean adversarial reviews; local matrix/build/docs and exact-HEAD CI/Pages green |
 
@@ -469,6 +469,8 @@ exact-source performance artifacts remain to be generated after checkpointing.
 | 2026-07-15 | Retained Windows Actor cooperation policy | Windows pool-size one uses one terminal `Sleep(0)` only after an external ticket is terminal and no pending/cancel/stop is visible. Windows multi-slot pools use a 0.5 ms interruptible successor Event grace; Linux and standalone remain unchanged. The multi-slot C/E/E/C sequence used control HEAD `2da7651`, 10,000 saturated requests and 500 four-worker cohorts per cell: saturated rps were 665.234/670.493/672.009/664.404, no-backlog p50 6.6034/6.5594/6.5111/6.6500 ms, and p99 7.7608/7.7578/7.5593/7.7238 ms. Adjacent changes were saturated +0.791/+1.145 percent, p50 -0.044/-0.139 ms, and p99 -0.003/-0.165 ms. After the control-priority correction, a separate final 3,000-request sequential C/E/E/C measured 167.844/167.744/168.344/167.729 rps, p50 5.9059/5.9151/5.8804/5.9401 ms, and p99 6.6611/6.6830/6.6395/6.6165 ms: adjacent throughput changes -0.060/+0.367 percent. All 12,000 final sequential completions and all 48,000 retained multi-slot completions were unique with zero cross counters. These are development evidence, not a formal gate |
 | 2026-07-15 | Cooperation adversarial reviews and corrections | Independent reviews found terminal yield bypassing already-visible control priority and an `abandon_actor()` stop signal racing between Event check and clear. Unified control-lock checks, a post-clear finalizer stop recheck, and deterministic grace/yield x internal/pending/cancel/stop plus finalizer lost-wake tests closed both. Final race and lifecycle/configuration reviews were **CLEAN**, including real pool configuration reset/reopen and Socket-to-Actor propagation coverage |
 | 2026-07-15 | Cooperation candidate local matrix | Four Actor/Failover/Pool/Lifecycle files passed **219 tests in 14.23s**. Final complete suite passed **485 tests in 77.88s** after both review corrections and configuration tests. Wheel and sdist built successfully; MkDocs strict, `compileall -q src tests scripts`, and `git diff --check` passed |
+| 2026-07-15 | Windows cooperation source checkpoint | Commit `e106ad4` (`Fix-Checkpoint: F06-WINDOWS-ACTOR-COOPERATION`) contains only Actor/Socket/Pool configuration, deterministic race/configuration tests, and the progress ledger; the user-owned result document was explicitly excluded |
+| 2026-07-15 | Exact `e106ad4` remote checks | CI run `29429941357` passed Ubuntu 3.10-3.13, Windows 3.11/3.13, and package build; Pages run `29429941406` passed. PR #12 remained OPEN and draft at exact head `e106ad484ff90aa5602a24926ca527486197fda9` |
 
 Post-`0b8ad54` corrections make Broker close broadcast every independently
 registered pin waiter Event without retaining proxies. A delayed assigned caller
@@ -585,10 +587,9 @@ artifacts must be regenerated at the next exact implementation SHA.
 
 ## Exact Next Action
 
-Commit the exact Windows cooperation source, deterministic races, configuration
-tests, and this ledger as a new checkpoint while explicitly excluding the
-user-owned result document. Push the same branch and require exact checkpoint
-CI and Pages. Only then create a clean detached current worktree, a new
-FIFO-v2 campaign ID and declaration bound to that exact SHA, and execute all
-eight cells once in the frozen order. Never resample `fifo-v1-ca43972-a`,
+Commit and push this exact remote-evidence ledger update while explicitly
+excluding the user-owned result document, then require that documentation-only
+HEAD's CI and Pages. Create a clean detached current worktree, a new FIFO-v2
+campaign ID and declaration bound to that exact SHA, and execute all eight cells
+once in the frozen order. Never resample `fifo-v1-ca43972-a`,
 `fifo-v2-72ef660-a`, or `fifo-v2-2da7651-a`.
