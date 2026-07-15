@@ -14,8 +14,8 @@ The result document remains historical evidence only until FINAL rewrites it.
 | Branch | `actor-transport-refactor` |
 | Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), confirmed OPEN and draft at pushed HEAD `a53cc09450cd98b3cb8011e92110b244d854148b` |
 | Final-review correction base | `cc46e6042e60b1d70732ae813b089f9c8b572572` |
-| Latest pushed correction checkpoint | `a53cc09450cd98b3cb8011e92110b244d854148b`; exact CI run `29403736004` passed Ubuntu 3.10-3.13, Windows 3.11/3.13, and package build; exact Pages run `29403735977` passed |
-| Current local follow-up | FIFO-v2 schema 4 producer/verifier freeze candidate is locally green at 459 tests; independent protocol and evidence reviews are CLEAN at the frozen local-artifact trust boundary |
+| Latest pushed correction checkpoint | `66e44968d407b52b3b0f7464cf7fb1baabe680f7`; Pages run `29407448038` passed, while CI run `29407448048` retained one Windows 3.11 deterministic-test timing failure; every other job passed |
+| Current local follow-up | The failed regression now waits to its captured Event deadline instead of assuming `sleep(0.06)` crossed 50 ms; 20 focused rounds, 46 pool regressions, and 459 full tests pass locally |
 | Baseline worktree | User-owned modification in `ACTOR_REFACTOR_RESULT.md`; preserve and integrate, do not overwrite |
 | Superseded result | Existing `COMPLETE` claim and 183-test evidence |
 
@@ -40,7 +40,7 @@ again before FINAL evidence is accepted.
 | F03 connect and failover | COMPLETE (`2e48be0`) | Candidate/attempt budgets, next-endpoint retry, Windows peer verification, non-busy rearm, and seven real/fault-injected regressions |
 | F04 Broker and pinned leases | CORRECTNESS CLOSED; CHECKPOINT CANDIDATE | BaseException-safe waiter withdrawal, assigned-waiter lazy reap, pin close lease recovery, atomic batch admission, and FIFO pass |
 | F05 lifecycle and shutdown | CORRECTNESS CLOSED; CHECKPOINT CANDIDATE | Tokenized lifecycle gates, nonblocking finalizers, deadline-bounded best-effort fatal cleanup, and monotonic shutdown pass |
-| F06 stress, performance, resources, compatibility | FIFO-v2 FREEZE CANDIDATE; FIFO-v1 A FAIL retained | Schema 4 uses unique file-content tokens, raw 9-field completion provenance, physical root/SHA checks, and exact-cell replay rejection; the new formal campaign has not started |
+| F06 stress, performance, resources, compatibility | FIFO-v2 FREEZE (`66e4496`) with CI follow-up pending; FIFO-v1 A FAIL retained | Schema 4 uses unique file-content tokens, raw 9-field completion provenance, physical root/SHA checks, and exact-cell replay rejection; the new formal campaign has not started |
 | Final-review correctness correction | COMPLETE (`a53cc09`) | 443-test correctness snapshot plus deterministic two-endpoint generation failover; exact CI and Pages passed |
 | FINAL independent review and CI | PENDING | Two clean adversarial reviews; local matrix/build/docs and exact-HEAD CI/Pages green |
 
@@ -355,6 +355,8 @@ exact-source performance artifacts remain to be generated after checkpointing.
 | 2026-07-15 | FIFO-v2 final local evidence | Trial label, physical duration, per-case cross-role exact replay, and boolean/zero-or-exact cohort boundary constraints pass; runner cwd/source-root, physical dirty-root, sequential attempt, epoch, connection coverage, and cohort wave mutation tests are retained. Evidence file **57 passed in 0.86s**; complete suite **459 passed in 82.77s** |
 | 2026-07-15 | FIFO-v2 evidence test audit | **CLEAN**: production root routing mutations make the runner test fail; dirty physical root and sequential self-consistent attempt swaps are target-locked; fixture uniqueness preserves exact throughput and latency boundaries |
 | 2026-07-15 | FIFO-v2 protocol audit | **CLEAN** at the frozen plan trust boundary after red-to-green root/SHA, epoch, connection, attempt, wave, label, duration, replay, and boundary type/count probes. Deliberate synchronized fabrication of trusted raw measurements is explicitly not claimed as cryptographically authenticated |
+| 2026-07-15 | Exact `66e4496` remote checks | Pages run `29407448038` passed. CI run `29407448048` passed Ubuntu 3.10-3.13, Windows 3.13, and package build, but Windows 3.11 failed only `test_broker_delayed_assignment_return_reclaims_expired_lease`: fixed `sleep(0.06)` returned before the test's 50 ms deadline on that runner, so the retained result was a valid lease rather than the expected timeout |
+| 2026-07-15 | Windows 3.11 regression timing correction | `DelayedReturnEvent` records the exact deadline derived from its real `wait(timeout)` call; the test blocks to that monotonic deadline before allowing the wait to return. The node passed **20 consecutive rounds**, the pool regression file **46 passed in 1.61s**, and the full suite **459 passed in 82.19s** |
 
 Post-`0b8ad54` corrections make Broker close broadcast every independently
 registered pin waiter Event without retaining proxies. A delayed assigned caller
@@ -471,10 +473,9 @@ artifacts must be regenerated at the next exact implementation SHA.
 
 ## Exact Next Action
 
-Protocol and evidence reviews are CLEAN at the explicit local-artifact trust
-boundary. Commit producer, verifier, tests, and this ledger while preserving the
-user-owned RESULT diff; push the append-only freeze checkpoint and wait for that
-exact HEAD's CI and Pages. Create a separate clean detached worktree at the exact
-checkpoint, declare a new FIFO-v2 campaign there, externally retain the
-declaration hash before any sample, and run the complete fixed schedule once.
-Do not change or resample the failed `ca43972` campaign.
+Commit the deterministic Windows test correction and this ledger while
+preserving the user-owned RESULT diff; push the append-only follow-up checkpoint
+and wait for that exact HEAD's CI and Pages. Then create a separate clean detached
+worktree at the exact checkpoint, declare a new FIFO-v2 campaign there,
+externally retain the declaration hash before any sample, and run the complete
+fixed schedule once. Do not change or resample the failed `ca43972` campaign.

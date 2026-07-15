@@ -88,8 +88,10 @@ class DelayedReturnEvent:
         self._event = threading.Event()
         self._return_entered = return_entered
         self._allow_return = allow_return
+        self.wait_deadline: float | None = None
 
     def wait(self, timeout: float | None = None) -> bool:
+        self.wait_deadline = None if timeout is None else time.monotonic() + timeout
         result = self._event.wait(timeout)
         if result:
             self._return_entered.set()
@@ -236,7 +238,9 @@ def test_broker_delayed_assignment_return_reclaims_expired_lease(monkeypatch) ->
     assert broker.wait_for_waiters(1)
     broker.release(initial)
     assert return_entered.wait(timeout=2)
-    time.sleep(0.06)
+    assert completed.wait_deadline is not None
+    while (remaining := completed.wait_deadline - time.monotonic()) > 0:
+        time.sleep(remaining)
     allow_return.set()
     waiter.join(timeout=2)
 
