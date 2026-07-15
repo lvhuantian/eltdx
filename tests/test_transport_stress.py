@@ -17,6 +17,9 @@ def test_one_thousand_generation_changes_keep_one_actor_and_no_resources() -> No
     assert sum(result["server_accepts"]) >= 1000
     assert all(count > 0 for count in result["server_requests"])
     assert result["servers_used"] == 2
+    assert result["ledger"]["retried_requests"] > 0
+    assert result["ledger"]["cross_endpoint_retried_requests"] == result["ledger"]["retried_requests"]
+    assert result["ledger"]["same_endpoint_retried_requests"] == 0
     assert result["unique_responses"] == 1000
     assert result["duplicate_responses"] == 0
     assert result["missing_responses"] == 0

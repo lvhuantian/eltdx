@@ -110,6 +110,7 @@ class StressServer:
         poison_every: int = 0,
         close_every: int = 0,
         keep_open_token: int | None = None,
+        drop_before_response_every: int = 0,
         fail_before_response_every: int = 0,
         response_delay: float = 0.0,
     ) -> None:
@@ -119,6 +120,7 @@ class StressServer:
         self.poison_every = poison_every
         self.close_every = close_every
         self.keep_open_token = keep_open_token
+        self.drop_before_response_every = drop_before_response_every
         self.fail_before_response_every = fail_before_response_every
         self.response_delay = response_delay
         self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -286,6 +288,8 @@ class StressServer:
                             )
                             content = _STRESS_VALUE.pack(token, self.server_id, connection_id, attempt_sequence)
                             payload = len(content).to_bytes(4, "little") + content
+                            if self.drop_before_response_every and sequence % self.drop_before_response_every == 0:
+                                return
                             if self.fail_before_response_every and sequence % self.fail_before_response_every == 0:
                                 wire = _response(msg_id, msg_type, payload)
                                 conn.sendall(wire[: max(1, len(wire) // 2)])
@@ -447,9 +451,10 @@ def run_generation_stress(count: int) -> dict[str, Any]:
         StressServer(
             server_id=1,
             ledger=ledger,
-            close_every=1,
+            close_every=0,
             keep_open_token=count - 1,
             poison_every=31,
+            drop_before_response_every=2,
         ) as first,
         StressServer(
             server_id=2,

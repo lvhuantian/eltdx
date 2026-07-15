@@ -14,8 +14,8 @@ The result document remains historical evidence only until FINAL rewrites it.
 | Branch | `actor-transport-refactor` |
 | Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), confirmed OPEN and draft at pushed HEAD `8303405` |
 | Final-review correction base | `cc46e6042e60b1d70732ae813b089f9c8b572572` |
-| Latest pushed correction checkpoint | `83034059d0baa759a1e90b1752626b315f5d907f`; exact CI and Pages successful |
-| Current local follow-up | Post-campaign correctness checkpoint candidate is locally green at 443 tests; protocol and concurrency/lifecycle adversarial reviews are CLEAN; commit/push and exact-head CI are next |
+| Latest pushed correction checkpoint | `7b961fe56f9d27d56a53e04a5997f01d8647af46`; Pages and five CI jobs passed, Ubuntu 3.11 exposed a nondeterministic generation-stress endpoint-use assertion |
+| Current local follow-up | Deterministic two-loopback generation/failover stress correction is locally green at 443 tests and independently reviewed CLEAN; follow-up commit/push and exact-head CI are next |
 | Baseline worktree | User-owned modification in `ACTOR_REFACTOR_RESULT.md`; preserve and integrate, do not overwrite |
 | Superseded result | Existing `COMPLETE` claim and 183-test evidence |
 
@@ -318,6 +318,10 @@ exact-source performance artifacts remain to be generated after checkpointing.
 | 2026-07-15 | Final local correctness matrices before checkpoint | Four regression files **193 passed in 14.07s**; expanded Actor/Socket/Pool/Lifecycle/Resources/evidence matrix **318 passed in 15.68s**; complete suite **443 passed in 80.33s** on Windows CPython 3.12.6 |
 | 2026-07-15 | Final local static/process checks before checkpoint | `python -m compileall -q src tests scripts` passed; `git diff --check` passed with only existing LF/CRLF warnings; no background pytest remained |
 | 2026-07-15 | Final post-fix read-only reviews | Protocol review **CLEAN** after all Condition/State/Event before/after fault injections, FIFO/ABA/deadline probes, and 40,000 aggregate gate attempts; concurrency/lifecycle review **CLEAN** after terminal publication under Condition contention, five lifecycle nodes, exact cancel recovery, and gate-focused regressions |
+| 2026-07-15 | Exact `7b961fe` remote checks | Pages run `29402921816` passed. CI run `29402921733` passed Ubuntu 3.10/3.12/3.13 and Windows 3.11/3.13, but Ubuntu 3.11 failed `test_one_thousand_generation_changes_keep_one_actor_and_no_resources`: endpoint 1 had zero business requests; package build was skipped. The failure is retained and not rerun as a favorable sample |
+| 2026-07-15 | Generation-stress CI root cause and correction | Old harness relied on a race between remote EOF observation and the next request submission to make endpoint 1 receive business. Endpoint 0 now deterministically keeps each odd request connection and drops every even recorded attempt before any response byte; retry must start at endpoint 1. Tests require both servers, nonzero retries, every retry cross-endpoint, and zero same-endpoint retries |
+| 2026-07-15 | Corrected generation-stress evidence | Ten consecutive 1,000-generation nodes passed. A retained diagnostic produced generation `1000`, accepts `[500, 500]`, business attempts `[1000, 500]`, attempts/retries/cross-endpoint `1500/500/500`, same-endpoint `0`, 1,000 unique responses, and zero cross-request/cross-generation completions. Full stress file **5 passed in 64.73s**; complete suite **443 passed in 80.81s** |
+| 2026-07-15 | Generation-stress independent review | **CLEAN**: two real loopback endpoints are deterministically exercised, retry provenance binds the final server/connection/global attempt, Actor identity is stable, and close resource assertions remain non-vacuous; compile/diff/process checks passed with no pytest left behind |
 
 Post-`0b8ad54` corrections make Broker close broadcast every independently
 registered pin waiter Event without retaining proxies. A delayed assigned caller
@@ -434,9 +438,9 @@ artifacts must be regenerated at the next exact implementation SHA.
 
 ## Exact Next Action
 
-Commit all correctness code/tests/scripts plus this ledger while preserving the
-user-owned RESULT diff, push the append-only checkpoint, and wait for that exact
-HEAD's Ubuntu 3.10-3.13, Windows 3.11/3.13, wheel/sdist, MkDocs, and Pages
-checks. Only after exact-head correctness is green may F06 convert the
+Commit the deterministic generation-stress CI correction plus this ledger while
+preserving the user-owned RESULT diff, push the append-only checkpoint, and
+wait for that exact HEAD's Ubuntu 3.10-3.13, Windows 3.11/3.13, wheel/sdist,
+MkDocs, and Pages checks. Only after exact-head correctness is green may F06 convert the
 performance producer from constant 23285 to unique verifiable responses and
 freeze a new campaign. Do not change or resample the failed `ca43972` campaign.
