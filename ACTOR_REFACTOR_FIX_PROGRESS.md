@@ -12,10 +12,10 @@ The result document remains historical evidence only until FINAL rewrites it.
 | Baseline HEAD | `994c49b51f47255bdcd9cdc3308a5a554f37588b` |
 | Base | `71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
 | Branch | `actor-transport-refactor` |
-| Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), confirmed OPEN and draft at pushed HEAD `dcf6190` |
+| Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), confirmed OPEN and draft at pushed HEAD `ca43972` |
 | Final-review correction base | `cc46e6042e60b1d70732ae813b089f9c8b572572` |
-| Latest pushed correction checkpoint | `dcf619021771ef7c0592fa46a8313b44f798a2e8`; exact CI and Pages successful |
-| Current local follow-up | FIFO-v1 revision, producer, verifier, adversarial tests, full suite, builds, and three clean reviews complete; freeze checkpoint commit pending before sampling |
+| Latest pushed correction checkpoint | `ca439727b44a02d9396b3d6dcd21b78d06addb8b`; exact CI and Pages successful |
+| Current local follow-up | First exact FIFO-v1 campaign retained as FAIL only on no-backlog p99; production hot-path profiling in progress before any new campaign |
 | Baseline worktree | Clean (`git status --short --branch`) |
 | Superseded result | Existing `COMPLETE` claim and 183-test evidence |
 
@@ -40,8 +40,8 @@ again before FINAL evidence is accepted.
 | F03 connect and failover | COMPLETE (`2e48be0`) | Candidate/attempt budgets, next-endpoint retry, Windows peer verification, non-busy rearm, and seven real/fault-injected regressions |
 | F04 Broker and pinned leases | COMPLETE (`117b8c6`, corrections `0b8ad54`, `b66a7a8`) | Per-waiter Event, exact lease/ticket cancellation, FIFO admission, close broadcast to every pin-local waiter, and failed-pin capacity recovery |
 | F05 lifecycle and shutdown | COMPLETE (`117b8c6`, corrections `0b8ad54`, `b66a7a8`) | Candidate ownership, epoch guard, single close owner, exact resource retention, best-effort cleanup, and monotonic failed-close states |
-| F06 stress, performance, resources, compatibility | CONTRACT REVISION IN PROGRESS (`dcf6190` failure retained) | User authorized prospective fixed-cohort latency gates while preserving strict FIFO, saturated throughput gates, and raw p50/p99 disclosure |
-| Final-review correctness correction | PUSHED (`b66a7a8`, performance correction `dcf6190`) | DNS/host fallback, startup and socket ownership, Broker/pin races, close-owner cleanup, pool-connect identity, `CommandSpec` compatibility, and Actor hot-path selector state; exact CI/Pages and 299-test local suite passed |
+| F06 stress, performance, resources, compatibility | FIFO-v1 A FAIL (`ca43972`; prior failures retained) | Stress/resources/heartbeat/matrix and all throughput/structure/sequential/no-backlog-p50 gates pass; no-backlog p99 exceeds its allowance by 0.13318 ms |
+| Final-review correctness correction | PUSHED (`b66a7a8`, performance/contracts through `ca43972`) | Correctness, cleanup, strict FIFO, Actor hot-path selector state, and prospective verifier contract are pushed with exact CI/Pages; first formal campaign still fails one latency gate |
 | FINAL independent review and CI | PENDING | Two clean adversarial reviews; local matrix/build/docs and exact-HEAD CI/Pages green |
 
 ## Current Acceptance Blocker
@@ -89,6 +89,20 @@ pool-4/concurrency-100 throughput and raw p50/p99, and independently gates
 sequential plus four-worker no-backlog cohort p50/p99 from pooled raw nanosecond
 samples. The 100-worker closed wave remains report-only evidence. The old
 `dcf6190` campaign remains FAIL.
+
+### FIFO-v1 Campaign A Failure
+
+The first prospective campaign `fifo-v1-ca43972-a` was declared before samples
+with canonical SHA256
+`47221CD9611C91B43C11F64651A675BF3A7CCFC9063D7686356E8098CC50915A`.
+All eight attempt-1 trials completed in exact `ABBA + BAAB` order. The verifier
+found no structural, identity, timing, schema, physical-consistency, cleanup,
+or sample-count errors. Sequential/saturated throughput ratios were
+0.965145/0.954134; sequential p50/p99 and no-backlog p50 passed. No-backlog p99
+was 7.0652 ms baseline versus 7.9049 ms current: delta 0.8397 ms against a
+0.70652 ms allowance, exceeding the ceiling by 0.13318 ms. Bundle SHA256
+`C9F75FBC72B69AA26307EDCF967FA369914F266676374158453C795D62AAEAEA` is
+retained as FAIL. The same exact source will not be sampled again.
 
 ## Confirmed Blockers
 
@@ -240,6 +254,12 @@ exact-source performance artifacts remain to be generated after checkpointing.
 | 2026-07-15 | Frozen FIFO-v1 clean-checkout identities before sampling | Exact detached Windows checkout at `11be931` is clean. Plan revision 1.1 SHA256 `716F423F1E10DCF22308970602640502630DE3F2886FAD8DD6BDACB7304B17F5`; producer/workload SHA256 `11FA10B50F857E427FEC75DF7FD913D1CBEA1CBD489CADBFC186FDF6112B3946`; verifier SHA256 `675BBED1D66E4BD7B2DAC0CDBE6EC6BA438A5963D25837D3C71CFBD16815DB13`. Earlier authoring-worktree byte hashes used LF endings and are superseded; Git content was unchanged and no formal sample had started |
 | 2026-07-15 | FIFO-v1 focused and full local verification | Evidence suite **41 passed**; complete suite **340 passed in 70.95s**; compileall and diff check passed; wheel/sdist built; MkDocs strict passed |
 | 2026-07-15 | Three independent pre-sampling reviews | CLEAN: producer concurrency/cleanup/timing, verifier/runner mathematics and anti-forgery, and user-contract/scope review; no formal FIFO-v1 sample existed before the freeze checkpoint |
+| 2026-07-15 | Exact `ca43972` checks | CI run `29375304125` passed Ubuntu 3.10-3.13 and Windows 3.11/3.13; Pages run `29375303924` passed |
+| 2026-07-15 | Clean exact-`ca43972` heavy stress | 10,000 generations in 15.839579s and 100,000 mixed requests in 61.194887s used both servers; 110,000 unique results and all duplicate/missing/unexpected/cross counters **0**; 800 close cleanup snapshots terminal; close p99 2.3739/2.4516 ms; handles exactly **189 x 8**; heartbeat ratio 0.999786; artifact SHA256 `309D0B313525A13255279430E1E45C8B34483B8777F1A15AB0C13CCA2210C40B` |
+| 2026-07-15 | Three fixed exact-`ca43972` heartbeat repetitions | Ratios **1.002814/1.011513/0.997753**; combined raw elapsed ratio **1.003991** across 105,696 unique business responses, zero timed heartbeats and zero cross counters; hashes `94AE44CD985DB9CDF9FBD7F3FB126992E76606B20F10AD384BB93116465D3230`, `41A77A8D1669BBE2F034C6FBCCF843CD670B2A2D494F13CE0FAD8520798A2DC6`, `EB78B8F95CD2FEF8D6B42F062D444A190C67FBD0AEACA8941A92ADC4AA192EEB` |
+| 2026-07-15 | Exact-`ca43972` full 1/2/4 x 1/10/100 matrix | All nine cases returned exactly 3,000 timed server requests; pool4/c100 reached 657.34 rps, p50/p99 150.98/157.25 ms, max active 4; artifact SHA256 `3A43D07E3A1724458CF0CB0027A84B5C87A227BC604CB4FDBAEC32253A8D5D46` |
+| 2026-07-15 | FIFO-v1 campaign A declaration and run | Declaration file SHA256 `E66FAB4F1576B801F1D95CCA075ACF754A94C17D5B3F4B469EE5C85DBE877A7A`, canonical SHA256 `47221CD9611C91B43C11F64651A675BF3A7CCFC9063D7686356E8098CC50915A`; eight trials completed once in frozen order; bundle SHA256 `C9F75FBC72B69AA26307EDCF967FA369914F266676374158453C795D62AAEAEA`; verification report SHA256 `04DDB7208B067AED37DC6A884BD1867123455064791F3A7FCDEF298EE413DCFC`; overall **FAIL** only on no-backlog p99 by 0.13318 ms |
+| 2026-07-15 | FIFO-v1 campaign A trial hashes in order | `565177A7899AF2C27D092519973AE2098DAE06AA2D190CAD9096CAEFB12FDCB7`, `115AC79700C1A3AEEC3392EA2A609461884BF098BBD853C99219357F80D41E00`, `3E8B1FD88F1A5F60A7A6B5C2E55137ADDB045600FAC90A7A1772C88AE65C17D0`, `7B7A3ED6A3B5C1AEE37E5E6AB61FFB08B8831A9C5116810DEC72BD0A845B6348`, `553201B58379E1EBBC48A8D16282101D2867ABE36D8ADB1CB978907E559BE2EC`, `EF92985718078A60082173EE0B90E1FC6F15F616145D31AFEB1612344DEBCDCA`, `5E7D96F021FCED56F6F2CB5FDDBF2FDF9341BC3813C22F5149BFF956131A02A5`, `2B984DB208C22DC01EC67F719592AA356A8387B3FAA382126F0788899D127F5E` |
 
 Post-`0b8ad54` corrections make Broker close broadcast every independently
 registered pin waiter Event without retaining proxies. A delayed assigned caller
@@ -355,12 +375,10 @@ artifacts must be regenerated at the next exact implementation SHA.
 
 ## Exact Next Action
 
-Finish the FIFO-v1 scripts, adversarial tests, plan revision, and ledger in one
-checkpoint without the unfinished RESULT rewrite. Run full local tests/builds,
-push, and wait for exact-head CI/Pages before taking any formal sample. Then
-create a clean exact-SHA worktree, regenerate stress/heartbeat/resource/matrix
-evidence, run the frozen eight-trial FIFO-v1 campaign exactly once, and verify
-the self-contained bundle. Transfer all evidence including the retained
-`dcf6190` failure to RESULT, obtain at least two fresh clean FINAL reviews,
-delete this ledger, commit FINAL with both required trailers, push, wait for
-exact FINAL-head CI/Pages, and remove task worktrees only after evidence transfer.
+Profile the exact campaign A no-backlog tail and implement only a measured,
+strict-FIFO-safe production hot-path correction with deterministic regressions.
+Do not change FIFO-v1, discard campaign A, or resample `ca43972`. Push a new
+implementation checkpoint, wait for exact CI/Pages, regenerate exact-SHA common
+evidence, then create a new externally recorded campaign ID/declaration and run
+its frozen eight trials once. Only after every gate passes may evidence move to
+RESULT and final adversarial review/cleanup begin.
