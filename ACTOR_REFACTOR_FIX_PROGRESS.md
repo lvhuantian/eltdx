@@ -12,10 +12,10 @@ The result document remains historical evidence only until FINAL rewrites it.
 | Baseline HEAD | `994c49b51f47255bdcd9cdc3308a5a554f37588b` |
 | Base | `71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
 | Branch | `actor-transport-refactor` |
-| Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), confirmed OPEN and draft at pushed HEAD `2da76518a785c6c167474b9826863c1d3cf98953` |
+| Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), confirmed OPEN and draft at pushed HEAD `0183c496a92cf91d4bdc85405f92bc27f43cf768` |
 | Final-review correction base | `cc46e6042e60b1d70732ae813b089f9c8b572572` |
-| Latest pushed correction checkpoint | `e106ad484ff90aa5602a24926ca527486197fda9`; exact CI run `29429941357` and Pages run `29429941406` passed |
-| Current local follow-up | Formal `fifo-v2-2da7651-a` remains a permanent FAIL. Windows Actor cooperation is checkpointed and exact remote checks are green; one remote-evidence ledger commit precedes the next new declaration |
+| Latest pushed correction checkpoint | `0183c496a92cf91d4bdc85405f92bc27f43cf768`; exact CI run `29430226672` and Pages run `29430226404` passed |
+| Current local follow-up | Formal `fifo-v2-0183c49-a` is a permanent FAIL on sequential throughput and no-backlog p99 only. A 2 ms multi-slot grace and equivalent strong-check lock consolidation are the next checkpoint candidate |
 | Baseline worktree | User-owned modification in `ACTOR_REFACTOR_RESULT.md`; preserve and integrate, do not overwrite |
 | Superseded result | Existing `COMPLETE` claim and 183-test evidence |
 
@@ -40,7 +40,7 @@ again before FINAL evidence is accepted.
 | F03 connect and failover | COMPLETE (`2e48be0`) | Candidate/attempt budgets, next-endpoint retry, Windows peer verification, non-busy rearm, and seven real/fault-injected regressions |
 | F04 Broker and pinned leases | CORRECTNESS CLOSED; CHECKPOINT CANDIDATE | BaseException-safe waiter withdrawal, assigned-waiter lazy reap, pin close lease recovery, atomic batch admission, and FIFO pass |
 | F05 lifecycle and shutdown | CORRECTNESS CLOSED; CHECKPOINT CANDIDATE | Tokenized lifecycle gates, nonblocking finalizers, deadline-bounded best-effort fatal cleanup, and monotonic shutdown pass |
-| F06 stress, performance, resources, compatibility | WINDOWS ACTOR COOPERATION CHECKPOINT (`e106ad4`); FIFO-v2 campaign FAIL | Pool-size-specific yield/Event grace passes 485 local tests, builds/docs, two clean post-fix reviews, directionally clean C/E/E/C, and exact CI/Pages; a new one-shot formal campaign is required |
+| F06 stress, performance, resources, compatibility | WINDOWS ACTOR COOPERATION CHECKPOINT (`e106ad4`); `0183c49` FIFO-v2 campaign FAIL | Saturated throughput, sequential p50/p99, and no-backlog p50 now pass; sequential throughput and no-backlog p99 remain open in both counterbalanced blocks |
 | Final-review correctness correction | COMPLETE (`a53cc09`) | 443-test correctness snapshot plus deterministic two-endpoint generation failover; exact CI and Pages passed |
 | FINAL independent review and CI | PENDING | Two clean adversarial reviews; local matrix/build/docs and exact-HEAD CI/Pages green |
 
@@ -212,6 +212,47 @@ deltas were 0.76525/1.3198 ms and BAAB deltas were 0.69745/1.2488 ms.
 The best current no-backlog p99 trial was 8.0137 ms, still above the worst
 baseline trial's 10-percent ceiling of 7.99953 ms. This campaign is permanently
 retained as FAIL and this exact source will not be sampled again.
+
+### FIFO-v2 `0183c49` Campaign Failure
+
+Campaign `fifo-v2-0183c49-a` was declared before sampling against clean
+baseline `71089c0a2867a75dc79aa2c340213f4e3845b6e3` and current
+`0183c496a92cf91d4bdc85405f92bc27f43cf768` worktrees. Its canonical
+declaration SHA256 is
+`3e3de47d6b2fabd2899efeb5cd25d3a736a6756787f9f8e329ea70aceb84ca9a`;
+the declaration file SHA256 is
+`7e57b5af5ae2834fbd3bc6dade4bdbb0205a550fef8b7d268b0e1fd2b19d5ef0`.
+All eight attempt-1 trials ran exactly once in fixed
+`baseline/current/current/baseline/current/baseline/baseline/current` order.
+The external campaign command completed in 1,936 seconds with no retry. The
+verifier reported `errors=[]`.
+
+Across 32 cases and 1,000,000 completion rows, successes, server requests,
+wire attempts, unique responses, and latency records were all exactly
+1,000,000. Duplicate, missing, unexpected, cross-request, cross-generation,
+digest mismatch, and provenance mismatch counts were all zero. The immutable
+campaign bundle SHA256 is
+`242381e76dcaf9d4844dfdb53af6a766f108ef735cdcc3b5bb872c80608c353d`;
+the verification report file SHA256 is
+`4de1e2ced997397da86444ad99b42dd57a778b3e0fd4ecab5db47c31f40076ca`.
+
+Two hard gates failed:
+
+- Sequential throughput was 177.610197 versus 168.187461 requests/second,
+  ratio 0.946947 against the 0.95 minimum. Current needs about another
+  0.322 percent.
+- No-backlog p99 was 6.7586 versus 7.7079 ms, delta 0.9493 ms against a
+  0.67586 ms allowance; the passing ceiling was exceeded by 0.27344 ms.
+
+Saturated throughput passed at ratio 0.958216. Sequential p50/p99 and
+no-backlog p50 also passed; no-backlog p50 was 5.9840 versus 6.5505 ms, leaving
+0.0319 ms of allowance. Both failures reproduced in both blocks. ABBA
+sequential/saturated ratios were 0.946994/0.957524, no-backlog p50 passed with
+only 0.00248 ms of allowance, and p99 exceeded its ceiling by 0.30845 ms. BAAB
+ratios were 0.946900/0.958909, no-backlog p50 passed with 0.06097 ms of
+allowance, and p99 exceeded by 0.22599 ms. Independent artifact audit and
+verifier replay were **CLEAN**. This campaign is permanently retained as FAIL
+and this exact source will not be sampled again.
 
 ## Post-Campaign Adversarial Reopening At `8303405`
 
@@ -471,6 +512,12 @@ exact-source performance artifacts remain to be generated after checkpointing.
 | 2026-07-15 | Cooperation candidate local matrix | Four Actor/Failover/Pool/Lifecycle files passed **219 tests in 14.23s**. Final complete suite passed **485 tests in 77.88s** after both review corrections and configuration tests. Wheel and sdist built successfully; MkDocs strict, `compileall -q src tests scripts`, and `git diff --check` passed |
 | 2026-07-15 | Windows cooperation source checkpoint | Commit `e106ad4` (`Fix-Checkpoint: F06-WINDOWS-ACTOR-COOPERATION`) contains only Actor/Socket/Pool configuration, deterministic race/configuration tests, and the progress ledger; the user-owned result document was explicitly excluded |
 | 2026-07-15 | Exact `e106ad4` remote checks | CI run `29429941357` passed Ubuntu 3.10-3.13, Windows 3.11/3.13, and package build; Pages run `29429941406` passed. PR #12 remained OPEN and draft at exact head `e106ad484ff90aa5602a24926ca527486197fda9` |
+| 2026-07-16 | Exact `0183c49` remote checks | CI run `29430226672` passed Ubuntu 3.10-3.13, Windows 3.11/3.13, and package build; Pages run `29430226404` passed. PR #12 remained OPEN and draft at exact head `0183c496a92cf91d4bdc85405f92bc27f43cf768` |
+| 2026-07-16 | Formal `fifo-v2-0183c49-a` campaign | Eight attempt-1 cells completed once in exact ABBA+BAAB order in 1,936 seconds. Artifact audit and verifier replay were CLEAN across 1,000,000 completions, but sequential throughput ratio 0.946947 and no-backlog p99 excess 0.27344 ms failed in both blocks. Saturated throughput, sequential p50/p99, and no-backlog p50 passed. Bundle `242381e7...c353d` and report `4de1e2ce...076ca` are retained permanently as FAIL |
+| 2026-07-16 | Post-campaign formal-size timing | With 10,000 no-backlog requests, the 0.5 ms grace hit 97.1 percent. Publish-to-send p50/p99 was 0.1212/1.0232 ms, send-to-terminal 6.1201/7.2445 ms, caller resume 0.1760/0.5349 ms, and total 6.5894/7.7507 ms. Response-side scheduling is now the dominant tail; simply extending grace cannot remove it |
+| 2026-07-16 | Rejected Windows scheduling and completion probes | Response-only above-normal priority, hard affinity, GIL switch interval 1 ms, a native-lock completion signal, early caller signal, and combined ideal-processor/priority all failed to materially improve p99 or regressed throughput. Soft ideal processor improved no-backlog p99 by about 0.10-0.12 ms but was inconsistent for sequential and insufficient for the formal gate. No ctypes, affinity, priority, global interpreter setting, or alternate completion primitive remains |
+| 2026-07-16 | 2 ms grace and strong-check consolidation candidate | A formal-size no-backlog C/E/E/C for 0.5 versus 2 ms measured p99 7.7777/7.6907/7.6616/7.7854 ms and p50 6.5504/6.5304/6.5083/6.5537 ms, with throughput and all completion identities clean. Per-request profiling measured redundant normal-pool `broker.validate` at 7.74 us mean and `_require_current_runtime` at 8.79 us mean. The candidate removes only the duplicate post-acquire validate and folds two lifecycle snapshots while retaining submission-gate, retire/fatal/epoch/broker guard checks. Independent race and lifecycle reviews were **CLEAN**; acquire-then-close and no-redundant-validate regressions pass |
+| 2026-07-16 | Post-campaign candidate local matrix | Four Actor/Failover/Pool/Lifecycle files passed **220 tests in 14.28s**. Complete suite passed **486 tests in 79.45s**. Wheel and sdist built successfully; MkDocs strict, `compileall -q src tests scripts`, and `git diff --check` passed |
 
 Post-`0b8ad54` corrections make Broker close broadcast every independently
 registered pin waiter Event without retaining proxies. A delayed assigned caller
@@ -587,9 +634,9 @@ artifacts must be regenerated at the next exact implementation SHA.
 
 ## Exact Next Action
 
-Commit and push this exact remote-evidence ledger update while explicitly
-excluding the user-owned result document, then require that documentation-only
-HEAD's CI and Pages. Create a clean detached current worktree, a new FIFO-v2
-campaign ID and declaration bound to that exact SHA, and execute all eight cells
-once in the frozen order. Never resample `fifo-v1-ca43972-a`,
-`fifo-v2-72ef660-a`, or `fifo-v2-2da7651-a`.
+Commit the locally clean 2 ms grace and strong-check consolidation source,
+deterministic regressions, and this ledger while explicitly excluding the
+user-owned result document; push and require exact CI/Pages before any new
+declaration. Never resample
+`fifo-v1-ca43972-a`, `fifo-v2-72ef660-a`, `fifo-v2-2da7651-a`, or
+`fifo-v2-0183c49-a`.

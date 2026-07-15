@@ -1210,14 +1210,13 @@ class SocketTransport:
             registration = self._runtime_started_callback
         finally:
             self._lifecycle.release()
-        if expected_runtime_epoch is not None and fixed_epoch != expected_runtime_epoch:
-            return False
-        if fixed_epoch is None:
-            return True
-        if retired or registration is None:
-            return False
-        is_active = getattr(registration, "is_active", None)
-        return True if is_active is None else bool(is_active(deadline=deadline))
+        return _pool_registration_is_active(
+            fixed_epoch=fixed_epoch,
+            retired=retired,
+            registration=registration,
+            expected_runtime_epoch=expected_runtime_epoch,
+            deadline=deadline,
+        )
 
     def _configure_pool_runtime(
         self,
@@ -1421,9 +1420,18 @@ class SocketTransport:
                 or self._pool_runtime_retired
                 or (expected_runtime_epoch is not None and runtime.runtime_epoch != expected_runtime_epoch)
             )
+            fixed_epoch = self._fixed_runtime_epoch
+            retired = self._pool_runtime_retired
+            registration = self._runtime_started_callback
         finally:
             self._lifecycle.release()
-        if invalid or not self._pool_runtime_is_active(expected_runtime_epoch, deadline=deadline):
+        if invalid or not _pool_registration_is_active(
+            fixed_epoch=fixed_epoch,
+            retired=retired,
+            registration=registration,
+            expected_runtime_epoch=expected_runtime_epoch,
+            deadline=deadline,
+        ):
             raise ConnectionClosedError("7709 transport runtime changed")
 
     def _acquire_request_lock(
@@ -1454,6 +1462,24 @@ def _unique_runtimes(*items: ActorRuntime | None) -> tuple[ActorRuntime, ...]:
         if item is not None and all(existing is not item for existing in unique):
             unique.append(item)
     return tuple(unique)
+
+
+def _pool_registration_is_active(
+    *,
+    fixed_epoch: int | None,
+    retired: bool,
+    registration: Any,
+    expected_runtime_epoch: int | None,
+    deadline: float | None,
+) -> bool:
+    if expected_runtime_epoch is not None and fixed_epoch != expected_runtime_epoch:
+        return False
+    if fixed_epoch is None:
+        return True
+    if retired or registration is None:
+        return False
+    is_active = getattr(registration, "is_active", None)
+    return True if is_active is None else bool(is_active(deadline=deadline))
 
 
 def _acquire_gate_token(gate: Any, token: object, deadline: float | None) -> bool:

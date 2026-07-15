@@ -111,7 +111,7 @@ class DelayedReturnEvent:
         ("linux", 1, (0.0, False)),
         ("linux", 4, (0.0, False)),
         ("win32", 1, (0.0, True)),
-        ("win32", 4, (0.0005, False)),
+        ("win32", 4, (0.002, False)),
     ),
 )
 def test_actor_cooperation_policy_is_windows_pool_specific(
@@ -1549,7 +1549,7 @@ def test_pin_close_before_first_wire_submission_rejects_operation(monkeypatch, o
     assert (broker.snapshot().idle_slots, broker.snapshot().active_leases) == (1, 0)
 
 
-def test_pooled_and_pinned_hot_paths_use_their_exact_completion_without_wrapper(monkeypatch) -> None:
+def test_pooled_execute_skips_redundant_validation_and_uses_exact_completion(monkeypatch) -> None:
     release = threading.Event()
 
     def handler(conn: socket.socket) -> None:
@@ -1564,18 +1564,67 @@ def test_pooled_and_pinned_hot_paths_use_their_exact_completion_without_wrapper(
         pool = PooledSocketTransport([server.host], pool_size=1, timeout=1, heartbeat_interval=None)
         try:
             pool.connect()
+            broker = pool._broker
+            assert broker is not None
+            original_validate = broker.validate
             monkeypatch.setattr(
                 socket_module,
                 "_TerminalCompletion",
                 lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("redundant wrapper allocated")),
             )
+            monkeypatch.setattr(
+                broker,
+                "validate",
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("redundant validation")),
+            )
 
             assert pool.execute(TYPE_SECURITY_COUNT, {"market": "sz"}) == 81
+            monkeypatch.setattr(broker, "validate", original_validate)
             with pool.pin() as pinned:
                 assert pinned.execute(TYPE_SECURITY_COUNT, {"market": "sz"}) == 82
         finally:
             release.set()
             pool.close()
+
+
+def test_pooled_execute_relies_on_runtime_guard_after_lease_acquire(monkeypatch) -> None:
+    pool = PooledSocketTransport(["127.0.0.1:9"], pool_size=1, timeout=1, heartbeat_interval=None)
+    broker, _ = pool._ensure_started()
+    original_acquire = broker.acquire
+    lease_acquired = threading.Event()
+    allow_return = threading.Event()
+    results: list[object] = []
+
+    def paused_acquire(deadline, *, pinned=False):
+        lease = original_acquire(deadline, pinned=pinned)
+        lease_acquired.set()
+        assert allow_return.wait(timeout=2)
+        return lease
+
+    monkeypatch.setattr(broker, "acquire", paused_acquire)
+    monkeypatch.setattr(
+        socket_module,
+        "start_actor",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("retired runtime started")),
+    )
+    caller = threading.Thread(
+        target=lambda: _capture_call(
+            lambda: pool.execute(TYPE_SECURITY_COUNT, {"market": "sz"}),
+            results,
+        )
+    )
+    caller.start()
+    assert lease_acquired.wait(timeout=2)
+    try:
+        pool.close()
+    finally:
+        allow_return.set()
+    caller.join(timeout=2)
+
+    assert not caller.is_alive()
+    assert len(results) == 1 and isinstance(results[0], ConnectionClosedError)
+    snapshot = broker.snapshot()
+    assert snapshot.closed and snapshot.active_leases == 0
 
 
 def test_pinned_proxy_preserves_connection_snapshot_properties() -> None:

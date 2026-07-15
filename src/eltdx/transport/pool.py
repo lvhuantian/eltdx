@@ -1976,14 +1976,6 @@ class PooledSocketTransport:
                 _mark_lease_cancelled(lease)
             raise
         transport = self._transports[lease.slot_id]
-        try:
-            valid = broker.validate(lease, deadline=deadline)
-        except BaseException:
-            completion(None)
-            raise
-        if not valid:
-            completion(None)
-            raise ConnectionClosedError("7709 pool lease expired before slot entry")
         return transport._execute_with_lease(
             command,
             payload,
@@ -2722,7 +2714,7 @@ def _actor_cooperation(pool_size: int) -> tuple[float, bool]:
         return 0.0, False
     if pool_size == 1:
         return 0.0, True
-    return 0.0005, False
+    return 0.002, False
 
 
 def _executor_worker_threads(executor: Any) -> tuple[threading.Thread, ...]:
