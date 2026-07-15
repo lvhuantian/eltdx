@@ -14,8 +14,8 @@ The result document remains historical evidence only until FINAL rewrites it.
 | Branch | `actor-transport-refactor` |
 | Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), confirmed OPEN and draft at pushed HEAD `2da76518a785c6c167474b9826863c1d3cf98953` |
 | Final-review correction base | `cc46e6042e60b1d70732ae813b089f9c8b572572` |
-| Latest pushed correction checkpoint | `2da76518a785c6c167474b9826863c1d3cf98953`; exact CI run `29417093204` and Pages run `29417093233` passed |
-| Current local follow-up | Formal `fifo-v2-2da7651-a` is a permanent FAIL: sequential/saturated throughput and no-backlog p50/p99 remain below their gates; no sample will be rerun at this SHA |
+| Latest pushed correction checkpoint | `d9619b0e56d38c4d0105ac9491fd96892d2ff79e`; exact CI run `29421934749` and Pages run `29421934716` passed |
+| Current local follow-up | Formal `fifo-v2-2da7651-a` remains a permanent FAIL. Conditional `_RequestLockOwnership` allocation was correctness-clean but showed no stable loopback gain and was fully reverted; queued-waiter return scanning is the next isolated candidate |
 | Baseline worktree | User-owned modification in `ACTOR_REFACTOR_RESULT.md`; preserve and integrate, do not overwrite |
 | Superseded result | Existing `COMPLETE` claim and 183-test evidence |
 
@@ -40,7 +40,7 @@ again before FINAL evidence is accepted.
 | F03 connect and failover | COMPLETE (`2e48be0`) | Candidate/attempt budgets, next-endpoint retry, Windows peer verification, non-busy rearm, and seven real/fault-injected regressions |
 | F04 Broker and pinned leases | CORRECTNESS CLOSED; CHECKPOINT CANDIDATE | BaseException-safe waiter withdrawal, assigned-waiter lazy reap, pin close lease recovery, atomic batch admission, and FIFO pass |
 | F05 lifecycle and shutdown | CORRECTNESS CLOSED; CHECKPOINT CANDIDATE | Tokenized lifecycle gates, nonblocking finalizers, deadline-bounded best-effort fatal cleanup, and monotonic shutdown pass |
-| F06 stress, performance, resources, compatibility | LOW-RISK HOT-PATH CHECKPOINT (`8296511`); exact remote evidence (`2da7651`); FIFO-v2 campaign FAIL | Wake-only drive and Broker allocation/scan reductions pass focused concurrency review and exact CI/Pages; `fifo-v2-2da7651-a` failed four hard gates, so another implementation checkpoint is required |
+| F06 stress, performance, resources, compatibility | LOW-RISK HOT-PATH CHECKPOINT (`8296511`); campaign-failure evidence (`d9619b0`); FIFO-v2 campaign FAIL | Wake-only drive and Broker allocation/scan reductions pass focused concurrency review; exact campaign evidence CI/Pages are green, but `fifo-v2-2da7651-a` failed four hard gates, so another implementation checkpoint is required |
 | Final-review correctness correction | COMPLETE (`a53cc09`) | 443-test correctness snapshot plus deterministic two-endpoint generation failover; exact CI and Pages passed |
 | FINAL independent review and CI | PENDING | Two clean adversarial reviews; local matrix/build/docs and exact-HEAD CI/Pages green |
 
@@ -459,6 +459,8 @@ exact-source performance artifacts remain to be generated after checkpointing.
 | 2026-07-15 | Exact `2da7651` remote checks | CI run `29417093204` passed Ubuntu 3.10-3.13, Windows 3.11/3.13, and package build; Pages run `29417093233` passed. PR #12 remained OPEN and draft at exact head `2da76518a785c6c167474b9826863c1d3cf98953` |
 | 2026-07-15 | Formal `fifo-v2-2da7651-a` campaign | Eight declared attempt-1 cells completed once in exact ABBA+BAAB order; the external campaign command wall time was 2,050.8 seconds. The verifier found no evidence errors across 1,000,000 completions and all cross counters were zero, but sequential/saturated throughput ratios 0.948088/0.939764 and no-backlog p50/p99 deltas 0.73185/1.2889 ms failed. Bundle `2d10ed3...95ee3c` and report `cc8cd944...dc0e1` are retained permanently as FAIL |
 | 2026-07-15 | Rejected Broker no-waiter fast path | Skipping the empty-waiter assignment scan and retaining a monotonic reclaim marker reduced an isolated Broker operation by roughly 10-18 percent but less than one microsecond absolute. Real pool-4/cohort-4 p99 regressed in both adjacent pairs by about 0.177/0.089 ms. The experiment was fully reverted; no source or test diff remains |
+| 2026-07-15 | Exact `d9619b0` campaign-evidence checks | CI run `29421934749` passed Ubuntu 3.10-3.13, Windows 3.11/3.13, and package build; Pages run `29421934716` passed. PR #12 remained OPEN and draft at exact head `d9619b0e56d38c4d0105ac9491fd96892d2ff79e` |
+| 2026-07-15 | Rejected conditional lock-ownership allocation | Four Actor/Failover/Pool/Lifecycle regression files passed **202 tests in 14.36s**. Pure allocation saved about 157 ns/call, but the fixed C/E/E/C loopback sequence was not stable: sequential rps were 165.225/163.523/163.101/164.264; saturated rps 639.902/642.661/628.212/642.711; no-backlog p50 6.7791/6.7390/6.8634/6.7603 ms; and p99 7.9479/8.0148/8.1170/7.8515 ms. Every one of 54,000 measured completions was unique with zero cross counters. Both experiment sequential cells and both no-backlog p99 cells regressed against adjacent controls, so production and test edits were fully reverted |
 
 Post-`0b8ad54` corrections make Broker close broadcast every independently
 registered pin waiter Event without retaining proxies. A delayed assigned caller
@@ -575,13 +577,14 @@ artifacts must be regenerated at the next exact implementation SHA.
 
 ## Exact Next Action
 
-Commit and push this exact campaign-failure ledger update while explicitly
-excluding the user-owned result document. Then evaluate the low-risk pooled
-hot-path candidate that avoids constructing an unused `_RequestLockOwnership`
-and token when `lock_slot=False`. Preserve submission, validation, cancellation,
-completion, and physical-lock semantics; run focused race regressions and fixed
-C/E/E/C development samples. Retain it only with clean correctness evidence and
-non-regressing adjacent measurements. Any retained source requires a new
+Commit and push this rejected-experiment evidence while explicitly excluding
+the user-owned result document. Then test the queued-success return fast path:
+while holding the Broker Condition, skip the duplicate reclaim/assign scan only
+when there is no successor waiter and the assigned leases are already fully
+valid. Preserve the scan whenever a successor exists so an externally cancelled
+lease can still advance capacity. Add deterministic regressions for both the
+safe empty-queue path and the cancellation-progress counterexample, then run the
+four race suites and fixed C/E/E/C samples. Any retained source requires a new
 checkpoint, exact CI/Pages, campaign ID, declaration, and one-shot schedule.
 Never resample `fifo-v1-ca43972-a`, `fifo-v2-72ef660-a`, or
 `fifo-v2-2da7651-a`.
