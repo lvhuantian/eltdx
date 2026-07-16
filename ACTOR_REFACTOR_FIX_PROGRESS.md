@@ -1379,3 +1379,80 @@ Draft PR #12 remained open/draft; Pages and Ubuntu Python 3.10-3.13, Windows
 Actor Python 3.11/3.13, and package build all passed. The remote green state
 proves the retained baseline after armed-bit removal, not F06 performance
 acceptance.
+
+## Exact `2a4e396` Heavy Stress And Resource Evidence
+
+A clean detached worktree at exact
+`2a4e39626ac83dc294d896fd8447ff15e41a36d6` ran:
+
+```powershell
+python scripts/stress_actor_transport.py --generations 10000 --requests 100000 --pool-size 4 --concurrency 100 --close-samples 100 --heartbeat-requests 1000 --idle-seconds 0.5 --resource-rounds 8 --resource-warmup 3 --resource-generations 50 --output C:\Users\ax\Desktop\eltdx\eltdx-src\artifacts\actor_stress_f06_2a4e396.json
+```
+
+The process completed successfully in **162.1s** on Windows 11 / Python
+3.12.6. The artifact records `worktree_dirty=false`, workload SHA256
+`F7E187E3960002FBF0194C686182C3676152EBA7C6FD68AB4BC46EDE8262E5B1`,
+and artifact SHA256
+`23CCAB7455DEDCB8EFC4536446A3FFAD8013715C9B9F7D7C4F6AABADF9816BD6`.
+
+The 10,000-generation case completed in `20.594755s`, retained one Actor
+object/thread identity, reached generation counter 10,000, split accepts
+exactly `5000/5000` across two real loopback servers, and produced 10,000
+unique responses with duplicate/missing/unexpected/cross-request/cross-
+generation counts all zero. Actor, TCP, selector, wakeup sockets, pending and
+active tickets all closed; Actor threads were `0 -> 0` around the case.
+
+The pool-4/concurrency-100 mixed case completed 100,000 unique requests in
+`77.315488s`. Both real servers carried business traffic (`21456/78586`),
+42 retries all crossed endpoints, maximum business concurrency was exactly 4,
+and every duplicate/missing/unexpected/cross counter was zero. All four Actor
+resource snapshots were terminal, Broker waiters/pin waiters/leases were zero,
+and the bounded PushBuffer closed empty after reaching its configured 1,024
+frame high-water mark and reporting overflow gap state.
+
+Idle close p50/p95/p99 was `2.3899/2.7563/2.9528ms`; loaded close was
+`1.9386/2.4993/2.6843ms`. All close futures and tickets terminalized within
+the timeout and all 800 saved Actor-owned resource snapshots closed. The
+strict heartbeat aggregate ratio was `1.003090` with block ratios
+`0.992388/1.006952/1.004214/1.008822`, 35,232 unique business responses, zero
+heartbeat during timed business, and zero cross counters. Idle CPU ratio was
+zero. After three warmup rounds, all eight measured Windows resource samples
+were exactly `201`; monotonic growth was false, Actor threads were zero, every
+owned resource was closed, and all cross counters were zero. The temporary
+detached worktree was removed after the clean artifact was written.
+
+Independent raw artifact review was **CLEAN**. It verified exact SHA/clean
+identity, two-server request provenance, retry counts, uniqueness and all
+cross counters, Broker/Push/Actor cleanup, close terminal state, every
+heartbeat phase fence, and the exact warmed resource plateau. Two evidence
+limits remain explicit: the JSON stores close p50/p95/p99 but not the raw close
+latency arrays, so those quantiles cannot be independently recomputed from the
+artifact; and this heavy run uses 1,000 heartbeat requests per phase, so it is
+diagnostic support only and does not replace the retained revision-7
+4,000-request formal heartbeat evidence.
+
+The first full-suite attempt was invalidated by the command wrapper's 180s
+timeout; its child process ended later but the exit status/output was lost, so
+it is not counted. With no leftover pytest or stress process, the exact command
+was rerun with a sufficient timeout:
+
+```powershell
+python -m pytest -q --tb=short
+```
+
+Result: **521 passed in 249.13s**. Packaging and documentation verification
+then passed:
+
+```powershell
+python -m build
+python -m mkdocs build --strict
+python -m compileall -q src tests scripts
+git diff --check
+```
+
+The build produced `eltdx-1.0.2.tar.gz` SHA256
+`A17818EB0D0DDAD859114B5FC17775EAB9D9279B4A8BE00EAB75DE39CF02CB58`
+and `eltdx-1.0.2-py3-none-any.whl` SHA256
+`4FA0980ABE9D5052A53112DF4A42C0D449061EF7829975F450B4B9B09B0663CF`.
+MkDocs strict completed in `2.75s`; compileall and diff check were clean. No
+tracked build, site, bytecode, temporary worktree, or script change remains.
