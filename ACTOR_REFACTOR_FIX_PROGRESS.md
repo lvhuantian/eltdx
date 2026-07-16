@@ -12,10 +12,10 @@ The result document remains historical evidence only until FINAL rewrites it.
 | Baseline HEAD | `994c49b51f47255bdcd9cdc3308a5a554f37588b` |
 | Base | `71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
 | Branch | `actor-transport-refactor` |
-| Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), confirmed OPEN and draft at pushed HEAD `2d4cea8d0b8ab588637b3bece45e0402231fda26` |
+| Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), confirmed OPEN and draft at pushed HEAD `3201d3d9636c306a657881920c281c1adae40364` |
 | Final-review correction base | `cc46e6042e60b1d70732ae813b089f9c8b572572` |
-| Latest pushed correction checkpoint | `2d4cea8d0b8ab588637b3bece45e0402231fda26`; exact CI run `29464918209` and Pages run `29464918137` passed |
-| Current local follow-up | Post-`9338286` adversarial corrections are locally complete: six deterministic nodes, 226 focused regressions, 492 full tests, builds/docs, and three independent reviews are clean. The source checkpoint and exact remote checks precede any new FIFO-v2 declaration |
+| Latest pushed correction checkpoint | `3201d3d9636c306a657881920c281c1adae40364`; exact CI run `29466728955` and Pages run `29466728894` passed |
+| Current local follow-up | Post-`9338286` adversarial correction source and exact remote checks are green. One remote-evidence ledger checkpoint precedes a clean detached worktree and new FIFO-v2 declaration |
 | Baseline worktree | User-owned modification in `ACTOR_REFACTOR_RESULT.md`; preserve and integrate, do not overwrite |
 | Superseded result | Existing `COMPLETE` claim and 183-test evidence |
 
@@ -40,7 +40,7 @@ again before FINAL evidence is accepted.
 | F03 connect and failover | COMPLETE (`2e48be0`) | Candidate/attempt budgets, next-endpoint retry, Windows peer verification, non-busy rearm, and seven real/fault-injected regressions |
 | F04 Broker and pinned leases | CORRECTNESS CLOSED; CHECKPOINT CANDIDATE | Failed lease and assigned pin reservation use exact cancellation for lazy reclaim; all assignment paths reclaim before capacity checks; snapshots release waiter/Event ownership |
 | F05 lifecycle and shutdown | CORRECTNESS CLOSED; CHECKPOINT CANDIDATE | Runtime registration rechecks retire after append, so either abandon snapshots the runtime or the registering thread stops it itself |
-| F06 stress, performance, resources, compatibility | CORRECTIVE SOURCE CHECKPOINT PENDING | Correctness reviews and local matrix are clean; exact source push/CI/Pages are required before a new frozen FIFO-v2 campaign |
+| F06 stress, performance, resources, compatibility | CORRECTIVE SOURCE CHECKPOINT (`3201d3d`) | Correctness reviews, local matrix, and exact CI/Pages are clean; a remote-evidence checkpoint precedes the new frozen FIFO-v2 campaign |
 | Final-review correctness correction | COMPLETE (`a53cc09`) | 443-test correctness snapshot plus deterministic two-endpoint generation failover; exact CI and Pages passed |
 | FINAL independent review and CI | PENDING | Two clean adversarial reviews; local matrix/build/docs and exact-HEAD CI/Pages green |
 
@@ -528,6 +528,8 @@ exact-source performance artifacts remain to be generated after checkpointing.
 | 2026-07-16 | Post-review correction matrix | Six exact correction nodes passed **6 tests in 0.29s**; Actor/Failover/Pool/Lifecycle regressions passed **226 tests in 14.48s**; the final exact-worktree complete suite passed **492 tests in 82.37s** |
 | 2026-07-16 | Post-review correction builds | `python -m build` produced wheel and sdist; `python -m mkdocs build --strict`, `python -m compileall -q src tests scripts`, and `git diff --check` passed |
 | 2026-07-16 | Post-review correction independent reviews | Actor receive/send/fairness review, Guard/pin/lifecycle review, and deterministic evidence review all returned **CLEAN** after their findings were fixed. Additional probes confirmed a send-return-time legal response succeeds, late cleanup cannot release a replacement lease, and cancelled pin reservations do not block FIFO admission |
+| 2026-07-16 | Post-review correction source checkpoint | Commit `3201d3d` (`Fix-Checkpoint: F01-F05-POST-9338286`) contains the reviewed Actor/Guard/pin fixes, deterministic regressions, and ledger; the user-owned result document remains excluded |
+| 2026-07-16 | Exact `3201d3d` remote checks | CI run `29466728955` passed Ubuntu 3.10-3.13, Windows 3.11/3.13, and Python 3.13 package build; Pages run `29466728894` passed strict build and artifact upload. PR #12 remained OPEN and draft at exact head `3201d3d9636c306a657881920c281c1adae40364` |
 
 Post-`0b8ad54` corrections make Broker close broadcast every independently
 registered pin waiter Event without retaining proxies. A delayed assigned caller
@@ -671,11 +673,10 @@ admission without an unrelated snapshot/heartbeat reclaim.
 
 ## Exact Next Action
 
-Commit the reviewed post-`9338286` Actor/Guard/pin corrections, deterministic
-regressions, and this ledger while explicitly excluding the user-owned result
-document. Push normally and require exact CI/Pages. Only after that source is
-green, create a clean detached worktree, declare a new FIFO-v2 campaign bound
-to the exact SHA, externally record its canonical hash, and execute all eight
-cells once in the frozen order. Never resample
+Commit and push this exact remote-evidence ledger update while explicitly
+excluding the user-owned result document, then require that documentation-only
+HEAD's CI and Pages. Create a clean detached current worktree, declare a new
+FIFO-v2 campaign bound to that exact SHA, externally record its canonical hash,
+and execute all eight cells once in the frozen order. Never resample
 `fifo-v1-ca43972-a`, `fifo-v2-72ef660-a`, `fifo-v2-2da7651-a`, or
 `fifo-v2-0183c49-a`.
