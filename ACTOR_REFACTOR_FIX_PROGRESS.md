@@ -1104,3 +1104,140 @@ After removal, the Pool/lifecycle four-file matrix passed **177 tests in
 13.40s**. The lower counts are the expected removal of candidate-only
 exact-epoch regressions; all retained production and test files match
 `f0a329a` again.
+
+## Post-`89d6439` State-Only IdentityGate Red Baseline
+
+The next materially different candidate targets the repeated entrance
+Condition in `IdentityGate.acquire_token()`. The Condition does not protect
+owner, waiter, grant, terminal, or handoff state and is never used by release;
+all of those invariants already linearize under `_state_lock` and each waiter
+owns its exact Event. To preserve injected/legacy behavior, default
+`IdentityGate()` and direct `_RequestGate()` remain on the existing Condition
+plus state-lock path. Only Actor runtime control gates and Socket request/
+submission gates opt in to `state_only=True`, where initial owner assignment or
+waiter registration uses `_state_lock` directly and the existing waiter loop,
+handoff, timeout, exception, and exact-token release paths remain unchanged.
+
+Before production edits, deterministic opt-in, condition-independence, FIFO,
+and production-construction nodes were added:
+
+```powershell
+python -m pytest -q tests/test_transport_actor_regressions.py::test_state_only_identity_gate_uncontended_acquire_skips_condition tests/test_transport_actor_regressions.py::test_state_only_identity_gate_is_independent_of_legacy_condition_owner tests/test_transport_actor_regressions.py::test_state_only_identity_gate_preserves_registered_waiter_fifo tests/test_transport_actor_regressions.py::test_production_actor_and_socket_gates_use_state_only_registration --tb=short
+```
+
+Result: **7 failed in 1.17s**. Both gate types rejected the new private option,
+and production gates exposed no state-only mode. Existing default Condition
+interrupt/release-independence, waiter FIFO, deadline, failed Event wakeup,
+stale-token ABA, STOP/cancel, and close tests remain mandatory safety gates.
+
+The implementation adds a private `state_only` option while preserving the
+real Condition object and legacy default. State-only acquisition skips only
+the initial Condition ownership; it takes the existing state lock, either
+publishes the exact owner or appends the exact waiter, and then uses the shared
+wait/handoff/withdraw logic. Actor runtime control gates and Socket request/
+submission gates explicitly opt in; direct `IdentityGate()` and
+`_RequestGate()` construction remain legacy. Release remains Condition-
+independent, and FIFO begins at state-lock registration rather than call entry.
+
+The focused IdentityGate/state-only matrix passed **37 tests in 1.52s**. The
+Actor/Pool/lifecycle six-file matrix passed **306 tests in 13.38s**. Two fresh
+current-byte read-only reviews are **CLEAN**: one ran all Actor regressions
+(`100 passed`) plus Actor/lifecycle (`175 passed`) and verified STOP, cancel,
+close, stale release, failed wake, deadline, and state-lock interruption paths;
+the other repeated both state-only gate types for 100 two-waiter FIFO/handoff
+rounds with every thread joined and owner/waiter state empty. Legacy Condition
+interrupt/compatibility/release tests were not weakened.
+
+## State-Only IdentityGate Development Diagnostic Declaration
+
+This is one isolated development decision aid, not a formal acceptance
+campaign and not a rerun or control sample of any frozen exact source or prior
+campaign. Both roles run the same dirty candidate production bytes. Control
+replaces only `IdentityGate.acquire_token()` in-process with its exact
+`89d6439` legacy Condition-plus-state implementation; experiment restores the
+candidate method. Construction, release/handoff, Actor/socket/pool code,
+server, workload, and all other functions remain identical.
+The runner additionally installs identical cell-boundary-only tracking wrappers
+around benchmark Transport/Server/Executor classes; they record post-close
+Broker, Actor runtime, server worker/connection, and executor queue/thread
+snapshots without adding per-request instrumentation, and are included in the
+same control and experiment bytes/process.
+
+Frozen identities are actor SHA256
+`3C6CA515D7066B38BA0CDE6CC7C464989F331C46F229937683A583874587F856`,
+socket SHA256
+`EAE6281408B2D2D0B46550B1254AE73869847191B7BB883840F705CC96FA6A48`,
+workload SHA256
+`B09AB7130752AE0C562B63BA04D2B1BEA42F1E168C060F13D6E86E9BBA277B84`,
+and one-use diagnostic SHA256
+`DDCC80505126EF1CC19E2B276B2F3B80CBD74D35B5D79024C1B9963A9C1EA2B9`.
+The target and exclusive reservation
+`C:\Users\ax\Desktop\eltdx\artifacts\state-only-identity-gate-dev-ceec-89d6439-dirty.json`
+and `.json.reserved` companion did not exist at declaration time. Execution
+must pass the runner hash in `ELTDX_STATE_ONLY_DIAGNOSTIC_SHA256`; all four
+hashes are verified before reservation, before and after every cell, and at
+completion.
+
+Run exactly one C/E/E/C process with no overlapping task pytest, stress, or
+benchmark process. Every fresh-loopback cell runs 1,500 sequential requests
+after 300 warmups, 10,000 pool-4/concurrency-100 requests after 500 warmups,
+and 500 pool-4/four-worker cohorts after 50 warmup cohorts, all at 5ms server
+delay. Retain every raw latency and completion record. Require exactly 54,000
+successes/server requests/raw records, 2,200 clean cohort boundaries,
+`cleanup_complete=true` for every cell, unique token/provenance/digest
+agreement, and zero duplicate/missing/unexpected/cross-request/cross-
+generation counts. Exclusive reservation precedes sampling; active-cell state
+is written before each cell and every update atomically replaces the artifact.
+Cleanup evidence is a real post-close snapshot: each pool Broker is closed
+with zero active leases/waiters/pin-waiters; every captured Actor runtime is
+STOPPED with no fatal/cleanup error, cancel request, selector registration,
+generation/socket, wake fd, pending/active ticket, or live thread; each slot has
+no runtime/candidate/unpublished candidate; every server worker/connection and
+executor thread/queue is empty.
+
+The retain rule is frozen before sampling and uses raw integers only. Compare
+C0/E1 and C3/E2. Throughput passes when
+`experiment_requests * control_elapsed_ns >= control_requests * experiment_elapsed_ns`;
+p99 is `sorted(latency_ns)[((n - 1) * 99) // 100]` and passes only when the
+experiment value is no greater than control. Sequential, saturated, and no-
+backlog must pass both metrics in both adjacent blocks. Any metric reversal,
+integrity/source mismatch, or incomplete cell permanently rejects the
+candidate; it may not be resampled standalone. Passing only permits full
+verification and a brand-new formal FIFO-v2 campaign.
+
+## State-Only IdentityGate Diagnostic Rejection
+
+The declared state-only diagnostic was executed once with the frozen C/E/E/C
+schedule. It stopped after C0 completed its workload because the runner's
+cleanup predicate rejected a valid post-close snapshot: Actor runtimes were
+STOPPED with no live threads, sockets, generations, wake fds, tickets,
+requests, fatal errors, or cleanup errors; Brokers had no active leases or
+waiters; servers had no workers or connections; and executor threads had
+exited. The only false-positive fields were selector maps retained by closed
+selector objects and executor queues retaining their normal shutdown
+sentinel. No performance cell was retained and no performance verdict exists.
+
+Artifact:
+`C:\\Users\\ax\\Desktop\\eltdx\\artifacts\\state-only-identity-gate-dev-ceec-89d6439-dirty.json`
+SHA256 `D267549545DADBC7014A96D733F316FBC3CEB0EC5FE89353C06F57D1CCF24EE8`;
+exclusive reservation SHA256
+`078A1369D170F7D5C8EB2D6718C6306240E010B65DD87C51B028AF14055D37FA`.
+The final runner SHA used by the one-use declaration was
+`DDCC80505126EF1CC19E2B276B2F3B80CBD74D35B5D79024C1B9963A9C1EA2B9`.
+Because the cell was incomplete under the predeclared rule, this candidate is
+permanently rejected and must not be resampled standalone. The candidate
+production and test changes, plus the temporary runner, are being removed;
+the raw failed artifact and reservation remain as audit evidence. The
+user-modified `ACTOR_REFACTOR_RESULT.md` is intentionally untouched.
+
+After removing the rejected state-only candidate and its temporary runner, the
+full retained Actor/Pool/lifecycle six-file matrix was rerun:
+
+```powershell
+python -m pytest -q tests/test_transport_actor_regressions.py tests/test_transport_actor.py tests/test_transport_pool_regressions.py tests/test_transport_pool.py tests/test_transport_lifecycle_regressions.py tests/test_transport_lifecycle.py --tb=short
+```
+
+Result: **291 passed in 13.21s**. Actor, Socket, and regression test bytes are
+back to the `89d6439` retained baseline. No state-only performance verdict
+exists; the next candidate must be a new source/campaign and cannot reuse the
+frozen exact-epoch or state-only diagnostic declarations.
