@@ -943,3 +943,164 @@ reversed direction in the second block. The rule was frozen before sampling,
 so the source cannot be retained or resampled standalone. Production/tests and
 the temporary runner are removed; the raw artifact and rejection remain. No
 formal campaign was run.
+
+## Post-`f0a329a` Exact-Epoch Snapshot Red Baseline
+
+The next materially different candidate targets repeated steady-state pool
+guard scans. The design captures the exact epoch's broker, registration tuple,
+and monotonic retire Event under the same pool condition that publishes
+`RUNNING`. A pooled execute must still acquire the exact Broker lease, hold the
+slot submission gate, validate runtime/registration identity under the slot
+lifecycle lock, and reject the retire Event both before submission and after
+Actor completion. Fatal and every shutdown path must set that same event before
+cleanup/reconfiguration; old events are never cleared or reused.
+
+Before production edits, the exact nodes were:
+
+```powershell
+python -m pytest -q tests/test_transport_lifecycle_regressions.py::test_guard_failure_sets_exact_epoch_retire_event_before_cleanup tests/test_transport_pool_regressions.py::test_pooled_execute_uses_exact_epoch_snapshot_without_guard_rescans --tb=short
+```
+
+Result: **2 failed in 1.53s**. Direct accepted `PoolRuntimeGuard.fail()` left
+the epoch retire Event unset, and ordinary pooled execute entered the guard
+failure rescan before lease admission. Close-after-acquire, atomic slot retire/
+submission, fatal/reopen identity, and response-delivery retirement tests remain
+mandatory safety gates.
+
+The candidate publishes `PoolExecutionEpoch` with the exact broker, monotonic
+retire Event, and registration tuple. Normal execute validates the snapshot
+broker, lease epoch, registration epoch/broker/Event identity, and slot runtime/
+callback identity under the existing submission gate; post-response delivery
+checks only the old Event. Accepted guard failure now sets that Event before
+Broker, PushBuffer, or Actor cleanup. Exact wrong-broker/wrong-Event and
+close-plus-reopen paused-response regressions passed with lease capacity fully
+returned. The focused matrix passed **8 tests in 1.22s**; Pool/lifecycle four
+files passed **183 tests in 9.51s**; the six-file Actor/Pool/lifecycle matrix
+passed **297 tests in 13.28s**.
+
+## Exact-Epoch Snapshot Post-Parse/Fatal Corrections
+
+A current-byte adversarial review paused `parse_command_response()` after the
+first delivery fence, completed close plus reopen, and reproduced the old
+epoch value returning successfully. `_execute_with_lease()` now checks the
+same monotonic retire Event again after parsing and before cache mutation or
+return. A second regression pauses parsing while direct accepted
+`PoolRuntimeGuard.fail()` has set the exact Event but remains blocked inside
+`broker.close()`. The caller must already receive `ConnectionClosedError`
+while cleanup is still paused and the exact old Broker has zero active leases.
+The test calls `PoolRuntimeGuard.fail()` directly so deleting the candidate's
+Event publication makes it fail; it does not rely on `ActorFatalHandle`'s
+earlier defensive Event set. Its failure cleanup only joins started threads
+and unconditionally closes the pool in a nested `finally`.
+
+Post-correction commands and results:
+
+```powershell
+python -m pytest -q tests/test_transport_lifecycle_regressions.py::test_guard_failure_sets_exact_epoch_retire_event_before_cleanup tests/test_transport_lifecycle_regressions.py::test_fatal_retire_event_rejects_inflight_delivery_before_cleanup_finishes --tb=short
+# 2 passed in 0.73s
+
+python -m pytest -q tests/test_transport_pool_regressions.py tests/test_transport_pool.py tests/test_transport_lifecycle_regressions.py tests/test_transport_lifecycle.py --tb=short
+# 185 passed in 9.35s
+
+python -m pytest -q tests/test_transport_actor_regressions.py tests/test_transport_actor.py tests/test_transport_pool_regressions.py tests/test_transport_pool.py tests/test_transport_lifecycle_regressions.py tests/test_transport_lifecycle.py --tb=short
+# 299 passed in 13.01s
+```
+
+Two independent current-byte read-only reviews are **CLEAN**. One repeated the
+new fatal node ten times and the exact/fatal set in a single process, observed
+no Actor or scripted-server thread residue, and demonstrated that removing the
+post-parse fence returns `86`. The other verified direct guard failure sets the
+Event under the guard lock before Broker/push/Actor cleanup, the cleanup-paused
+test fails against the missing-set behavior, and all red-path cleanup remains
+bounded.
+
+## Exact-Epoch Snapshot Development Diagnostic Declaration
+
+This is one isolated development decision aid, not a formal acceptance
+campaign and not a rerun or control sample of exact `7923287`, `29b250e`, or
+any earlier source. Both roles execute the same dirty candidate production
+bytes. The control role replaces only normal
+`PooledSocketTransport.execute()` in-process with the `f0a329a` steady-state
+behavior. After `connect()` has completed, control execute acquires the same
+pool condition exactly once and directly executes the `f0a329a` already-
+connected `RUNNING` fast path, including one runtime-guard failure scan and the
+published-startup deadline carry, then releases it before lease acquisition.
+Any non-steady state aborts the diagnostic instead of entering a different
+startup path. Control captures no exact execution snapshot, and submission/
+response delivery receive only the numeric runtime epoch so they perform
+lifecycle plus registration/guard rescans. Experiment restores the current
+exact Broker, registration, and retire-Event path. Direct guard Event
+publication, the new post-parse fence, Actor/socket behavior, and every other
+production function remain the current candidate in both roles.
+
+Frozen identities are pool SHA256
+`C1C57CB07D8754C0C95D0E091EA131E419805D9306D70913B284E3BC660FB67D`,
+socket SHA256
+`48D1A5EDEB26C59D058868B72326DEE914FAB4082698EF51F1F362F2EFE4E83D`,
+workload SHA256
+`B09AB7130752AE0C562B63BA04D2B1BEA42F1E168C060F13D6E86E9BBA277B84`,
+and one-use diagnostic SHA256
+`AB9903015820DAF6E8D283321F3CAB84F650C9A49DF9FA263CE150C05995E01B`.
+The target and exclusive reservation
+`C:\Users\ax\Desktop\eltdx\artifacts\exact-epoch-snapshot-dev-ceec-f0a329a-dirty.json`
+and `.json.reserved` companion did not exist at declaration time. Execution
+must pass the declared diagnostic SHA in
+`ELTDX_EXACT_EPOCH_DIAGNOSTIC_SHA256`; pool, socket, workload, and runner hashes
+are verified before reservation, before and after every cell, and after the
+last cell.
+
+Run exactly one C/E/E/C process with no overlapping task pytest, stress, or
+benchmark process. Every fresh-loopback cell runs 1,500 sequential requests
+after 300 warmups, 10,000 pool-4/concurrency-100 requests after 500 warmups,
+and 500 pool-4/four-worker cohorts after 50 warmup cohorts, all at 5ms server
+delay. Retain every raw latency and completion record. The artifact must hold
+exactly 54,000 unique successes, server requests, and records; all error,
+duplicate, missing, unexpected, cross-request, cross-generation, provenance,
+and response-count fields must be zero/consistent; each cell must report
+`cleanup_complete=true`; all 2,200 cohort boundaries must be clean. Startup
+uses an exclusive-create reservation before any sample. The artifact is then
+written before each active cell and atomically replaced after every completed
+cell, so crash/interruption remains a permanent incomplete one-use attempt.
+
+The retain rule is frozen before sampling: compare adjacent C0/E1 and C3/E2
+blocks using E1/C0 and E2/C3. The runner computes the verdict only from raw
+integers: throughput passes when
+`experiment_requests * control_elapsed_ns >= control_requests * experiment_elapsed_ns`;
+p99 is `sorted(latency_ns)[((n - 1) * 99) // 100]` and passes when experiment
+p99 ns is no greater than control p99 ns. Sequential, saturated, and
+no-backlog must pass both metrics in both adjacent blocks. Rounded summary
+fields are never used. Any directional reversal, metric regression, identity/
+count mismatch, or incomplete cell rejects the candidate permanently; it may
+not be resampled standalone. Passing only permits the candidate to proceed to
+full verification and a brand-new formal FIFO-v2 campaign.
+
+The one declared process completed all four cells once in exact C/E/E/C order
+in 131.7 seconds. Artifact
+`exact-epoch-snapshot-dev-ceec-f0a329a-dirty.json` is 2,496,418 bytes with
+SHA256 `D1AC92DB408D3AF48C0D7DCECF004C3C7426F46F2CF57FDD8A8908172850E023`;
+its exclusive reservation SHA256 is
+`AE69A6141FD21981840A41883D430A62D6C9F9429455347E776015B54B27754A`.
+The runner's independent raw verdict is **FAIL** with no integrity errors:
+exactly 54,000 successes/server requests/raw records, 2,200 clean boundaries,
+and zero duplicate, missing, unexpected, cross-request, or cross-generation
+completions.
+
+Adjacent C0/E1 throughput ratios were sequential `1.025462`, saturated
+`1.032009`, and no-backlog `1.056316`; p99 deltas were respectively
+`-0.2200ms`, `-4.2848ms`, and `-0.3085ms`. The second C3/E2 block reversed for
+the two required throughput cases: sequential `0.977727` and saturated
+`0.984039`, with p99 regressions of `+0.0486ms` and `+4.0503ms`. No-backlog
+remained favorable at throughput `1.038782` and p99 `-0.3293ms`, but the frozen
+rule requires every workload and metric to pass both adjacent blocks.
+
+The exact-epoch snapshot candidate is therefore permanently rejected and may
+not be resampled standalone. Its production changes, deterministic candidate
+tests, and temporary runner were removed. The raw artifact, reservation, red
+baseline, correction/review evidence, declaration, and rejection remain. No
+formal FIFO-v2 campaign was run.
+
+After removal, the Pool/lifecycle four-file matrix passed **177 tests in
+10.20s**, and the Actor/Pool/lifecycle six-file matrix passed **291 tests in
+13.40s**. The lower counts are the expected removal of candidate-only
+exact-epoch regressions; all retained production and test files match
+`f0a329a` again.
