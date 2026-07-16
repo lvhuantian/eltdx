@@ -696,8 +696,8 @@ class FakePinnedSlot:
         self.cancelled.append(lease_id)
 
 
-def _new_fake_proxy(timeout: float = 0.05):
-    broker = LeaseBroker(2, pool_size=1, max_pending_requests=4)
+def _new_fake_proxy(timeout: float = 0.05, *, max_pending_requests: int = 4):
+    broker = LeaseBroker(2, pool_size=1, max_pending_requests=max_pending_requests)
     lease = broker.acquire(time.monotonic() + 1, pinned=True)
     slot = FakePinnedSlot()
     proxy = PinnedTransportProxy(broker, lease, slot, PushBuffer(2), timeout)
@@ -2133,6 +2133,117 @@ def test_pin_close_lock_timeout_then_wire_terminal_releases_lease() -> None:
     snapshot = broker.snapshot()
     assert lease.state is pool_module.LeaseState.RELEASED
     assert proxy._state is pool_module.PinState.CLOSED
+    assert (snapshot.idle_slots, snapshot.active_leases) == (1, 0)
+
+
+def test_failed_pin_terminal_lazily_reclaims_lease_when_broker_is_contended() -> None:
+    broker, lease, _slot, proxy = _new_fake_proxy(timeout=0.03)
+    proxy._active_call = 1
+    proxy._wire_call = 1
+    proxy._state = pool_module.PinState.FAILED
+    broker_held = threading.Event()
+    release_broker = threading.Event()
+
+    def hold_broker() -> None:
+        with broker._condition:
+            broker_held.set()
+            assert release_broker.wait(timeout=2)
+
+    holder = threading.Thread(target=hold_broker)
+    holder.start()
+    assert broker_held.wait(timeout=2)
+    terminal_done = threading.Event()
+    terminal = threading.Thread(
+        target=lambda: (proxy._wire_terminal(1), terminal_done.set())
+    )
+    terminal.start()
+    assert terminal_done.wait(timeout=0.2)
+    terminal.join(timeout=0.2)
+    assert not terminal.is_alive()
+    release_broker.set()
+    holder.join(timeout=2)
+
+    assert not terminal.is_alive() and not holder.is_alive()
+    snapshot = broker.snapshot()
+    assert lease.state is pool_module.LeaseState.RELEASED
+    assert (snapshot.idle_slots, snapshot.active_leases) == (1, 0)
+    replacement = broker.acquire(time.monotonic() + 1, pinned=True)
+    assert broker.validate(replacement)
+    proxy.close()
+    assert broker.validate(replacement)
+    replacement_snapshot = broker.snapshot()
+    assert (replacement_snapshot.idle_slots, replacement_snapshot.active_leases) == (0, 1)
+    broker.release(replacement)
+
+
+def test_assigned_pin_waiter_release_failure_is_lazily_reclaimed(monkeypatch) -> None:
+    broker, _lease, _slot, proxy = _new_fake_proxy(timeout=0.1, max_pending_requests=1)
+    first_call = proxy._admit(time.monotonic() + 1)
+    proxy._wire_call = first_call
+    results: list[object] = []
+    waiter_deadline = time.monotonic() + 1
+    release_calls: list[threading.Event] = []
+    second_release_entered = threading.Event()
+    allow_second_release = threading.Event()
+    original_release_pin_waiter = broker.release_pin_waiter
+
+    def controlled_release_pin_waiter(completed, *, deadline=None) -> None:
+        release_calls.append(completed)
+        if len(release_calls) == 1:
+            raise TransportCloseTimeoutError("terminal pin reservation release blocked")
+        if len(release_calls) == 2:
+            second_release_entered.set()
+            assert allow_second_release.wait(timeout=2)
+            raise TransportCloseTimeoutError("assigned pin reservation release blocked")
+        original_release_pin_waiter(completed, deadline=deadline)
+
+    monkeypatch.setattr(broker, "release_pin_waiter", controlled_release_pin_waiter)
+    waiter = threading.Thread(
+        target=lambda: _capture_call(lambda: proxy._admit(waiter_deadline), results)
+    )
+    waiter.start()
+    assert broker.wait_for_pin_waiters(1)
+    terminal_done = threading.Event()
+    terminal = threading.Thread(
+        target=lambda: (proxy._wire_terminal(first_call), terminal_done.set())
+    )
+    terminal.start()
+    assert terminal_done.wait(timeout=0.2)
+    assert second_release_entered.wait(timeout=0.2)
+    with proxy._condition:
+        assigned_waiter = proxy._active_waiter
+        assert assigned_waiter is not None
+        assert assigned_waiter.assigned
+        assert proxy._active_call == assigned_waiter.call_id
+    assert time.monotonic() < waiter_deadline
+    allow_second_release.set()
+    waiter.join(timeout=1)
+    terminal.join(timeout=2)
+
+    assert not waiter.is_alive() and not terminal.is_alive()
+    assert len(release_calls) == 2
+    assert len(results) == 1 and isinstance(results[0], TransportCloseTimeoutError)
+    with proxy._condition:
+        assert proxy._active_call is None
+        assert not proxy._waiters
+        assert proxy._waiter_snapshot == ()
+    admitted: list[object] = []
+    normal = threading.Thread(
+        target=lambda: _capture_call(
+            lambda: broker.acquire(time.monotonic() + 1),
+            admitted,
+        )
+    )
+    normal.start()
+    assert broker.wait_for_waiters(1, timeout=0.2)
+    proxy.close()
+    normal.join(timeout=2)
+
+    assert not normal.is_alive()
+    assert len(admitted) == 1 and isinstance(admitted[0], pool_module.SlotLease)
+    broker.release(admitted[0])
+    snapshot = broker.snapshot()
+    assert snapshot.pin_waiter_count == 0
     assert (snapshot.idle_slots, snapshot.active_leases) == (1, 0)
 
 

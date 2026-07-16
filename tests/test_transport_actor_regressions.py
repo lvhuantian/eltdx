@@ -431,6 +431,8 @@ class ReadablePartialSocket:
         self.closed = False
 
     def recv(self, _size: int) -> bytes:
+        if not self.recv_outcomes:
+            raise BlockingIOError()
         outcome = self.recv_outcomes.pop(0)
         if isinstance(outcome, BaseException):
             raise outcome
@@ -538,10 +540,12 @@ def test_partial_collision_write_only_between_head_and_tail_cannot_match() -> No
     )
     assert sock.send_calls == 0
     assert generation.decoder.buffered_bytes == 8
+    assert generation.selector_events == actor_module.selectors.EVENT_READ
 
     actor_module._handle_tcp_event(runtime, token, actor_module.selectors.EVENT_WRITE)
     assert sock.send_calls == 0
     assert generation.decoder.buffered_bytes == 8
+    assert generation.selector_events == actor_module.selectors.EVENT_READ
 
     actor_module._handle_tcp_event(
         runtime,
@@ -557,6 +561,128 @@ def test_partial_collision_write_only_between_head_and_tail_cannot_match() -> No
     sock.recv_outcomes.extend((real, BlockingIOError()))
     actor_module._handle_tcp_event(runtime, token, actor_module.selectors.EVENT_READ)
     assert _count(wait_ticket(ticket)) == 777
+
+
+def test_partial_tail_over_fairness_budget_resumes_read_only_send() -> None:
+    old_batch = b"".join(
+        response_bytes(20_000 + index, TYPE_SECURITY_COUNT, index.to_bytes(2, "little"))
+        for index in range(65)
+    )
+    runtime, generation, ticket, sock = _partial_exchange_runtime(
+        [old_batch[:8], BlockingIOError(), old_batch[8:], BlockingIOError()]
+    )
+    token = actor_module.SelectorToken("tcp", 1, 1, sock)
+
+    actor_module._handle_tcp_event(
+        runtime,
+        token,
+        actor_module.selectors.EVENT_READ | actor_module.selectors.EVENT_WRITE,
+    )
+    assert generation.decoder.buffered_bytes == 8
+    assert generation.selector_events == actor_module.selectors.EVENT_READ
+
+    actor_module._handle_tcp_event(runtime, token, actor_module.selectors.EVENT_READ)
+    assert sock.send_calls == 0
+    assert len(generation.decoded_frames) == 1
+    assert generation.selector_events == actor_module.selectors.EVENT_READ
+
+    assert actor_module._receive_generation_safely(runtime, generation)
+    assert not generation.decoded_frames
+    assert generation.decoder.buffered_bytes == 0
+    actor_module._advance_active_task(runtime)
+
+    assert sock.send_calls == 1
+    assert not ticket.completed.is_set()
+    assert runtime.push_buffer.snapshot().frame_count == 65
+
+
+def test_write_only_snapshot_drains_collision_that_arrived_before_send() -> None:
+    collision = response_bytes(7, TYPE_SECURITY_COUNT, (999).to_bytes(2, "little"))
+    runtime, generation, ticket, sock = _partial_exchange_runtime(
+        [collision, BlockingIOError()]
+    )
+    token = actor_module.SelectorToken("tcp", 1, 1, sock)
+
+    actor_module._handle_tcp_event(runtime, token, actor_module.selectors.EVENT_WRITE)
+
+    assert sock.send_calls == 1
+    assert not ticket.completed.is_set()
+    pushed = runtime.push_buffer.drain()
+    assert [int.from_bytes(item.response.data[:2], "little") for item in pushed] == [999]
+
+    real = response_bytes(7, TYPE_SECURITY_COUNT, (777).to_bytes(2, "little"))
+    sock.recv_outcomes.extend((real, BlockingIOError()))
+    actor_module._handle_tcp_event(runtime, token, actor_module.selectors.EVENT_READ)
+    assert _count(wait_ticket(ticket)) == 777
+
+
+class SizeRespectingBurstSocket:
+    def __init__(self, data: bytes) -> None:
+        self._buffer = bytearray(data)
+        self.closed = False
+
+    def recv(self, size: int) -> bytes:
+        if not self._buffer:
+            raise BlockingIOError()
+        chunk = bytes(self._buffer[:size])
+        del self._buffer[:size]
+        return chunk
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_legal_push_burst_above_decoded_queue_limit_keeps_response_live() -> None:
+    endpoint = resolve_hosts(["127.0.0.1:9"])[0]
+    ticket = actor_module.RequestTicket(
+        1,
+        1,
+        TYPE_SECURITY_COUNT,
+        {"market": "sz"},
+        time.monotonic() + 2,
+        False,
+        request_id=1,
+    )
+    ticket.state = actor_module.RequestState.WAITING_RESPONSE
+    pushes = b"".join(
+        response_bytes(10_000 + index, TYPE_SECURITY_COUNT, b"\x93\x93")
+        for index in range(1_100)
+    )
+    matching = response_bytes(7, TYPE_SECURITY_COUNT, (777).to_bytes(2, "little"))
+    sock = SizeRespectingBurstSocket(pushes + matching)
+    generation = actor_module.TcpGeneration(1, sock, endpoint, actor_module.TcpState.READY)
+    generation.tx_bytes = b"sent"
+    generation.tx_offset = len(generation.tx_bytes)
+    generation.exchange_counter = 1
+    generation.active_exchange = actor_module.WireExchange(
+        ticket,
+        TYPE_SECURITY_COUNT,
+        7,
+        TYPE_SECURITY_COUNT,
+        generation.tx_bytes,
+        False,
+        rx_boundary=0,
+        exchange_id=1,
+        sent_any=True,
+        send_claimed=True,
+    )
+    push_buffer = PushBuffer(1, max_frames=10, max_bytes=1024)
+    runtime = actor_module.ActorRuntime(1, (endpoint,), push_buffer=push_buffer)
+    runtime.active_task = ticket
+    runtime.generation = generation
+
+    for _ in range(64):
+        actor_module._receive_generation_safely(runtime, generation)
+        if ticket.completed.is_set():
+            break
+
+    assert _count(wait_ticket(ticket)) == 777
+    assert runtime.state is actor_module.RuntimeState.STARTING
+    assert runtime.generation is generation
+    snapshot = push_buffer.snapshot()
+    assert snapshot.max_frames_observed <= 10
+    assert snapshot.max_bytes_observed <= 1024
+    assert snapshot.dropped_total == 1_090
 
 
 def test_presend_drain_crossing_deadline_does_not_write(monkeypatch) -> None:

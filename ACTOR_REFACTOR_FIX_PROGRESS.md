@@ -12,10 +12,10 @@ The result document remains historical evidence only until FINAL rewrites it.
 | Baseline HEAD | `994c49b51f47255bdcd9cdc3308a5a554f37588b` |
 | Base | `71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
 | Branch | `actor-transport-refactor` |
-| Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), confirmed OPEN and draft at pushed HEAD `9338286f61def652cd1057986e8047b2a7ce6657` |
+| Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), confirmed OPEN and draft at pushed HEAD `2d4cea8d0b8ab588637b3bece45e0402231fda26` |
 | Final-review correction base | `cc46e6042e60b1d70732ae813b089f9c8b572572` |
-| Latest pushed correction checkpoint | `9338286f61def652cd1057986e8047b2a7ce6657`; exact CI run `29437501858` and Pages run `29437501886` passed |
-| Current local follow-up | Formal `fifo-v2-0183c49-a` remains a permanent FAIL. The 2 ms multi-slot grace and strong-check consolidation are checkpointed and exact remote checks are green; one remote-evidence ledger commit precedes a new FIFO-v2 declaration |
+| Latest pushed correction checkpoint | `2d4cea8d0b8ab588637b3bece45e0402231fda26`; exact CI run `29464918209` and Pages run `29464918137` passed |
+| Current local follow-up | Post-`9338286` adversarial corrections are locally complete: six deterministic nodes, 226 focused regressions, 492 full tests, builds/docs, and three independent reviews are clean. The source checkpoint and exact remote checks precede any new FIFO-v2 declaration |
 | Baseline worktree | User-owned modification in `ACTOR_REFACTOR_RESULT.md`; preserve and integrate, do not overwrite |
 | Superseded result | Existing `COMPLETE` claim and 183-test evidence |
 
@@ -35,12 +35,12 @@ again before FINAL evidence is accepted.
 | Checkpoint | State | Exit evidence |
 | --- | --- | --- |
 | F00 baseline, review, regression design | COMPLETE (`05a5e9b`) | Ledger and deterministic A-E failing baselines recorded before implementation |
-| F01 receive ordering and boundaries | CORRECTNESS CLOSED; CHECKPOINT CANDIDATE | READ-first batches, immutable exchange identity, fixed-key collision regressions, and keyed nonrepeating nonzero msg IDs pass; protocol-compliant peer boundary is explicit |
+| F01 receive ordering and boundaries | CORRECTNESS CLOSED; CHECKPOINT CANDIDATE | Every send step drains Actor-observed receive state; partial decoder interest is READ-only; >64 tail continuation resumes safely; recv batch size mathematically caps decoded queue at 1024 |
 | F02 request identity and build isolation | CORRECTNESS CLOSED; CHECKPOINT CANDIDATE | Exact cancel, terminal claim, FIFO request/control/submission identity gates, physical-lock interruption recovery, and build isolation pass |
 | F03 connect and failover | COMPLETE (`2e48be0`) | Candidate/attempt budgets, next-endpoint retry, Windows peer verification, non-busy rearm, and seven real/fault-injected regressions |
-| F04 Broker and pinned leases | CORRECTNESS CLOSED; CHECKPOINT CANDIDATE | BaseException-safe waiter withdrawal, assigned-waiter lazy reap, pin close lease recovery, atomic batch admission, and FIFO pass |
-| F05 lifecycle and shutdown | CORRECTNESS CLOSED; CHECKPOINT CANDIDATE | Tokenized lifecycle gates, nonblocking finalizers, deadline-bounded best-effort fatal cleanup, and monotonic shutdown pass |
-| F06 stress, performance, resources, compatibility | WINDOWS ACTOR COOPERATION CHECKPOINT (`e106ad4`); `0183c49` FIFO-v2 campaign FAIL | Saturated throughput, sequential p50/p99, and no-backlog p50 now pass; sequential throughput and no-backlog p99 remain open in both counterbalanced blocks |
+| F04 Broker and pinned leases | CORRECTNESS CLOSED; CHECKPOINT CANDIDATE | Failed lease and assigned pin reservation use exact cancellation for lazy reclaim; all assignment paths reclaim before capacity checks; snapshots release waiter/Event ownership |
+| F05 lifecycle and shutdown | CORRECTNESS CLOSED; CHECKPOINT CANDIDATE | Runtime registration rechecks retire after append, so either abandon snapshots the runtime or the registering thread stops it itself |
+| F06 stress, performance, resources, compatibility | CORRECTIVE SOURCE CHECKPOINT PENDING | Correctness reviews and local matrix are clean; exact source push/CI/Pages are required before a new frozen FIFO-v2 campaign |
 | Final-review correctness correction | COMPLETE (`a53cc09`) | 443-test correctness snapshot plus deterministic two-endpoint generation failover; exact CI and Pages passed |
 | FINAL independent review and CI | PENDING | Two clean adversarial reviews; local matrix/build/docs and exact-HEAD CI/Pages green |
 
@@ -521,6 +521,13 @@ exact-source performance artifacts remain to be generated after checkpointing.
 | 2026-07-16 | 2 ms grace and pool-guard checkpoint | Commit `9338286` (`Fix-Checkpoint: F06-POOL-GUARD-HOTPATH`) contains the reviewed production changes, two deterministic pool regressions, and this ledger; the user-owned result document remains excluded |
 | 2026-07-16 | Exact `9338286` remote checks | CI run `29437501858` passed Ubuntu 3.10-3.13, Windows 3.11/3.13, and package build; Pages run `29437501886` passed. PR #12 remained OPEN and draft at exact head `9338286f61def652cd1057986e8047b2a7ce6657` |
 | 2026-07-16 | Recovery focused verification at `9338286` | Actor/Pool core files passed **178 tests in 5.40s**; the exact Actor/Failover/Pool/Lifecycle regression matrix passed **220 tests in 14.30s** |
+| 2026-07-16 | Exact `2d4cea8` remote checks | CI run `29464918209` passed Ubuntu 3.10-3.13, Windows 3.11/3.13, and package build; Pages run `29464918137` passed. Ubuntu reported 485 passed plus the declared Windows-only skip; both Windows jobs reported 486 passed |
+| 2026-07-16 | Post-`9338286` independent adversarial review | A/B/C review found a WRITE-only after-select receive race and a legal >1024-frame burst failure. D/E review found add-runtime/abandon Actor escape, FAILED-pin lease loss under Broker contention, and assigned pin reservation leakage. Performance campaign creation was stopped before declaration or sampling |
+| 2026-07-16 | Deterministic reopened red matrix | Five exact nodes produced **5 failed in 1.81s** before any production edit: WRITE-only collision had no pre-send push; the legal burst raised `ProtocolError: decoded response frame queue exceeds limit: 1024`; guard registration returned `True` after abandon; FAILED pin lease stayed ACTIVE with idle/active `0/1`; assigned pin waiter left `pin_waiter_count=1` |
+| 2026-07-16 | Follow-up deterministic red nodes | Partial-tail continuation produced **1 failed in 0.68s** with `send_calls=0` after a 65-frame tail; the strengthened max-pending admission node produced **1 failed in 0.95s** because the next normal waiter could not enter the queue |
+| 2026-07-16 | Post-review correction matrix | Six exact correction nodes passed **6 tests in 0.29s**; Actor/Failover/Pool/Lifecycle regressions passed **226 tests in 14.48s**; the final exact-worktree complete suite passed **492 tests in 82.37s** |
+| 2026-07-16 | Post-review correction builds | `python -m build` produced wheel and sdist; `python -m mkdocs build --strict`, `python -m compileall -q src tests scripts`, and `git diff --check` passed |
+| 2026-07-16 | Post-review correction independent reviews | Actor receive/send/fairness review, Guard/pin/lifecycle review, and deterministic evidence review all returned **CLEAN** after their findings were fixed. Additional probes confirmed a send-return-time legal response succeeds, late cleanup cannot release a replacement lease, and cancelled pin reservations do not block FIFO admission |
 
 Post-`0b8ad54` corrections make Broker close broadcast every independently
 registered pin waiter Event without retaining proxies. A delayed assigned caller
@@ -635,12 +642,40 @@ accounting, and explicit PushBuffer capacity/high-water fields. The production
 hot-path correction invalidates that checkpoint as FINAL evidence, so all
 artifacts must be regenerated at the next exact implementation SHA.
 
+## Post-`9338286` Red Commands
+
+Initial five-node baseline, before any production edit:
+
+```powershell
+python -m pytest -q tests/test_transport_actor_regressions.py::test_write_only_snapshot_drains_collision_that_arrived_before_send tests/test_transport_actor_regressions.py::test_legal_push_burst_above_decoded_queue_limit_keeps_response_live tests/test_transport_lifecycle_regressions.py::test_guard_abandon_cannot_miss_runtime_appended_after_snapshot tests/test_transport_pool_regressions.py::test_failed_pin_terminal_lazily_reclaims_lease_when_broker_is_contended tests/test_transport_pool_regressions.py::test_assigned_pin_waiter_release_failure_is_lazily_reclaimed --tb=short
+```
+
+Result: **5 failed in 1.81s**.
+
+Fairness continuation baseline:
+
+```powershell
+python -m pytest -q tests/test_transport_actor_regressions.py::test_partial_tail_over_fairness_budget_resumes_read_only_send --tb=short
+```
+
+Result: **1 failed in 0.68s**.
+
+Strengthened pin-capacity baseline, before assignment reclaim was added:
+
+```powershell
+python -m pytest -q tests/test_transport_pool_regressions.py::test_assigned_pin_waiter_release_failure_is_lazily_reclaimed --tb=short
+```
+
+Result: **1 failed in 0.95s** because the next normal waiter could not enter
+admission without an unrelated snapshot/heartbeat reclaim.
+
 ## Exact Next Action
 
-Commit and push this exact remote-evidence ledger update while explicitly
-excluding the user-owned result document, then require that documentation-only
-HEAD's CI and Pages. Create a clean detached current worktree, declare a new
-FIFO-v2 campaign bound to that exact SHA, and execute all eight cells once in
-the frozen order. Never resample
+Commit the reviewed post-`9338286` Actor/Guard/pin corrections, deterministic
+regressions, and this ledger while explicitly excluding the user-owned result
+document. Push normally and require exact CI/Pages. Only after that source is
+green, create a clean detached worktree, declare a new FIFO-v2 campaign bound
+to the exact SHA, externally record its canonical hash, and execute all eight
+cells once in the frozen order. Never resample
 `fifo-v1-ca43972-a`, `fifo-v2-72ef660-a`, `fifo-v2-2da7651-a`, or
 `fifo-v2-0183c49-a`.

@@ -288,6 +288,7 @@ class LeaseBroker:
 
     def _assign_waiters_locked(self, wake: list[AdmissionWaiter]) -> None:
         self._reclaim_cancelled_leases_locked()
+        self._reclaim_cancelled_pin_waiters_locked()
         while self._waiters:
             waiter = self._waiters[0]
             if waiter.state is not AdmissionState.WAITING or waiter.pool_epoch != self.pool_epoch:
@@ -631,6 +632,8 @@ class PoolRuntimeGuard:
             )
             if accepted and all(item is not runtime for item in self._runtimes):
                 self._runtimes.append(runtime)
+            if accepted and self._retire_requested.is_set():
+                accepted = False
         finally:
             self._lock.release()
         if not accepted:
@@ -1145,6 +1148,7 @@ class PinnedTransportProxy:
             self._acquire_condition(deadline, closing=True)
             try:
                 self._close_waiters = [waiter for waiter in self._close_waiters if waiter.reserved]
+                self._refresh_waiter_snapshot_locked()
             finally:
                 self._condition.release()
             if waiter_cleanup_error is not None:
@@ -1246,6 +1250,7 @@ class PinnedTransportProxy:
                 raise ConnectionClosedError("pinned transport closed before wire submission")
             self._wire_call = call_id
             self._active_waiter = None
+            self._refresh_waiter_snapshot_locked()
         finally:
             self._condition.release()
 
@@ -1308,6 +1313,8 @@ class PinnedTransportProxy:
                 self._broker.release_pin_waiter(waiter.completed, deadline=deadline)
                 waiter.reserved = False
             except BaseException:
+                waiter.cancelled.set()
+                waiter.reserved = False
                 self._withdraw_unstarted_call(call_id, deadline)
                 raise
         try:
@@ -1345,6 +1352,7 @@ class PinnedTransportProxy:
                         self._state = PinState.CLOSED
                     if self._state is not PinState.OPEN or not lease_valid:
                         closed_waiters.extend(self._close_waiters_locked())
+                    self._refresh_waiter_snapshot_locked()
                     self._condition.notify_all()
             error = waiter.error
         finally:
@@ -1394,6 +1402,7 @@ class PinnedTransportProxy:
                     candidate.assigned = True
                     wake.append(candidate)
                     break
+                self._refresh_waiter_snapshot_locked()
                 self._condition.notify_all()
         finally:
             self._condition.release()
@@ -1445,6 +1454,7 @@ class PinnedTransportProxy:
                         candidate.assigned = True
                         wake.append(candidate)
                         break
+            self._refresh_waiter_snapshot_locked()
             self._condition.notify_all()
         finally:
             self._condition.release()
@@ -1535,6 +1545,7 @@ class PinnedTransportProxy:
                 candidate.assigned = True
                 wake.append(candidate)
                 break
+            self._refresh_waiter_snapshot_locked()
             self._condition.notify_all()
         finally:
             self._condition.release()
@@ -1558,12 +1569,24 @@ class PinnedTransportProxy:
         return wake
 
     def _refresh_waiter_snapshot_locked(self) -> None:
-        self._waiter_snapshot = tuple(self._waiters) + tuple(
+        active = (
+            (self._active_waiter,)
+            if self._active_waiter is not None and self._active_waiter.reserved
+            else ()
+        )
+        self._waiter_snapshot = active + tuple(self._waiters) + tuple(
             waiter for waiter in self._close_waiters if waiter.reserved
         )
 
     def _release_failed_lease(self, *, deadline: float | None = None) -> None:
-        self._broker.release(self._lease, deadline=deadline)
+        try:
+            self._broker.release(self._lease, deadline=deadline)
+        except BaseException:
+            try:
+                _mark_lease_cancelled(self._lease)
+            except BaseException:
+                pass
+            raise
         if deadline is None:
             self._condition.acquire()
             acquired = True

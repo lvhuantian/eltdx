@@ -25,7 +25,7 @@ from eltdx.exceptions import (
 from eltdx.hosts import ResolvedEndpoint
 from eltdx.protocol.commands import build_command_frame, parse_command_response
 from eltdx.protocol.constants import TYPE_HANDSHAKE, TYPE_HEARTBEAT
-from eltdx.protocol.frame import ResponseFrame, ResponseFrameDecoder
+from eltdx.protocol.frame import RESPONSE_HEADER_SIZE, ResponseFrame, ResponseFrameDecoder
 
 from .push import PushBuffer, PushFrame
 
@@ -478,6 +478,8 @@ _IN_PROGRESS_CONNECT_CODES = frozenset(
 
 _MAX_REQUEST_ATTEMPTS = 2
 _CONNECT_RECHECK_INTERVAL = 0.01
+_MAX_DECODED_FRAMES = 1024
+_MAX_RECEIVE_CHUNK = RESPONSE_HEADER_SIZE * _MAX_DECODED_FRAMES
 
 
 def start_actor(
@@ -869,7 +871,19 @@ def _advance_active_task(runtime: ActorRuntime) -> None:
     if generation is None:
         _start_request_attempt(runtime)
         return
-    if generation.active_exchange is not None or generation.state is TcpState.CONNECTING:
+    if generation.active_exchange is not None:
+        if (
+            generation.tx_offset < len(generation.tx_bytes)
+            and generation.selector_events == selectors.EVENT_READ
+            and not generation.decoded_frames
+            and not generation.decoder.buffered_bytes
+        ):
+            try:
+                _send_generation(runtime, generation)
+            except (OSError, ConnectionClosedError) as exc:
+                _handle_wire_failure(runtime, exc, retryable=True)
+        return
+    if generation.state is TcpState.CONNECTING:
         return
     if generation.state not in (TcpState.CONNECTED_UNHANDSHAKEN, TcpState.READY):
         return
@@ -1129,16 +1143,23 @@ def _handle_tcp_event(runtime: ActorRuntime, token: SelectorToken, mask: int) ->
             drained = _receive_generation_safely(runtime, generation)
             if runtime.generation is not generation:
                 return
+            if generation.decoder.buffered_bytes:
+                _set_generation_interest(runtime, generation, selectors.EVENT_READ)
+                return
             if (
                 not drained
                 or generation.decoded_frames
-                or generation.decoder.buffered_bytes
             ):
                 return
         if generation.decoded_frames or generation.decoder.buffered_bytes:
             return
         try:
-            if mask & selectors.EVENT_WRITE:
+            exchange = generation.active_exchange
+            if mask & selectors.EVENT_WRITE or (
+                mask & selectors.EVENT_READ
+                and exchange is not None
+                and generation.tx_offset < len(generation.tx_bytes)
+            ):
                 _send_generation(runtime, generation)
         except (OSError, ConnectionClosedError) as exc:
             _handle_wire_failure(runtime, exc, retryable=True)
@@ -1190,6 +1211,29 @@ def _defer_connect_probe(runtime: ActorRuntime, generation: TcpGeneration) -> No
 def _send_generation(runtime: ActorRuntime, generation: TcpGeneration) -> None:
     exchange = generation.active_exchange
     if exchange is None or generation.tx_offset >= len(generation.tx_bytes):
+        return
+    _drain_control(runtime)
+    if runtime.stop_requested:
+        return
+    _expire_active_task(runtime)
+    if (
+        runtime.generation is not generation
+        or runtime.active_task is not exchange.ticket
+        or generation.active_exchange is not exchange
+    ):
+        return
+    generation.receive_drained = False
+    drained = _receive_generation_safely(runtime, generation)
+    if (
+        runtime.generation is not generation
+        or runtime.active_task is not exchange.ticket
+        or generation.active_exchange is not exchange
+    ):
+        return
+    if generation.decoder.buffered_bytes:
+        _set_generation_interest(runtime, generation, selectors.EVENT_READ)
+        return
+    if not drained or generation.decoded_frames:
         return
     _drain_control(runtime)
     if runtime.stop_requested:
@@ -1269,7 +1313,7 @@ def _receive_generation(runtime: ActorRuntime, generation: TcpGeneration) -> boo
         if generation.decoded_frames:
             return False
         try:
-            chunk = generation.sock.recv(min(64 * 1024, 256 * 1024 - bytes_read))
+            chunk = generation.sock.recv(min(_MAX_RECEIVE_CHUNK, 256 * 1024 - bytes_read))
         except BlockingIOError:
             generation.receive_drained = True
             return True
@@ -1283,8 +1327,10 @@ def _receive_generation(runtime: ActorRuntime, generation: TcpGeneration) -> boo
         bytes_read += len(chunk)
         generation.last_activity_at = time.monotonic()
         frames = generation.decoder.feed(chunk)
-        if len(generation.decoded_frames) + len(frames) > 1024:
-            raise ProtocolError("decoded response frame queue exceeds limit: 1024")
+        if len(generation.decoded_frames) + len(frames) > _MAX_DECODED_FRAMES:
+            raise ProtocolError(
+                f"decoded response frame queue exceeds limit: {_MAX_DECODED_FRAMES}"
+            )
         exchange = generation.active_exchange
         exchange_id = exchange.exchange_id if exchange is not None else None
         send_complete = bool(

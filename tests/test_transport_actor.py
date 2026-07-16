@@ -591,6 +591,9 @@ class PartialSocket:
             raise outcome
         return min(outcome, len(data))
 
+    def recv(self, _size: int) -> bytes:
+        raise BlockingIOError()
+
 
 class InterestSelector:
     def __init__(self) -> None:

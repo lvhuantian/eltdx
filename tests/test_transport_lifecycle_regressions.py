@@ -567,6 +567,44 @@ def test_guard_abandon_rejects_registration_after_snapshot(monkeypatch) -> None:
     assert stopped == [late]
 
 
+def test_guard_abandon_cannot_miss_runtime_appended_after_snapshot(monkeypatch) -> None:
+    append_entered = threading.Event()
+    allow_append = threading.Event()
+    stopped: list[ActorRuntime] = []
+
+    class BlockingRuntimeList(list[ActorRuntime]):
+        def append(self, runtime: ActorRuntime) -> None:
+            append_entered.set()
+            assert allow_append.wait(timeout=2)
+            super().append(runtime)
+
+    def stop(runtime: ActorRuntime) -> None:
+        stopped.append(runtime)
+        runtime.stop_requested = True
+
+    monkeypatch.setattr(pool_module, "request_actor_stop", stop)
+    broker = LeaseBroker(1, pool_size=1, max_pending_requests=1)
+    guard = PoolRuntimeGuard()
+    guard.configure(broker, PushBuffer(1))
+    guard._runtimes = BlockingRuntimeList()
+    late = ActorRuntime(1, ())
+    results: list[bool] = []
+    registration = threading.Thread(
+        target=lambda: results.append(guard.add_runtime(late, pool_epoch=1, broker=broker))
+    )
+    registration.start()
+    assert append_entered.wait(timeout=2)
+
+    guard.abandon()
+    allow_append.set()
+    registration.join(timeout=2)
+
+    assert not registration.is_alive()
+    assert results == [False]
+    assert stopped == [late]
+    assert late.stop_requested
+
+
 def test_normal_pool_close_clears_epoch_configuration_and_reopens() -> None:
     pool = PooledSocketTransport(["127.0.0.1:9"], pool_size=2, timeout=1, heartbeat_interval=None)
     old_broker, old_push = pool._ensure_started()
