@@ -14,8 +14,8 @@ The result document remains historical evidence only until FINAL rewrites it.
 | Branch | `actor-transport-refactor` |
 | Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), confirmed OPEN and draft at pushed HEAD `907e3e69bc8c8a38e1b8bd39af1f0bf0ecd38789` |
 | Final-review correction base | `cc46e6042e60b1d70732ae813b089f9c8b572572` |
-| Latest pushed correction checkpoint | `f7355c047e590f34ccefee0e576fc34e2139e01d`; CI run `29486508429` and Pages run `29486508422` passed |
-| Current local follow-up | Formal FIFO-v2 sampling remains stopped. Revision-7 passed structural validation at ratio 0.998163 against the corrected script; the exact worktree passed 521 tests plus build/docs/static checks and two independent CLEAN re-reviews. Exact source-checkpoint CI and Pages are green; record this remote evidence before freezing the next campaign |
+| Latest pushed correction checkpoint | `79232870c337a94e5d79eca723d8bf5d09371e89`; CI run `29486968573` and Pages run `29486968576` passed |
+| Current local follow-up | Formal campaign `fifo-v2-7923287-a` completed all eight attempt-1 cells once with clean evidence but failed four performance gates. This exact source and campaign will not be sampled again; diagnose and implement a correctness-preserving hot-path improvement before declaring another campaign |
 | Baseline worktree | User-owned modification in `ACTOR_REFACTOR_RESULT.md`; preserve and integrate, do not overwrite |
 | Superseded result | Existing `COMPLETE` claim and 183-test evidence |
 
@@ -40,7 +40,7 @@ again before FINAL evidence is accepted.
 | F03 connect and failover | COMPLETE (`2e48be0`) | Candidate/attempt budgets, next-endpoint retry, Windows peer verification, non-busy rearm, and seven real/fault-injected regressions |
 | F04 Broker and pinned leases | CORRECTNESS CLOSED; CHECKPOINT CANDIDATE | Failed lease and assigned pin reservation use exact cancellation for lazy reclaim; all assignment paths reclaim before capacity checks; snapshots release waiter/Event ownership |
 | F05 lifecycle and shutdown | CORRECTNESS CLOSED; CHECKPOINT CANDIDATE | Runtime registration rechecks retire after append, so either abandon snapshots the runtime or the registering thread stops it itself |
-| F06 stress, performance, resources, compatibility | HEARTBEAT CHECKPOINT CLOSED; FORMAL CAMPAIGN PENDING | Exact `907e3e6` Windows 3.13 measured 0.989513 and remains FAIL. Corrected revision-7 passed isolated at 0.998163 with heartbeat `0/0`; exact `f7355c0` CI and Pages passed. A new frozen FIFO-v2 campaign and exact-source heavy/resource evidence remain required |
+| F06 stress, performance, resources, compatibility | HEARTBEAT CHECKPOINT CLOSED; PERFORMANCE REOPENED | Exact `907e3e6` Windows 3.13 measured 0.989513 and remains FAIL. Revision-7 heartbeat and exact `7923287` CI/Pages passed, but formal `fifo-v2-7923287-a` failed sequential/saturated throughput and sequential/no-backlog p99. Exact-source performance plus heavy/resource evidence remain required |
 | Final-review correctness correction | COMPLETE (`a53cc09`) | 443-test correctness snapshot plus deterministic two-endpoint generation failover; exact CI and Pages passed |
 | FINAL independent review and CI | PENDING | Two clean adversarial reviews; local matrix/build/docs and exact-HEAD CI/Pages green |
 
@@ -253,6 +253,51 @@ ratios were 0.946900/0.958909, no-backlog p50 passed with 0.06097 ms of
 allowance, and p99 exceeded by 0.22599 ms. Independent artifact audit and
 verifier replay were **CLEAN**. This campaign is permanently retained as FAIL
 and this exact source will not be sampled again.
+
+### FIFO-v2 `7923287` Campaign Failure
+
+Campaign `fifo-v2-7923287-a` was declared before sampling against clean
+baseline `71089c0a2867a75dc79aa2c340213f4e3845b6e3` and current
+`79232870c337a94e5d79eca723d8bf5d09371e89` worktrees. Its canonical
+declaration SHA256 is
+`5ab6e75cd12d71e396c09ee592a174b7c4900be69ce606b02527e609428a6cde`;
+the declaration file SHA256 is
+`36ff99846b8a300f738b85abc20680686a462e07f4b79161779cf44ff9dbd484`.
+All eight attempt-1 cells completed once in the fixed
+`baseline/current/current/baseline/current/baseline/baseline/current` order in
+2,003.2 seconds. Verifier replay returned `errors=[]`.
+
+Across 32 distinct cases and 1,000,000 completion rows, requests, successes,
+server requests, wire attempts, unique responses, completion records, and raw
+latency records were all exactly 1,000,000. Duplicate, missing, unexpected,
+cross-request, cross-generation, digest mismatch, provenance mismatch, and
+exact case replay counts were all zero. Current fixed-cohort cases completed
+10,640 exact clean boundary checks. The immutable bundle SHA256 is
+`2497cf1e3efe07e449511935661da249238b4443d2a9bae906bebe0ed8373961`;
+the stored report and independent replay file SHA256 values are
+`954192977dee7699dfd1c8991e0dcf2694fa8a3047ab0174fb93849083ead4d1`
+and `15339fd279e6330672553a7aa53d18498de6666213ddbd0dfa2549505d328b7f`.
+
+Four hard gates failed:
+
+- Sequential throughput was 174.410898 versus 163.773610 requests/second,
+  ratio 0.939010 against the 0.95 minimum.
+- Saturated throughput was 687.407879 versus 634.593945 requests/second,
+  ratio 0.923169.
+- Sequential p99 was 6.1812 versus 6.8017 ms, delta 0.6205 ms against a
+  0.61812 ms allowance; it missed by 0.00238 ms.
+- No-backlog p99 was 6.8170 versus 8.4244 ms, delta 1.6074 ms against a
+  0.6817 ms allowance; it missed by 0.9257 ms.
+
+Sequential and no-backlog p50 passed at deltas 0.3823/0.5959 ms. Saturated raw
+p50/p99 remained report-only at baseline 132.56405/536.1256 ms versus current
+155.13345/170.9080 ms; contended-wave report-only p50/p99 was
+78.0597/150.6717 versus 89.90885/168.4938 ms. Adjacent block throughput ratios
+for sequential/saturated were `0.960603/0.951229`, `0.964711/0.955723`,
+`0.917135/0.897796`, and `0.914861/0.889208`; all blocks favored baseline.
+Independent artifact audit classified the evidence **CLEAN** and performance
+**FAIL**. This exact source and campaign are permanently retained and will not
+be sampled again.
 
 ## Post-Campaign Adversarial Reopening At `8303405`
 
@@ -572,6 +617,8 @@ exact-source performance artifacts remain to be generated after checkpointing.
 | 2026-07-16 | Isolated revision-7 heartbeat raw result | The single declared process completed in 221.7 seconds. Artifact SHA256 `985A800AE0AD12463F9EE21018FA180AACF901FE6E63D58D9E5667E1F7761C9E`; workload SHA256 exactly matches current script `487B3131AF237B5843FE04046D51B60F136D6E22815297E29347286F93C3EA0A`; dirty implementation identity `907e3e6` is explicit. Aggregate ratio **0.998163** passed; blocks `0.988305/1.001516/1.007085/0.995846`; timed heartbeat `0/0`; 260 barriers; 32 phases; 131,232/131,232 unique responses; duplicate/missing/unexpected/cross-request/cross-generation, generation, accept, and launch-boundary mismatches all zero; idle probe `4/4`; paced heartbeat/business `32/32`; idle CPU ratio zero |
 | 2026-07-16 | Revision-7 pre-checkpoint full verification | The exact worktree passed **521 tests in 257.97s** on Windows CPython 3.12.6 in one isolated process. `python -m build` produced `eltdx-1.0.2.tar.gz` and `eltdx-1.0.2-py3-none-any.whl`; `python -m mkdocs build --strict`, `python -m compileall -q src tests scripts`, and `git diff --check` passed. Diff check emitted only existing LF-to-CRLF worktree warnings |
 | 2026-07-16 | Exact `f7355c0` remote checks | CI run `29486508429` passed Ubuntu Python 3.10-3.13, Windows Actor Python 3.11/3.13, and the Python 3.13 package build. Pages run `29486508422` passed strict documentation build and artifact upload. PR #12 remained OPEN and draft at exact head `f7355c047e590f34ccefee0e576fc34e2139e01d` |
+| 2026-07-16 | Exact `7923287` evidence-head remote checks | CI run `29486968573` passed Ubuntu Python 3.10-3.13, Windows Actor Python 3.11/3.13, and the Python 3.13 package build. Pages run `29486968576` passed strict documentation build and artifact upload. PR #12 remained OPEN and draft at exact head `79232870c337a94e5d79eca723d8bf5d09371e89` |
+| 2026-07-16 | FIFO-v2 `7923287` campaign declaration | Before any sample, clean detached roots were verified at baseline `71089c0a2867a75dc79aa2c340213f4e3845b6e3` and current `79232870c337a94e5d79eca723d8bf5d09371e89`; evidence tests passed **57 tests in 1.71s**. Campaign `fifo-v2-7923287-a` has canonical declaration SHA256 `5ab6e75cd12d71e396c09ee592a174b7c4900be69ce606b02527e609428a6cde` and declaration file SHA256 `36FF99846B8A300F738B85ABC20680686A462E07F4B79161779CF44FF9DBD484`. The output directory contained only that declaration; schedule is exact baseline/current/current/baseline/current/baseline/baseline/current, every cell attempt 1, and no trial existed when this external record was written |
 
 Post-`0b8ad54` corrections make Broker close broadcast every independently
 registered pin waiter Event without retaining proxies. A delayed assigned caller
@@ -715,11 +762,11 @@ admission without an unrelated snapshot/heartbeat reclaim.
 
 ## Exact Next Action
 
-Record and push the exact revision-7 remote-check evidence while explicitly
-excluding the user-owned result document, then require that evidence HEAD's CI
-and Pages. Only after that head is green, create a clean detached current
-worktree, declare a new FIFO-v2 campaign bound to the
-exact SHA, externally record its canonical hash, and execute all eight cells
-once in the frozen order. Never rerun exact `907e3e6` and never resample
+Complete the independent hot-path diagnosis for the clean performance failure,
+add deterministic race regressions before any production edit, and retain only
+an optimization that improves fixed diagnostics without weakening FIFO,
+receive boundaries, lifecycle, or pool capacity. Create a new code checkpoint
+and exact-head CI before declaring any successor campaign. Never rerun exact
+`907e3e6` or `7923287`, and never resample
 `fifo-v1-ca43972-a`, `fifo-v2-72ef660-a`, `fifo-v2-2da7651-a`, or
 `fifo-v2-0183c49-a`.
