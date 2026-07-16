@@ -15,7 +15,7 @@ The result document remains historical evidence only until FINAL rewrites it.
 | Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), confirmed OPEN and draft at pushed HEAD `907e3e69bc8c8a38e1b8bd39af1f0bf0ecd38789` |
 | Final-review correction base | `cc46e6042e60b1d70732ae813b089f9c8b572572` |
 | Latest pushed correction checkpoint | `7e78bca98bbf1380145dd041fb6db6005570fc48`; exact CI run `29490966892` and Pages run `29490966925` passed |
-| Current local follow-up | Successor cooperation skip-send failed fixed development diagnostics and was fully removed; evaluate the next reviewed pre-send hot-path candidate without resampling exact `7923287` or its campaign |
+| Current local follow-up | Successor skip-send and pre-send consolidation each failed fixed development stability rules and were fully removed; evaluate a materially different exact-epoch snapshot candidate without resampling prior source |
 | Baseline worktree | User-owned modification in `ACTOR_REFACTOR_RESULT.md`; preserve and integrate, do not overwrite |
 | Superseded result | Existing `COMPLETE` claim and 183-test evidence |
 
@@ -856,3 +856,90 @@ in both blocks, saturated throughput disagreed by direction, and no-backlog
 p99 disagreed by direction. The production candidate, its deterministic
 experimental tests, and temporary runner are therefore removed; the raw
 artifact and this rejection record remain. No formal campaign was run.
+
+## Post-`29b250e` Pre-Send Consolidation Red Baseline
+
+The next read-only design review allowed only two narrow changes. Admission may
+skip its speculative receive when both the decoded queue and decoder buffer are
+empty, but any user-space frame or partial frame must still be drained before
+creating `WireExchange`. `_send_generation` must retain its first control/
+STOP/expiry/identity sweep, the unconditional final receive boundary, the
+post-receive generation identity and decoder/fairness gates, and the locked
+send claim. Only the second post-receive control/expiry/identity sweep may be
+replaced by that exact atomic claim.
+
+Before production edits, two deterministic call-count regressions were added:
+
+```powershell
+python -m pytest -q tests/test_transport_actor_regressions.py::test_empty_userspace_receive_state_uses_only_final_presend_drain tests/test_transport_actor_regressions.py::test_final_presend_drain_uses_atomic_claim_without_second_control_sweep --tb=short
+```
+
+Result: **2 failed in 0.73s**. Current source performed two receive passes for
+an empty user-space admission and two control sweeps around the final receive.
+The retained collision, partial head/tail, >64 fairness, EOF, STOP/cancel,
+deadline, and send-claim tests remain correctness gates for the candidate.
+
+The implementation narrows admission's speculative receive condition to
+actual decoded frames or decoder-buffer bytes, and routes the post-boundary
+decision directly through the existing locked send claim. Strengthened tests
+inject an exact future-ID collision only at the final control fence, prove the
+single final receive classifies it before send, and require cancel, STOP, and a
+crossed deadline published inside final receive to reach and be rejected by
+the atomic claim. EOF and a second collision on the >64 fairness resume path
+also remain no-write/boundary controls. The focused set passed **16 tests in
+0.61s**; the expanded Actor/Pool/lifecycle six-file matrix passed **297 tests
+in 13.61s**.
+
+Current-diff adversarial review then found a combined STOP/deadline regression:
+after the atomic claim rejected STOP, its shared failure cleanup still expired
+the ticket. The deterministic final-receive STOP plus crossed-deadline node
+failed **1 test in 0.84s**, observing `FAILED` instead of retaining `SENDING`
+for shutdown. Failed-claim cleanup now drains control and skips expiry while
+STOP is authoritative. The strengthened pre-send matrix passed **17 tests in
+0.31s** after the correction. Two current-diff adversarial reviews returned
+**CLEAN**, and the post-correction Actor/Pool/lifecycle six-file matrix passed
+**298 tests in 13.52s**.
+
+## Pre-Send Consolidation Development Diagnostic Declaration
+
+This is a development decision aid, not formal acceptance and not a sample of
+exact `7923287` or `29b250e` source. Both roles execute the same dirty candidate
+bytes (Actor SHA256
+`28E6D1417E371C078455F62C826323445AE2D003A4E474A24E681E3289CAE243`).
+The control role replaces only `_advance_active_task` and `_send_generation`
+in-process with their pre-consolidation behavior; experiment uses the candidate
+functions. Workload SHA256 is
+`B09AB7130752AE0C562B63BA04D2B1BEA42F1E168C060F13D6E86E9BBA277B84`;
+one-use diagnostic SHA256 is
+`A97A90B5D586A3BFF6E1078BEB8D4CBDD880CD2ACDB354505458F6041074BD95`.
+
+Run exactly one C/E/E/C process with no overlapping task pytest/stress/
+benchmark process. Every fresh-loopback cell runs 1,500 sequential requests
+after 300 warmups, 10,000 pool-4/concurrency-100 requests after 500 warmups,
+and 500 four-worker cohorts after 50 warmup cohorts, all at 5ms server delay.
+Retain every raw latency/completion in
+`presend-consolidation-dev-ceec-29b250e-dirty.json`; require exactly 54,000
+unique successes/server requests/records, zero error/duplicate/missing/
+unexpected/cross-request/cross-generation counts, and 2,200 clean cohort
+boundaries. Compare both adjacent C/E blocks and reject unless sequential,
+saturated, and no-backlog tail improve stably. The result cannot replace or
+trigger early termination of a formal FIFO-v2 campaign.
+
+The one declared process completed all four cells once in exact C/E/E/C
+order. Artifact `presend-consolidation-dev-ceec-29b250e-dirty.json` is
+2,491,417 bytes with SHA256
+`51F10B82C89C70EF4D255E689CDE004DBB2AA483172D5634216AB9E0EE1F7AFF`.
+It contains exactly 54,000 unique requests/successes/server requests/records,
+zero error/duplicate/missing/unexpected/cross-request/cross-generation counts,
+and all 2,200 cohort boundaries are clean.
+
+The standalone candidate **FAILED** the predeclared stable-improvement rule.
+Adjacent C0/E1 and C3/E2 throughput ratios were sequential
+`1.000608/1.022882`, saturated `1.035906/0.993275`, and no-backlog
+`1.107552/1.003878`. P99 deltas were sequential `-0.0321/-0.1348ms`,
+saturated `-5.0225/-5.2009ms`, and no-backlog `-0.9976/-0.3957ms`.
+Although every tail metric improved in both blocks, saturated throughput
+reversed direction in the second block. The rule was frozen before sampling,
+so the source cannot be retained or resampled standalone. Production/tests and
+the temporary runner are removed; the raw artifact and rejection remain. No
+formal campaign was run.
