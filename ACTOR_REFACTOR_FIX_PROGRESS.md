@@ -12,10 +12,10 @@ The result document remains historical evidence only until FINAL rewrites it.
 | Baseline HEAD | `994c49b51f47255bdcd9cdc3308a5a554f37588b` |
 | Base | `71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
 | Branch | `actor-transport-refactor` |
-| Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), confirmed OPEN and draft at pushed HEAD `0183c496a92cf91d4bdc85405f92bc27f43cf768` |
+| Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), confirmed OPEN and draft at pushed HEAD `9338286f61def652cd1057986e8047b2a7ce6657` |
 | Final-review correction base | `cc46e6042e60b1d70732ae813b089f9c8b572572` |
-| Latest pushed correction checkpoint | `0183c496a92cf91d4bdc85405f92bc27f43cf768`; exact CI run `29430226672` and Pages run `29430226404` passed |
-| Current local follow-up | Formal `fifo-v2-0183c49-a` is a permanent FAIL on sequential throughput and no-backlog p99 only. A 2 ms multi-slot grace and equivalent strong-check lock consolidation are the next checkpoint candidate |
+| Latest pushed correction checkpoint | `9338286f61def652cd1057986e8047b2a7ce6657`; exact CI run `29437501858` and Pages run `29437501886` passed |
+| Current local follow-up | Formal `fifo-v2-0183c49-a` remains a permanent FAIL. The 2 ms multi-slot grace and strong-check consolidation are checkpointed and exact remote checks are green; one remote-evidence ledger commit precedes a new FIFO-v2 declaration |
 | Baseline worktree | User-owned modification in `ACTOR_REFACTOR_RESULT.md`; preserve and integrate, do not overwrite |
 | Superseded result | Existing `COMPLETE` claim and 183-test evidence |
 
@@ -518,6 +518,9 @@ exact-source performance artifacts remain to be generated after checkpointing.
 | 2026-07-16 | Rejected Windows scheduling and completion probes | Response-only above-normal priority, hard affinity, GIL switch interval 1 ms, a native-lock completion signal, early caller signal, and combined ideal-processor/priority all failed to materially improve p99 or regressed throughput. Soft ideal processor improved no-backlog p99 by about 0.10-0.12 ms but was inconsistent for sequential and insufficient for the formal gate. No ctypes, affinity, priority, global interpreter setting, or alternate completion primitive remains |
 | 2026-07-16 | 2 ms grace and strong-check consolidation candidate | A formal-size no-backlog C/E/E/C for 0.5 versus 2 ms measured p99 7.7777/7.6907/7.6616/7.7854 ms and p50 6.5504/6.5304/6.5083/6.5537 ms, with throughput and all completion identities clean. Per-request profiling measured redundant normal-pool `broker.validate` at 7.74 us mean and `_require_current_runtime` at 8.79 us mean. The candidate removes only the duplicate post-acquire validate and folds two lifecycle snapshots while retaining submission-gate, retire/fatal/epoch/broker guard checks. Independent race and lifecycle reviews were **CLEAN**; acquire-then-close and no-redundant-validate regressions pass |
 | 2026-07-16 | Post-campaign candidate local matrix | Four Actor/Failover/Pool/Lifecycle files passed **220 tests in 14.28s**. Complete suite passed **486 tests in 79.45s**. Wheel and sdist built successfully; MkDocs strict, `compileall -q src tests scripts`, and `git diff --check` passed |
+| 2026-07-16 | 2 ms grace and pool-guard checkpoint | Commit `9338286` (`Fix-Checkpoint: F06-POOL-GUARD-HOTPATH`) contains the reviewed production changes, two deterministic pool regressions, and this ledger; the user-owned result document remains excluded |
+| 2026-07-16 | Exact `9338286` remote checks | CI run `29437501858` passed Ubuntu 3.10-3.13, Windows 3.11/3.13, and package build; Pages run `29437501886` passed. PR #12 remained OPEN and draft at exact head `9338286f61def652cd1057986e8047b2a7ce6657` |
+| 2026-07-16 | Recovery focused verification at `9338286` | Actor/Pool core files passed **178 tests in 5.40s**; the exact Actor/Failover/Pool/Lifecycle regression matrix passed **220 tests in 14.30s** |
 
 Post-`0b8ad54` corrections make Broker close broadcast every independently
 registered pin waiter Event without retaining proxies. A delayed assigned caller
@@ -634,9 +637,10 @@ artifacts must be regenerated at the next exact implementation SHA.
 
 ## Exact Next Action
 
-Commit the locally clean 2 ms grace and strong-check consolidation source,
-deterministic regressions, and this ledger while explicitly excluding the
-user-owned result document; push and require exact CI/Pages before any new
-declaration. Never resample
+Commit and push this exact remote-evidence ledger update while explicitly
+excluding the user-owned result document, then require that documentation-only
+HEAD's CI and Pages. Create a clean detached current worktree, declare a new
+FIFO-v2 campaign bound to that exact SHA, and execute all eight cells once in
+the frozen order. Never resample
 `fifo-v1-ca43972-a`, `fifo-v2-72ef660-a`, `fifo-v2-2da7651-a`, or
 `fifo-v2-0183c49-a`.
