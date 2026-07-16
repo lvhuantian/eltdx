@@ -1241,3 +1241,85 @@ Result: **291 passed in 13.21s**. Actor, Socket, and regression test bytes are
 back to the `89d6439` retained baseline. No state-only performance verdict
 exists; the next candidate must be a new source/campaign and cannot reuse the
 frozen exact-epoch or state-only diagnostic declarations.
+
+## Exact `792b3db` Remote Checks
+
+Draft PR #12 remained open and draft at exact head
+`792b3db31772bfd8d7607fc23c954cbb02e4c7d8`. Pages run `29523075367`
+completed successfully. CI run `29523075436` completed successfully for
+Ubuntu Python 3.10, 3.11, 3.12, and 3.13, Windows Actor Python 3.11 and 3.13,
+and package build. This proves the rejected state-only cleanup checkpoint is
+portable; it does not close the still-open F06 performance requirement.
+
+## Post-`792b3db` Wakeup Armed-Bit Red Baseline
+
+The next materially different candidate coalesces only Actor wakeup bytes.
+Every pending request, cancel, and STOP is still published under the exact
+runtime control gate. That publication also claims one `wake_armed` bit. The
+first publisher sends one non-blocking socketpair byte outside the gate;
+subsequent publishers while that byte remains unconsumed still signal
+`control_ready` but do not repeat the physical send. The Actor clears the bit
+under the same control gate only after `_drain_wakeup()` has consumed through
+`BlockingIOError`, then immediately drains control as before. A publication
+that linearizes before the clear is therefore visible to that control drain;
+one after the clear claims and sends a new byte. Notify failure clears the
+claim, while `abandon_actor()` retains an unconditional best-effort physical
+wakeup. No receive, TCP, FIFO, Broker, lease, retry, or deadline behavior is
+changed.
+
+Deterministic red tests cover physical-send coalescing, drain-to-EAGAIN rearm,
+publication during drain without a lost request, cancel and STOP visibility
+behind an existing wake byte, notify failure rollback, and the finalizer's
+unconditional fallback. Existing writer-full, writer-EOF, explicit-writer,
+successor-grace, ticket terminalization, and control-lock interruption tests
+remain mandatory controls.
+
+Red command:
+
+```powershell
+python -m pytest -q tests/test_transport_actor_regressions.py -k "wakeup_armed or wakeup_coalesces_while or wakeup_drain_to_empty or wakeup_drain_observes or existing_wakeup_keeps or notify_error_rolls_back or finalizer_forces_wakeup" --tb=short
+```
+
+Result before production edits: **6 failed, 2 passed, 85 deselected in
+1.04s**. The current runtime has no armed state, two notifications write two
+bytes, drain does not rearm, request/cancel/STOP each repeat a write behind an
+existing byte. Notify-error propagation and the finalizer's unconditional
+write are the two retained green controls.
+
+The implementation made all eight focused nodes pass and the Actor/Pool/
+lifecycle six-file matrix passed **299 tests in 12.75s**. During review, the
+first implementation also exposed and fixed a finalizer regression: the
+forced explicit-writer path unnecessarily reacquired `control_lock` and could
+block behind successor-grace clearing. The corrected finalizer race passed 20
+consecutive rounds, and the Actor two-file matrix then passed **122 tests in
+3.82s** without warnings.
+
+The candidate is nevertheless rejected before performance sampling. A normal
+request's wake byte is drained and `wake_armed` is cleared before the Actor
+accepts and sends that ticket. The next pooled lease cannot submit until the
+previous ticket's terminal completion releases the lease, so sequential,
+saturated, and fixed-cohort steady paths still perform one physical socketpair
+write per request. The candidate would add one Actor-side control-gate acquire
+per request and coalesce only rare submit-then-cancel/STOP bursts. It therefore
+cannot improve the measured publication-to-send path and has a structurally
+negative steady-state cost. Independent read-only review agreed: **do not
+sample; remove the candidate**. No one-use diagnostic declaration, reservation,
+or artifact was created. Production changes and experimental tests are being
+removed; the red baseline and design rejection remain as audit evidence.
+
+A second independent adversarial review found an additional correctness reason
+to reject the candidate. The tentative armed claim was visible before the
+physical send completed. A concurrent cancel or STOP could depend on that
+claim and skip its send; if the first send then raised `OSError`, returned a
+short write, or failed while signaling successor grace, rollback cleared the
+bit without retransmitting the coalesced control work. In the STOP case the
+first notify could also suppress its error after observing `stop_requested`,
+leaving the Actor blocked in `selector.select()` until close timed out. A
+safe in-flight generation/retry protocol would add more state to an already
+structurally negative steady path. Full removal is therefore authoritative.
+
+After removing all armed-bit production and experimental-test bytes, the
+retained Actor/Pool/lifecycle six-file matrix passed **291 tests in 13.05s**.
+Actor and regression test files again match the `792b3db` retained baseline;
+only this progress ledger and the pre-existing user-owned result-document edit
+remain modified.
