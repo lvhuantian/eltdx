@@ -12,10 +12,10 @@ The result document remains historical evidence only until FINAL rewrites it.
 | Baseline HEAD | `994c49b51f47255bdcd9cdc3308a5a554f37588b` |
 | Base | `71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
 | Branch | `actor-transport-refactor` |
-| Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), confirmed OPEN and draft at pushed HEAD `907e3e69bc8c8a38e1b8bd39af1f0bf0ecd38789` |
+| Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), confirmed OPEN and draft at pushed HEAD `eacbfc0696b6912c5d9a50c7194194fec7f230bc` |
 | Final-review correction base | `cc46e6042e60b1d70732ae813b089f9c8b572572` |
-| Latest pushed correction checkpoint | `7e78bca98bbf1380145dd041fb6db6005570fc48`; exact CI run `29490966892` and Pages run `29490966925` passed |
-| Current local follow-up | Successor skip-send and pre-send consolidation each failed fixed development stability rules and were fully removed; evaluate a materially different exact-epoch snapshot candidate without resampling prior source |
+| Latest pushed correction checkpoint | `eacbfc0696b6912c5d9a50c7194194fec7f230bc`; exact CI run `29527247127` and Pages run `29527247083` passed |
+| Current local follow-up | F01-F05 correctness and F06 heavy/resource/build/CI evidence are closed; F06 performance is blocked on an architectural specification choice after all safe hot-path source families were rejected |
 | Baseline worktree | User-owned modification in `ACTOR_REFACTOR_RESULT.md`; preserve and integrate, do not overwrite |
 | Superseded result | Existing `COMPLETE` claim and 183-test evidence |
 
@@ -40,7 +40,7 @@ again before FINAL evidence is accepted.
 | F03 connect and failover | COMPLETE (`2e48be0`) | Candidate/attempt budgets, next-endpoint retry, Windows peer verification, non-busy rearm, and seven real/fault-injected regressions |
 | F04 Broker and pinned leases | CORRECTNESS CLOSED; CHECKPOINT CANDIDATE | Failed lease and assigned pin reservation use exact cancellation for lazy reclaim; all assignment paths reclaim before capacity checks; snapshots release waiter/Event ownership |
 | F05 lifecycle and shutdown | CORRECTNESS CLOSED; CHECKPOINT CANDIDATE | Runtime registration rechecks retire after append, so either abandon snapshots the runtime or the registering thread stops it itself |
-| F06 stress, performance, resources, compatibility | HEARTBEAT CHECKPOINT CLOSED; PERFORMANCE REOPENED | Exact `907e3e6` Windows 3.13 measured 0.989513 and remains FAIL. Revision-7 heartbeat and exact `7923287` CI/Pages passed, but formal `fifo-v2-7923287-a` failed sequential/saturated throughput and sequential/no-backlog p99. Exact-source performance plus heavy/resource evidence remain required |
+| F06 stress, performance, resources, compatibility | HEAVY/RESOURCE/HEARTBEAT CLOSED; PERFORMANCE BLOCKED | Exact `2a4e396` heavy/resource evidence and `eacbfc0` local/remote matrices pass. Formal `fifo-v2-7923287-a` still fails sequential/saturated throughput and sequential/no-backlog p99; no authorized safe candidate remains |
 | Final-review correctness correction | COMPLETE (`a53cc09`) | 443-test correctness snapshot plus deterministic two-endpoint generation failover; exact CI and Pages passed |
 | FINAL independent review and CI | PENDING | Two clean adversarial reviews; local matrix/build/docs and exact-HEAD CI/Pages green |
 
@@ -1456,3 +1456,69 @@ and `eltdx-1.0.2-py3-none-any.whl` SHA256
 `4FA0980ABE9D5052A53112DF4A42C0D449061EF7829975F450B4B9B09B0663CF`.
 MkDocs strict completed in `2.75s`; compileall and diff check were clean. No
 tracked build, site, bytecode, temporary worktree, or script change remains.
+
+## Performance Specification Blocker Audit
+
+Exact pushed checkpoint `eacbfc0696b6912c5d9a50c7194194fec7f230bc`
+completed Pages run `29527247083` and CI run `29527247127` successfully:
+Ubuntu Python 3.10-3.13, Windows Actor Python 3.11/3.13, package build, and
+strict Pages all passed. Draft PR #12 remained open, draft, and unmerged.
+
+Two independent read-only candidate audits plus the retained raw campaigns
+found no untried conservative implementation with enough magnitude to close
+sequential, saturated, and no-backlog gates together. The common synchronous
+path is fixed by the current specification:
+
+- `PooledSocketTransport.execute()` performs exact epoch/start admission,
+  FIFO Broker acquisition, and exact completion ownership.
+- `SocketTransport._execute_with_lease()` performs the submission gate,
+  lifecycle/registration fence, exact ticket submission, terminal wait, and
+  delivery fence.
+- `submit_request()` publishes under the Actor control gate and must wake the
+  socket-owning Actor; the Actor must later wake the synchronous caller through
+  the exact ticket Event.
+- The Actor must retain STOP/cancel priority, receive-before-send boundaries,
+  exact exchange identity, and one mailbox item. The pool must retain strict
+  FIFO and exactly N connections for `pool_size=N`.
+
+The old `71089c0` caller performs `socket.sendall()` itself and therefore lacks
+the caller-to-Actor handoff. Current measurements place publish-to-Actor
+p50/p99 at `0.5305/1.3778ms`, caller time inside wake send at
+`0.4249/1.4234ms`, and caller resume at `0.1760/0.5349ms`. Actor-active-to-send
+is only `0.0639/0.4165ms`, while Broker plus facade medians total about
+`0.069ms`. The formal `fifo-v2-7923287-a` campaign nevertheless fails
+sequential/saturated throughput at `0.939010/0.923169`, sequential p99 by
+`0.00238ms`, and no-backlog p99 by `0.9257ms`. The remaining Python micro-paths
+are too small by one or more orders of magnitude.
+
+Every source family capable of removing a measured check or handoff has been
+implemented or isolated and then rejected under a predeclared rule: Broker
+scan/return/allocation, runtime/epoch snapshots, IdentityGate state-only,
+pre-send consolidation, successor wake suppression, terminal handoff,
+completion primitives, stale-wakeup drain, thread yield/priority/affinity/GIL
+settings, and armed-bit coalescing. The last candidate audit identified only
+microsecond-scale untried edits (payload copy, message-id calculation,
+single-frame routing, selector single-event branching, Condition lock type),
+all below the observed gap and several reopening A/B/D correctness or
+compatibility boundaries. Renaming or combining rejected sources to obtain a
+fresh favorable sample would violate the frozen campaign rules.
+
+Further progress therefore requires an explicit specification change, one of:
+
+1. Permit the leased caller to send under an exact send gate while the Actor
+   remains the sole receiver/router, relaxing “Actor uniquely owns socket”.
+2. Add an asynchronous, batched, pipelined, or deeper-mailbox API, changing the
+   synchronous strict-FIFO workload semantics.
+3. Permit a Windows-native wake architecture or extra helper thread/native
+   component, relaxing the simple one-Actor/no-new-runtime-dependency design.
+4. Relax strict FIFO or allow more than `pool_size` connections.
+5. Keep the current architecture and revise the `>=95%` throughput and
+   no-backlog p99 acceptance thresholds to account for the mandatory Windows
+   cross-thread handoffs.
+
+Options 1-4 conflict with current explicit constraints; option 5 changes the
+authoritative acceptance contract. Without user authorization for one of
+these choices, no in-scope implementation path can make the remaining
+performance evidence pass. The Goal must remain incomplete; the user-owned
+`ACTOR_REFACTOR_RESULT.md` is not rewritten, the temporary ledger is retained,
+and no PR merge/tag/release/publication action is taken.
