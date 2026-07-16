@@ -14,8 +14,8 @@ The result document remains historical evidence only until FINAL rewrites it.
 | Branch | `actor-transport-refactor` |
 | Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), confirmed OPEN and draft at pushed HEAD `907e3e69bc8c8a38e1b8bd39af1f0bf0ecd38789` |
 | Final-review correction base | `cc46e6042e60b1d70732ae813b089f9c8b572572` |
-| Latest pushed correction checkpoint | `907e3e69bc8c8a38e1b8bd39af1f0bf0ecd38789`; CI run `29466902693` failed the Windows 3.13 heartbeat gate and Pages run `29466902700` passed |
-| Current local follow-up | Formal FIFO-v2 sampling remains stopped. Revision-7 passed structural validation at ratio 0.998163 against the corrected script; the exact worktree passed 521 tests plus build/docs/static checks and two independent CLEAN re-reviews. A new source checkpoint and exact-head remote checks are required before any formal campaign |
+| Latest pushed correction checkpoint | `f7355c047e590f34ccefee0e576fc34e2139e01d`; CI run `29486508429` and Pages run `29486508422` passed |
+| Current local follow-up | Formal FIFO-v2 sampling remains stopped. Revision-7 passed structural validation at ratio 0.998163 against the corrected script; the exact worktree passed 521 tests plus build/docs/static checks and two independent CLEAN re-reviews. Exact source-checkpoint CI and Pages are green; record this remote evidence before freezing the next campaign |
 | Baseline worktree | User-owned modification in `ACTOR_REFACTOR_RESULT.md`; preserve and integrate, do not overwrite |
 | Superseded result | Existing `COMPLETE` claim and 183-test evidence |
 
@@ -40,7 +40,7 @@ again before FINAL evidence is accepted.
 | F03 connect and failover | COMPLETE (`2e48be0`) | Candidate/attempt budgets, next-endpoint retry, Windows peer verification, non-busy rearm, and seven real/fault-injected regressions |
 | F04 Broker and pinned leases | CORRECTNESS CLOSED; CHECKPOINT CANDIDATE | Failed lease and assigned pin reservation use exact cancellation for lazy reclaim; all assignment paths reclaim before capacity checks; snapshots release waiter/Event ownership |
 | F05 lifecycle and shutdown | CORRECTNESS CLOSED; CHECKPOINT CANDIDATE | Runtime registration rechecks retire after append, so either abandon snapshots the runtime or the registering thread stops it itself |
-| F06 stress, performance, resources, compatibility | LOCAL HEARTBEAT EVIDENCE CLOSED; EXACT CI PENDING | Exact `907e3e6` Windows 3.13 measured 0.989513 and remains FAIL. Corrected revision-7 keeps the estimator and strict >0.99 gate unchanged, uses 4,000 requests per phase and exact all-slot fences, and passed isolated at 0.998163 with heartbeat `0/0`; exact-checkpoint remote evidence is still required |
+| F06 stress, performance, resources, compatibility | HEARTBEAT CHECKPOINT CLOSED; FORMAL CAMPAIGN PENDING | Exact `907e3e6` Windows 3.13 measured 0.989513 and remains FAIL. Corrected revision-7 passed isolated at 0.998163 with heartbeat `0/0`; exact `f7355c0` CI and Pages passed. A new frozen FIFO-v2 campaign and exact-source heavy/resource evidence remain required |
 | Final-review correctness correction | COMPLETE (`a53cc09`) | 443-test correctness snapshot plus deterministic two-endpoint generation failover; exact CI and Pages passed |
 | FINAL independent review and CI | PENDING | Two clean adversarial reviews; local matrix/build/docs and exact-HEAD CI/Pages green |
 
@@ -571,6 +571,7 @@ exact-source performance artifacts remain to be generated after checkpointing.
 | 2026-07-16 | Revision-7 heartbeat declaration | Current corrected script SHA256 `487B3131AF237B5843FE04046D51B60F136D6E22815297E29347286F93C3EA0A`. Run exactly one isolated task-owned process with `--heartbeat-requests 4000 --idle-seconds 0.2`, write only `artifacts/actor_heartbeat_revision7_worktree.json`, and do not overwrite or reinterpret revisions 2-6. Require the same four blocks, 32 phases, aggregate `>0.99`, exact timed heartbeat `0/0`, 260 barriers, current workload hash, unique completions, and zero cross/generation/accept/launch mismatches |
 | 2026-07-16 | Isolated revision-7 heartbeat raw result | The single declared process completed in 221.7 seconds. Artifact SHA256 `985A800AE0AD12463F9EE21018FA180AACF901FE6E63D58D9E5667E1F7761C9E`; workload SHA256 exactly matches current script `487B3131AF237B5843FE04046D51B60F136D6E22815297E29347286F93C3EA0A`; dirty implementation identity `907e3e6` is explicit. Aggregate ratio **0.998163** passed; blocks `0.988305/1.001516/1.007085/0.995846`; timed heartbeat `0/0`; 260 barriers; 32 phases; 131,232/131,232 unique responses; duplicate/missing/unexpected/cross-request/cross-generation, generation, accept, and launch-boundary mismatches all zero; idle probe `4/4`; paced heartbeat/business `32/32`; idle CPU ratio zero |
 | 2026-07-16 | Revision-7 pre-checkpoint full verification | The exact worktree passed **521 tests in 257.97s** on Windows CPython 3.12.6 in one isolated process. `python -m build` produced `eltdx-1.0.2.tar.gz` and `eltdx-1.0.2-py3-none-any.whl`; `python -m mkdocs build --strict`, `python -m compileall -q src tests scripts`, and `git diff --check` passed. Diff check emitted only existing LF-to-CRLF worktree warnings |
+| 2026-07-16 | Exact `f7355c0` remote checks | CI run `29486508429` passed Ubuntu Python 3.10-3.13, Windows Actor Python 3.11/3.13, and the Python 3.13 package build. Pages run `29486508422` passed strict documentation build and artifact upload. PR #12 remained OPEN and draft at exact head `f7355c047e590f34ccefee0e576fc34e2139e01d` |
 
 Post-`0b8ad54` corrections make Broker close broadcast every independently
 registered pin waiter Event without retaining proxies. A delayed assigned caller
@@ -714,10 +715,10 @@ admission without an unrelated snapshot/heartbeat reclaim.
 
 ## Exact Next Action
 
-Create and push the reviewed revision-7 heartbeat-evidence checkpoint while
-explicitly excluding the user-owned result document. Require exact-HEAD CI and
-Pages. Only after that head is green, create
-a clean detached current worktree, declare a new FIFO-v2 campaign bound to the
+Record and push the exact revision-7 remote-check evidence while explicitly
+excluding the user-owned result document, then require that evidence HEAD's CI
+and Pages. Only after that head is green, create a clean detached current
+worktree, declare a new FIFO-v2 campaign bound to the
 exact SHA, externally record its canonical hash, and execute all eight cells
 once in the frozen order. Never rerun exact `907e3e6` and never resample
 `fifo-v1-ca43972-a`, `fifo-v2-72ef660-a`, `fifo-v2-2da7651-a`, or
