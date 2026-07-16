@@ -397,6 +397,532 @@ def test_concurrent_standalone_calls_share_one_dns_preflight(monkeypatch) -> Non
     assert transport._resolved_endpoints == endpoints
 
 
+def test_concurrent_pool_calls_start_deadline_after_shared_dns_preflight(monkeypatch) -> None:
+    entered = threading.Event()
+    waiter_entered = threading.Event()
+    release = threading.Event()
+    endpoints = resolve_hosts(["127.0.0.1:9"])
+    clock = [10.0]
+    wait_timeouts: list[float | None] = []
+    results: list[object] = []
+
+    class ObservedCondition(threading.Condition):
+        def wait(self, timeout=None):
+            wait_timeouts.append(timeout)
+            waiter_entered.set()
+            return super().wait(timeout)
+
+    def resolve(_hosts):
+        entered.set()
+        assert release.wait(timeout=2)
+        clock[0] = 40.0
+        return endpoints
+
+    pool = PooledSocketTransport(
+        hosts=["custom.invalid:7709"],
+        pool_size=1,
+        timeout=3,
+        heartbeat_interval=None,
+    )
+    pool._condition = ObservedCondition()
+    monkeypatch.setattr(pool_module, "resolve_hosts", resolve)
+    monkeypatch.setattr(pool_module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(pool._transports[0], "_configure_pool_runtime", lambda **_kwargs: None)
+
+    def ensure_started() -> None:
+        try:
+            _, _, deadline = pool._ensure_started_before(clock[0] + pool._timeout)
+            results.append(deadline)
+        except BaseException as exc:
+            results.append(exc)
+
+    owner = threading.Thread(target=ensure_started)
+    waiter = threading.Thread(target=ensure_started)
+    owner.start()
+    assert entered.wait(timeout=2)
+    waiter.start()
+    assert waiter_entered.wait(timeout=2)
+    release.set()
+    owner.join(timeout=2)
+    waiter.join(timeout=2)
+
+    assert not owner.is_alive() and not waiter.is_alive()
+    assert wait_timeouts and wait_timeouts[0] is None
+    assert results == [43.0, 43.0]
+    pool.close()
+
+
+def test_pool_dns_waiter_switches_to_shared_deadline_after_resolution(monkeypatch) -> None:
+    dns_entered = threading.Event()
+    waiter_entered = threading.Event()
+    configure_entered = threading.Event()
+    timed_wait_entered = threading.Event()
+    release_dns = threading.Event()
+    release_configure = threading.Event()
+    endpoints = resolve_hosts(["127.0.0.1:9"])
+    clock = [10.0]
+    wait_calls = 0
+    results: list[object] = []
+
+    class ObservedCondition(threading.Condition):
+        def wait(self, timeout=None):
+            nonlocal wait_calls
+            wait_calls += 1
+            if wait_calls == 1:
+                waiter_entered.set()
+            elif timeout is not None:
+                timed_wait_entered.set()
+            return super().wait(timeout)
+
+    def resolve(_hosts):
+        dns_entered.set()
+        assert release_dns.wait(timeout=2)
+        clock[0] = 40.0
+        return endpoints
+
+    def configure(**_kwargs) -> None:
+        configure_entered.set()
+        assert release_configure.wait(timeout=2)
+
+    pool = PooledSocketTransport(
+        hosts=["custom.invalid:7709"],
+        pool_size=1,
+        timeout=3,
+        heartbeat_interval=None,
+    )
+    pool._condition = ObservedCondition()
+    monkeypatch.setattr(pool_module, "resolve_hosts", resolve)
+    monkeypatch.setattr(pool_module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(pool._transports[0], "_configure_pool_runtime", configure)
+
+    def ensure_started() -> None:
+        try:
+            _, _, deadline = pool._ensure_started_before(clock[0] + pool._timeout)
+            results.append(deadline)
+        except BaseException as exc:
+            results.append(exc)
+
+    owner = threading.Thread(target=ensure_started)
+    waiter = threading.Thread(target=ensure_started)
+    owner.start()
+    assert dns_entered.wait(timeout=2)
+    waiter.start()
+    assert waiter_entered.wait(timeout=2)
+    release_dns.set()
+    assert configure_entered.wait(timeout=2)
+    observed_timed_wait = timed_wait_entered.wait(timeout=0.2)
+    release_configure.set()
+    owner.join(timeout=2)
+    waiter.join(timeout=2)
+
+    assert not owner.is_alive() and not waiter.is_alive()
+    assert observed_timed_wait
+    assert results == [43.0, 43.0]
+    pool.close()
+
+
+def test_pool_dns_waiter_never_reuses_failed_same_epoch_attempt_deadline(monkeypatch) -> None:
+    dns_entered = threading.Event()
+    waiter_waiting = threading.Event()
+    waiter_delayed = threading.Event()
+    release_dns = threading.Event()
+    allow_waiter = threading.Event()
+    endpoints = resolve_hosts(["127.0.0.1:9"])
+    clock = [10.0]
+    resolve_calls = 0
+    configure_calls = 0
+    waiter_thread: threading.Thread | None = None
+    results: dict[str, object] = {}
+
+    class DelayedWaiterCondition(threading.Condition):
+        def wait(self, timeout=None):
+            if threading.current_thread() is waiter_thread:
+                waiter_waiting.set()
+            result = super().wait(timeout)
+            if threading.current_thread() is waiter_thread and not waiter_delayed.is_set():
+                self.release()
+                try:
+                    waiter_delayed.set()
+                    assert allow_waiter.wait(timeout=2)
+                finally:
+                    self.acquire()
+            return result
+
+    def resolve(_hosts):
+        nonlocal resolve_calls
+        resolve_calls += 1
+        if resolve_calls == 1:
+            dns_entered.set()
+            assert release_dns.wait(timeout=2)
+            clock[0] = 40.0
+        return endpoints
+
+    def configure(**_kwargs) -> None:
+        nonlocal configure_calls
+        configure_calls += 1
+        if configure_calls == 1:
+            raise RuntimeError("injected first startup failure")
+
+    pool = PooledSocketTransport(
+        hosts=["custom.invalid:7709"],
+        pool_size=1,
+        timeout=3,
+        heartbeat_interval=None,
+    )
+    pool._condition = DelayedWaiterCondition()
+    monkeypatch.setattr(pool_module, "resolve_hosts", resolve)
+    monkeypatch.setattr(pool_module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(pool._transports[0], "_configure_pool_runtime", configure)
+
+    def ensure_started(label: str) -> None:
+        try:
+            _, _, deadline = pool._ensure_started_before(clock[0] + pool._timeout)
+            results[label] = deadline
+        except BaseException as exc:
+            results[label] = exc
+
+    owner = threading.Thread(target=ensure_started, args=("owner",))
+    waiter_thread = threading.Thread(target=ensure_started, args=("waiter",))
+    owner.start()
+    assert dns_entered.wait(timeout=2)
+    waiter_thread.start()
+    assert waiter_waiting.wait(timeout=2)
+    release_dns.set()
+    assert waiter_delayed.wait(timeout=2)
+    owner.join(timeout=2)
+    assert not owner.is_alive()
+    assert isinstance(results["owner"], RuntimeError)
+
+    clock[0] = 100.0
+    retry = threading.Thread(target=ensure_started, args=("retry",))
+    retry.start()
+    retry.join(timeout=2)
+    assert not retry.is_alive()
+    assert results["retry"] == 103.0
+
+    allow_waiter.set()
+    waiter_thread.join(timeout=2)
+    assert not waiter_thread.is_alive()
+    assert results["waiter"] == 13.0
+    pool.close()
+
+
+def test_pool_call_started_during_dns_inherits_deadline_after_late_condition_acquire(monkeypatch) -> None:
+    dns_entered = threading.Event()
+    waiter_blocked = threading.Event()
+    release_dns = threading.Event()
+    allow_waiter_acquire = threading.Event()
+    endpoints = resolve_hosts(["127.0.0.1:9"])
+    clock = [10.0]
+    results: dict[str, object] = {}
+    waiter_thread: threading.Thread | None = None
+
+    class DelayedAcquireCondition:
+        def __init__(self) -> None:
+            self._condition = threading.Condition()
+
+        def acquire(self, *args, **kwargs):
+            if threading.current_thread() is waiter_thread and not allow_waiter_acquire.is_set():
+                waiter_blocked.set()
+                assert allow_waiter_acquire.wait(timeout=2)
+            return self._condition.acquire(*args, **kwargs)
+
+        def release(self) -> None:
+            self._condition.release()
+
+        def wait(self, timeout=None):
+            return self._condition.wait(timeout)
+
+        def notify_all(self) -> None:
+            self._condition.notify_all()
+
+        def __enter__(self):
+            self.acquire()
+            return self
+
+        def __exit__(self, *_args) -> None:
+            self.release()
+
+    def resolve(_hosts):
+        dns_entered.set()
+        assert release_dns.wait(timeout=2)
+        clock[0] = 40.0
+        return endpoints
+
+    pool = PooledSocketTransport(
+        hosts=["custom.invalid:7709"],
+        pool_size=1,
+        timeout=3,
+        heartbeat_interval=None,
+    )
+    pool._condition = DelayedAcquireCondition()
+    monkeypatch.setattr(pool_module, "resolve_hosts", resolve)
+    monkeypatch.setattr(pool_module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(pool._transports[0], "_configure_pool_runtime", lambda **_kwargs: None)
+
+    def ensure_started(label: str) -> None:
+        try:
+            _, _, deadline = pool._ensure_started_before(clock[0] + pool._timeout)
+            results[label] = deadline
+        except BaseException as exc:
+            results[label] = exc
+
+    owner = threading.Thread(target=ensure_started, args=("owner",))
+    waiter_thread = threading.Thread(target=ensure_started, args=("waiter",))
+    owner.start()
+    assert dns_entered.wait(timeout=2)
+    waiter_thread.start()
+    assert waiter_blocked.wait(timeout=2)
+    release_dns.set()
+    owner.join(timeout=2)
+    assert not owner.is_alive()
+    assert results["owner"] == 43.0
+
+    allow_waiter_acquire.set()
+    waiter_thread.join(timeout=2)
+    assert not waiter_thread.is_alive()
+    assert results["waiter"] == 43.0
+    pool.close()
+
+
+def test_pool_call_crossing_dns_can_wait_for_owner_holding_running_publication(monkeypatch) -> None:
+    dns_entered = threading.Event()
+    release_dns = threading.Event()
+    waiter_entered = threading.Event()
+    waiter_attempted_acquire = threading.Event()
+    owner_holding_publication = threading.Event()
+    release_owner_publication = threading.Event()
+    endpoints = resolve_hosts(["127.0.0.1:9"])
+    clock = [10.0]
+    results: dict[str, object] = {}
+    owner_thread: threading.Thread | None = None
+    waiter_thread: threading.Thread | None = None
+    pool_ref: list[PooledSocketTransport] = []
+
+    class HeldPublicationCondition:
+        def __init__(self) -> None:
+            self._condition = threading.Condition()
+
+        def acquire(self, *args, **kwargs):
+            if threading.current_thread() is waiter_thread:
+                waiter_attempted_acquire.set()
+            return self._condition.acquire(*args, **kwargs)
+
+        def release(self) -> None:
+            self._condition.release()
+
+        def wait(self, timeout=None):
+            return self._condition.wait(timeout)
+
+        def notify_all(self) -> None:
+            self._condition.notify_all()
+            if (
+                threading.current_thread() is owner_thread
+                and pool_ref
+                and pool_ref[0]._state is pool_module.PoolState.RUNNING
+                and not owner_holding_publication.is_set()
+            ):
+                owner_holding_publication.set()
+                assert release_owner_publication.wait(timeout=2)
+
+        def __enter__(self):
+            self.acquire()
+            return self
+
+        def __exit__(self, *_args) -> None:
+            self.release()
+
+    def resolve(_hosts):
+        dns_entered.set()
+        assert release_dns.wait(timeout=2)
+        clock[0] = 40.0
+        return endpoints
+
+    waiter_clock_calls = 0
+
+    def monotonic() -> float:
+        nonlocal waiter_clock_calls
+        if threading.current_thread() is waiter_thread:
+            waiter_clock_calls += 1
+            if waiter_clock_calls == 1:
+                waiter_entered.set()
+                return 10.0
+            if waiter_clock_calls == 2:
+                assert owner_holding_publication.wait(timeout=2)
+                return 40.0
+        return clock[0]
+
+    pool = PooledSocketTransport(
+        hosts=["custom.invalid:7709"],
+        pool_size=1,
+        timeout=3,
+        heartbeat_interval=None,
+    )
+    pool_ref.append(pool)
+    pool._condition = HeldPublicationCondition()
+    monkeypatch.setattr(pool_module, "resolve_hosts", resolve)
+    monkeypatch.setattr(pool_module.time, "monotonic", monotonic)
+    monkeypatch.setattr(pool._transports[0], "_configure_pool_runtime", lambda **_kwargs: None)
+
+    def ensure_started(label: str) -> None:
+        try:
+            _, _, returned_deadline = pool._ensure_started_before(13.0)
+            results[label] = returned_deadline
+        except BaseException as exc:
+            results[label] = exc
+
+    owner_thread = threading.Thread(target=ensure_started, args=("owner",))
+    waiter_thread = threading.Thread(target=ensure_started, args=("waiter",))
+    owner_thread.start()
+    assert dns_entered.wait(timeout=2)
+    waiter_thread.start()
+    assert waiter_entered.wait(timeout=2)
+    release_dns.set()
+    assert owner_holding_publication.wait(timeout=2)
+    assert waiter_attempted_acquire.wait(timeout=2)
+    release_owner_publication.set()
+    owner_thread.join(timeout=2)
+    waiter_thread.join(timeout=2)
+
+    assert not owner_thread.is_alive() and not waiter_thread.is_alive()
+    assert results == {"owner": 43.0, "waiter": 43.0}
+    pool.close()
+
+
+def test_pool_call_started_after_dns_keeps_its_own_deadline_during_startup(monkeypatch) -> None:
+    dns_entered = threading.Event()
+    configure_entered = threading.Event()
+    release_dns = threading.Event()
+    release_configure = threading.Event()
+    endpoints = resolve_hosts(["127.0.0.1:9"])
+    clock = [10.0]
+    results: dict[str, object] = {}
+
+    def resolve(_hosts):
+        dns_entered.set()
+        assert release_dns.wait(timeout=2)
+        clock[0] = 40.0
+        return endpoints
+
+    def configure(**_kwargs) -> None:
+        configure_entered.set()
+        assert release_configure.wait(timeout=2)
+
+    pool = PooledSocketTransport(
+        hosts=["custom.invalid:7709"],
+        pool_size=1,
+        timeout=3,
+        heartbeat_interval=None,
+    )
+    monkeypatch.setattr(pool_module, "resolve_hosts", resolve)
+    monkeypatch.setattr(pool_module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(pool._transports[0], "_configure_pool_runtime", configure)
+
+    def ensure_started(label: str) -> None:
+        try:
+            _, _, deadline = pool._ensure_started_before(clock[0] + pool._timeout)
+            results[label] = deadline
+        except BaseException as exc:
+            results[label] = exc
+
+    owner = threading.Thread(target=ensure_started, args=("owner",))
+    owner.start()
+    assert dns_entered.wait(timeout=2)
+    release_dns.set()
+    assert configure_entered.wait(timeout=2)
+
+    clock[0] = 42.0
+    caller = threading.Thread(target=ensure_started, args=("caller",))
+    caller.start()
+    release_configure.set()
+    owner.join(timeout=2)
+    caller.join(timeout=2)
+
+    assert not owner.is_alive() and not caller.is_alive()
+    assert results["owner"] == 43.0
+    assert results["caller"] == 45.0
+    pool.close()
+
+
+def test_pool_call_entered_before_dns_owner_inherits_late_published_deadline(monkeypatch) -> None:
+    waiter_blocked = threading.Event()
+    dns_entered = threading.Event()
+    release_dns = threading.Event()
+    allow_waiter_acquire = threading.Event()
+    endpoints = resolve_hosts(["127.0.0.1:9"])
+    clock = [10.0]
+    results: dict[str, object] = {}
+    waiter_thread: threading.Thread | None = None
+
+    class DelayedAcquireCondition:
+        def __init__(self) -> None:
+            self._condition = threading.Condition()
+
+        def acquire(self, *args, **kwargs):
+            if threading.current_thread() is waiter_thread and not allow_waiter_acquire.is_set():
+                waiter_blocked.set()
+                assert allow_waiter_acquire.wait(timeout=2)
+            return self._condition.acquire(*args, **kwargs)
+
+        def release(self) -> None:
+            self._condition.release()
+
+        def wait(self, timeout=None):
+            return self._condition.wait(timeout)
+
+        def notify_all(self) -> None:
+            self._condition.notify_all()
+
+        def __enter__(self):
+            self.acquire()
+            return self
+
+        def __exit__(self, *_args) -> None:
+            self.release()
+
+    def resolve(_hosts):
+        dns_entered.set()
+        assert release_dns.wait(timeout=2)
+        clock[0] = 40.0
+        return endpoints
+
+    pool = PooledSocketTransport(
+        hosts=["custom.invalid:7709"],
+        pool_size=1,
+        timeout=3,
+        heartbeat_interval=None,
+    )
+    pool._condition = DelayedAcquireCondition()
+    monkeypatch.setattr(pool_module, "resolve_hosts", resolve)
+    monkeypatch.setattr(pool_module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(pool._transports[0], "_configure_pool_runtime", lambda **_kwargs: None)
+
+    def ensure_started(label: str) -> None:
+        try:
+            _, _, deadline = pool._ensure_started_before(clock[0] + pool._timeout)
+            results[label] = deadline
+        except BaseException as exc:
+            results[label] = exc
+
+    waiter_thread = threading.Thread(target=ensure_started, args=("waiter",))
+    waiter_thread.start()
+    assert waiter_blocked.wait(timeout=2)
+    clock[0] = 11.0
+    owner = threading.Thread(target=ensure_started, args=("owner",))
+    owner.start()
+    assert dns_entered.wait(timeout=2)
+    release_dns.set()
+    owner.join(timeout=2)
+    assert not owner.is_alive()
+    assert results["owner"] == 43.0
+
+    allow_waiter_acquire.set()
+    waiter_thread.join(timeout=2)
+    assert not waiter_thread.is_alive()
+    assert results["waiter"] == 43.0
+    pool.close()
+
+
 def test_close_during_dns_preflight_discards_result_before_actor_start(monkeypatch) -> None:
     entered = threading.Event()
     release = threading.Event()

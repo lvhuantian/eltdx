@@ -18,6 +18,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,7 @@ from eltdx.protocol.constants import (  # noqa: E402
     TYPE_SECURITY_COUNT,
 )
 from eltdx.transport import PooledSocketTransport, SocketTransport  # noqa: E402
+from eltdx.transport.actor import TcpState  # noqa: E402
 
 
 _STRESS_VALUE = struct.Struct("<IHIQ")
@@ -764,6 +766,193 @@ def run_close_samples(samples: int, *, pool_size: int = 4, loaded: bool = False)
     }
 
 
+def _set_heartbeat_pool_interval(pool: PooledSocketTransport, interval: float | None) -> None:
+    runtimes = []
+    for transport in pool._transports:
+        runtime = transport._runtime
+        if runtime is None:
+            raise AssertionError("heartbeat pool lost an Actor runtime")
+        runtimes.append(runtime)
+    with ExitStack() as stack:
+        for runtime in runtimes:
+            stack.enter_context(runtime.control_lock)
+        now = time.monotonic()
+        for runtime in runtimes:
+            generation = runtime.generation
+            if generation is not None:
+                generation.last_activity_at = now
+        for runtime in runtimes:
+            runtime.heartbeat_interval = interval
+
+
+def _heartbeat_runtime_is_quiescent(runtime: Any) -> bool:
+    if runtime.active_task is not None or runtime.pending_task is not None or runtime.cancel_requests:
+        return False
+    generation = runtime.generation
+    if generation is None:
+        return False
+    return (
+        generation.state is TcpState.READY
+        and generation.active_exchange is None
+        and generation.tx_bytes == b""
+        and generation.tx_offset == 0
+        and not generation.decoded_frames
+        and generation.decoder.buffered_bytes == 0
+        and generation.receive_drained
+    )
+
+
+def _heartbeat_fence_snapshot(
+    pool: PooledSocketTransport,
+    pool_size: int,
+) -> tuple[int, ...] | None:
+    runtimes = []
+    for transport in pool._transports:
+        runtime = transport._runtime
+        if runtime is None:
+            raise AssertionError("heartbeat pool lost an Actor runtime")
+        runtimes.append(runtime)
+    if len(runtimes) != pool_size:
+        raise AssertionError("heartbeat pool size changed during configuration")
+    with ExitStack() as stack:
+        for runtime in runtimes:
+            stack.enter_context(runtime.control_lock)
+        if not all(_heartbeat_runtime_is_quiescent(runtime) for runtime in runtimes):
+            return None
+        return tuple(runtime.generation.generation_id for runtime in runtimes)
+
+
+def _synchronize_heartbeat_pool(
+    pool: PooledSocketTransport,
+    pool_size: int,
+    interval: float | None,
+    *,
+    timeout: float = 2.0,
+) -> int:
+    _set_heartbeat_pool_interval(pool, None)
+    # Every exact ConnectTicket runs on its owning Actor after any heartbeat
+    # that raced with disable, so this is the phase's Actor-thread fence.
+    pool.connect()
+    deadline = time.monotonic() + timeout
+    while True:
+        generation_ids = _heartbeat_fence_snapshot(pool, pool_size)
+        if generation_ids is not None:
+            # Target publication holds all runtime locks and starts every
+            # interval from one timestamp after the disabled Actor fence.
+            _set_heartbeat_pool_interval(pool, interval)
+            return len(generation_ids)
+        if time.monotonic() >= deadline:
+            raise AssertionError("heartbeat configuration did not reach wire quiescence")
+        threading.Event().wait(0.001)
+
+
+def _synchronize_disabled_heartbeat_pool(
+    pool: PooledSocketTransport,
+    pool_size: int,
+    *,
+    timeout: float = 2.0,
+) -> int:
+    return _synchronize_heartbeat_pool(pool, pool_size, None, timeout=timeout)
+
+
+def _cleanup_heartbeat_pool(pool: PooledSocketTransport) -> BaseException | None:
+    failures: list[tuple[str, BaseException]] = []
+    try:
+        _set_heartbeat_pool_interval(pool, None)
+    except BaseException as exc:
+        failures.append(("interval reset", exc))
+    try:
+        pool.close()
+    except BaseException as exc:
+        failures.append(("pool close", exc))
+    if not failures:
+        return None
+    details = "; ".join(f"{stage}: {type(exc).__name__}: {exc}" for stage, exc in failures)
+    cleanup_error = RuntimeError(f"heartbeat pool cleanup failed ({details})")
+    cleanup_error.__cause__ = failures[0][1]
+    return cleanup_error
+
+
+def _raise_primary_with_cleanup(primary: BaseException, cleanup: BaseException) -> None:
+    if cleanup is primary:
+        _break_exception_chain_cycle(primary)
+        raise primary
+    previous = primary.__cause__
+    if _exception_chain_contains(cleanup, primary):
+        _detach_exception_chain_target(cleanup, primary)
+    _break_exception_chain_cycle(cleanup)
+    if (
+        previous is not None
+        and previous is not primary
+        and not _exception_chain_contains(previous, primary)
+        and _exception_chain_ids(cleanup).isdisjoint(_exception_chain_ids(previous))
+    ):
+        _break_exception_chain_cycle(previous)
+        tail = cleanup
+        seen = {id(tail)}
+        while tail.__cause__ is not None and id(tail.__cause__) not in seen:
+            tail = tail.__cause__
+            seen.add(id(tail))
+        if tail.__cause__ is None:
+            tail.__cause__ = previous
+    raise primary from cleanup
+
+
+def _exception_chain_contains(error: BaseException, target: BaseException) -> bool:
+    seen = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        if current is target:
+            return True
+        seen.add(id(current))
+        current = current.__cause__
+    return False
+
+
+def _exception_chain_ids(error: BaseException) -> set[int]:
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        current = current.__cause__
+    return seen
+
+
+def _break_exception_chain_cycle(error: BaseException) -> None:
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None:
+        seen.add(id(current))
+        following = current.__cause__
+        if following is None:
+            return
+        if id(following) in seen:
+            current.__cause__ = None
+            return
+        current = following
+
+
+def _detach_exception_chain_target(error: BaseException, target: BaseException) -> None:
+    seen = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if current.__cause__ is target:
+            current.__cause__ = None
+            return
+        current = current.__cause__
+
+
+def _publish_heartbeat_phase(
+    pool: PooledSocketTransport,
+    server: Any,
+    interval: float | None,
+) -> int:
+    heartbeat_before = server.heartbeat_requests
+    _set_heartbeat_pool_interval(pool, interval)
+    return heartbeat_before
+
+
 def run_heartbeat_impact(requests: int, *, blocks: int = 4) -> dict[str, Any]:
     if requests < 100 or blocks < 3:
         raise ValueError("heartbeat impact requires at least 100 requests and three balanced blocks")
@@ -772,21 +961,16 @@ def run_heartbeat_impact(requests: int, *, blocks: int = 4) -> dict[str, Any]:
     concurrency = pool_size + 1
     heartbeat_interval = 0.02
 
-    def set_interval(pool: PooledSocketTransport, interval: float | None) -> None:
-        now = time.monotonic()
-        for transport in pool._transports:
-            runtime = transport._runtime
-            if runtime is None:
-                raise AssertionError("heartbeat pool lost an Actor runtime")
-            runtime.heartbeat_interval = interval
-            generation = runtime.generation
-            if generation is not None:
-                generation.last_activity_at = now
-
     next_token = 0
     all_values: list[dict[str, int]] = []
 
-    def run_workers(executor: ThreadPoolExecutor, pool: PooledSocketTransport, total: int) -> float:
+    def run_workers(
+        executor: ThreadPoolExecutor,
+        pool: PooledSocketTransport,
+        total: int,
+        *,
+        before_release: Any = None,
+    ) -> float:
         nonlocal next_token
         tokens = list(range(next_token, next_token + total))
         next_token += total
@@ -797,17 +981,25 @@ def run_heartbeat_impact(requests: int, *, blocks: int = 4) -> dict[str, Any]:
             count = quotient + int(index < remainder)
             token_groups.append(tokens[offset : offset + count])
             offset += count
-        barrier = threading.Barrier(concurrency + 1)
+        started_at: list[float] = []
+
+        def release_workers() -> None:
+            if before_release is not None:
+                before_release()
+            started_at.append(time.perf_counter())
+
+        barrier = threading.Barrier(concurrency + 1, action=release_workers)
 
         def worker(worker_tokens: list[int]) -> list[dict[str, int]]:
             barrier.wait()
             return [_execute_unique(pool, token) for token in worker_tokens]
 
         futures = [executor.submit(worker, worker_tokens) for worker_tokens in token_groups]
-        started = time.perf_counter()
         barrier.wait()
         values = [value for future in futures for value in future.result()]
-        elapsed = time.perf_counter() - started
+        if len(started_at) != 1:
+            raise AssertionError("heartbeat workload did not publish one launch boundary")
+        elapsed = time.perf_counter() - started_at[0]
         if len(values) != total:
             raise AssertionError("heartbeat workload response mismatch")
         all_values.extend(values)
@@ -816,6 +1008,8 @@ def run_heartbeat_impact(requests: int, *, blocks: int = 4) -> dict[str, Any]:
     samples: dict[str, list[dict[str, Any]]] = {"without_heartbeat": [], "with_heartbeat": []}
     raw_elapsed: dict[str, list[float]] = {"without_heartbeat": [], "with_heartbeat": []}
     block_ratios = []
+    phase_schedule: list[dict[str, Any]] = []
+    configuration_slot_barriers = 0
     ledger = StressLedger()
     with StressServer(server_id=1, ledger=ledger, response_delay=0.005) as server:
         pool = PooledSocketTransport(
@@ -826,14 +1020,14 @@ def run_heartbeat_impact(requests: int, *, blocks: int = 4) -> dict[str, Any]:
             max_pending_requests=256,
         )
         idle_heartbeat_before = server.heartbeat_responses
-        pool.connect()
-        if not server.wait_for_heartbeat_response_connections(pool_size, timeout=2.0):
-            pool.close()
-            raise AssertionError("automatic heartbeat did not reach every idle Actor connection")
-        idle_probe_heartbeats = server.heartbeat_responses - idle_heartbeat_before
-        idle_probe_connections = len(server.heartbeat_responses_by_connection)
-        warmup_count = min(100, requests)
+        primary_error: BaseException | None = None
         try:
+            pool.connect()
+            if not server.wait_for_heartbeat_response_connections(pool_size, timeout=2.0):
+                raise AssertionError("automatic heartbeat did not reach every idle Actor connection")
+            idle_probe_heartbeats = server.heartbeat_responses - idle_heartbeat_before
+            idle_probe_connections = len(server.heartbeat_responses_by_connection)
+            warmup_count = min(100, requests)
             with ThreadPoolExecutor(max_workers=concurrency) as executor:
                 paced_heartbeat_before = server.heartbeat_responses
                 paced_business_requests = 0
@@ -844,8 +1038,7 @@ def run_heartbeat_impact(requests: int, *, blocks: int = 4) -> dict[str, Any]:
                     run_workers(executor, pool, pool_size)
                     paced_business_requests += pool_size
                 paced_heartbeat_requests = server.heartbeat_responses - paced_heartbeat_before
-                set_interval(pool, None)
-                threading.Event().wait(heartbeat_interval * 1.5)
+                configuration_slot_barriers += _synchronize_disabled_heartbeat_pool(pool, pool_size)
                 base_order = (
                     None,
                     heartbeat_interval,
@@ -860,24 +1053,63 @@ def run_heartbeat_impact(requests: int, *, blocks: int = 4) -> dict[str, Any]:
                     order = base_order if block % 2 == 0 else tuple(reversed(base_order))
                     block_elapsed = {"without_heartbeat": [], "with_heartbeat": []}
                     for phase, interval in enumerate(order):
-                        set_interval(pool, None)
-                        threading.Event().wait(heartbeat_interval * 1.5)
                         try:
-                            set_interval(pool, interval)
-                            run_workers(executor, pool, warmup_count)
-                            set_interval(pool, None)
-                            threading.Event().wait(heartbeat_interval * 1.5)
+                            _set_heartbeat_pool_interval(pool, None)
                             gc.collect()
+                            _set_heartbeat_pool_interval(pool, interval)
+                            run_workers(executor, pool, warmup_count)
+                            configuration_slot_barriers += _synchronize_disabled_heartbeat_pool(pool, pool_size)
+                            generation_ids_before = _heartbeat_fence_snapshot(pool, pool_size)
+                            if generation_ids_before is None:
+                                raise AssertionError("heartbeat phase lost its configured generation fence")
+                            accept_count_before = server.accept_count
                             gc_enabled = gc.isenabled()
                             gc.disable()
+                            phase_error: BaseException | None = None
+                            barrier_error: BaseException | None = None
                             try:
-                                set_interval(pool, interval)
-                                heartbeat_before = server.heartbeat_requests
-                                elapsed = run_workers(executor, pool, requests)
+                                heartbeat_baseline: list[int] = []
+
+                                def start_timed_phase() -> None:
+                                    heartbeat_baseline.append(
+                                        _publish_heartbeat_phase(pool, server, interval)
+                                    )
+
+                                elapsed = run_workers(
+                                    executor,
+                                    pool,
+                                    requests,
+                                    before_release=start_timed_phase,
+                                )
+                                if len(heartbeat_baseline) != 1:
+                                    raise AssertionError("heartbeat phase did not publish one counter baseline")
+                                heartbeat_before = heartbeat_baseline[0]
+                            except BaseException as exc:
+                                phase_error = exc
                             finally:
-                                set_interval(pool, None)
-                                if gc_enabled:
-                                    gc.enable()
+                                try:
+                                    configuration_slot_barriers += _synchronize_disabled_heartbeat_pool(
+                                        pool, pool_size
+                                    )
+                                    generation_ids_after = _heartbeat_fence_snapshot(pool, pool_size)
+                                    if generation_ids_after is None:
+                                        raise AssertionError("heartbeat phase lost its terminal generation fence")
+                                    accept_count_after = server.accept_count
+                                except BaseException as exc:
+                                    barrier_error = exc
+                                finally:
+                                    if gc_enabled:
+                                        gc.enable()
+                            if phase_error is not None:
+                                if barrier_error is not None:
+                                    _raise_primary_with_cleanup(phase_error, barrier_error)
+                                raise phase_error
+                            if barrier_error is not None:
+                                raise barrier_error
+                            if generation_ids_after != generation_ids_before:
+                                raise AssertionError("heartbeat phase changed Actor TCP generation")
+                            if accept_count_after != accept_count_before:
+                                raise AssertionError("heartbeat phase opened a replacement TCP connection")
                             key = "without_heartbeat" if interval is None else "with_heartbeat"
                             sample = {
                                 "block": block,
@@ -885,21 +1117,39 @@ def run_heartbeat_impact(requests: int, *, blocks: int = 4) -> dict[str, Any]:
                                 "seconds": round(elapsed, 6),
                                 "throughput_rps": round(requests / elapsed, 3),
                                 "heartbeat_requests": server.heartbeat_requests - heartbeat_before,
+                                "generation_ids_before": list(generation_ids_before),
+                                "generation_ids_after": list(generation_ids_after),
+                                "accept_count_before": accept_count_before,
+                                "accept_count_after": accept_count_after,
+                                "launch_boundary": "worker barrier action: counter, interval, timer, release",
                             }
+                            phase_schedule.append({"block": block, "phase": phase, "condition": key})
                             samples[key].append(sample)
                             raw_elapsed[key].append(elapsed)
                             block_elapsed[key].append(elapsed)
-                        finally:
-                            set_interval(pool, None)
+                        except BaseException as exc:
+                            try:
+                                _set_heartbeat_pool_interval(pool, None)
+                            except BaseException as reset_error:
+                                _raise_primary_with_cleanup(exc, reset_error)
+                            raise
+                        else:
+                            _set_heartbeat_pool_interval(pool, None)
                     block_ratios.append(
                         round(
                             sum(block_elapsed["without_heartbeat"]) / sum(block_elapsed["with_heartbeat"]),
                             6,
                         )
                     )
-        finally:
-            set_interval(pool, None)
-            pool.close()
+        except BaseException as exc:
+            primary_error = exc
+        cleanup_error = _cleanup_heartbeat_pool(pool)
+        if primary_error is not None:
+            if cleanup_error is not None:
+                _raise_primary_with_cleanup(primary_error, cleanup_error)
+            raise primary_error
+        if cleanup_error is not None:
+            raise cleanup_error
 
     def summarize(values: list[dict[str, Any]]) -> dict[str, Any]:
         return {
@@ -925,6 +1175,9 @@ def run_heartbeat_impact(requests: int, *, blocks: int = 4) -> dict[str, Any]:
         "idle_probe_connections": idle_probe_connections,
         "paced_heartbeat_requests": paced_heartbeat_requests,
         "paced_business_requests": paced_business_requests,
+        "configuration_slot_barriers": configuration_slot_barriers,
+        "configuration_quiescence": "disabled all-slot Actor ConnectTicket fence plus per-phase TCP generation identity",
+        "phase_schedule": phase_schedule,
         "heartbeat_during_business": server.heartbeat_during_business,
         "business_requests": len(all_values),
         "without_heartbeat": baseline,

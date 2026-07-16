@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import threading
+from contextlib import nullcontext
+
+import scripts.stress_actor_transport as stress_module
+import pytest
 from scripts.stress_actor_transport import (
     run_close_samples,
     run_generation_stress,
@@ -8,6 +13,710 @@ from scripts.stress_actor_transport import (
     run_mixed_stress,
     run_warmed_resource_stress,
 )
+
+
+def test_heartbeat_interval_publication_rebases_activity_before_enabling(monkeypatch) -> None:
+    expected_now = 123.5
+
+    class Generation:
+        last_activity_at = 0.0
+
+    class Runtime:
+        def __init__(self) -> None:
+            self.control_lock = nullcontext()
+            self.generation = Generation()
+            self._heartbeat_interval = None
+
+        @property
+        def heartbeat_interval(self):
+            return self._heartbeat_interval
+
+        @heartbeat_interval.setter
+        def heartbeat_interval(self, value) -> None:
+            if value is not None:
+                assert self.generation.last_activity_at == expected_now
+            self._heartbeat_interval = value
+
+    class Transport:
+        _runtime = Runtime()
+
+    class Pool:
+        _transports = [Transport()]
+
+    monkeypatch.setattr(stress_module.time, "monotonic", lambda: expected_now)
+
+    stress_module._set_heartbeat_pool_interval(Pool(), 0.02)
+
+
+def test_heartbeat_interval_publication_holds_every_runtime_lock(monkeypatch) -> None:
+    held = [False, False]
+
+    class Lock:
+        def __init__(self, index: int) -> None:
+            self.index = index
+
+        def __enter__(self) -> None:
+            held[self.index] = True
+
+        def __exit__(self, *_args) -> None:
+            held[self.index] = False
+
+    class Generation:
+        last_activity_at = 0.0
+
+    class Runtime:
+        def __init__(self, index: int) -> None:
+            self.control_lock = Lock(index)
+            self.generation = Generation()
+            self._heartbeat_interval = None
+
+        @property
+        def heartbeat_interval(self):
+            return self._heartbeat_interval
+
+        @heartbeat_interval.setter
+        def heartbeat_interval(self, value) -> None:
+            assert all(held)
+            self._heartbeat_interval = value
+
+    class Transport:
+        def __init__(self, index: int) -> None:
+            self._runtime = Runtime(index)
+
+    class Pool:
+        _transports = [Transport(0), Transport(1)]
+
+    monkeypatch.setattr(stress_module.time, "monotonic", lambda: 50.0)
+
+    stress_module._set_heartbeat_pool_interval(Pool(), 0.02)
+
+
+def test_heartbeat_configuration_ack_runs_disabled_before_target_publication() -> None:
+    class Decoder:
+        buffered_bytes = 0
+
+    class Generation:
+        last_activity_at = 0.0
+        generation_id = 1
+        state = stress_module.TcpState.READY
+        active_exchange = None
+        tx_bytes = b""
+        tx_offset = 0
+        decoded_frames = ()
+        receive_drained = True
+        decoder = Decoder()
+
+    class Runtime:
+        control_lock = nullcontext()
+        heartbeat_interval = 0.02
+        generation = Generation()
+        active_task = None
+        pending_task = None
+        cancel_requests = {}
+
+    class Transport:
+        _runtime = Runtime()
+
+    class Pool:
+        _transports = [Transport()]
+
+        def connect(self) -> None:
+            assert self._transports[0]._runtime.heartbeat_interval is None
+
+    pool = Pool()
+
+    assert stress_module._synchronize_heartbeat_pool(pool, 1, 0.02) == 1
+    assert pool._transports[0]._runtime.heartbeat_interval == 0.02
+
+
+def test_heartbeat_phase_counter_starts_before_target_publication(monkeypatch) -> None:
+    class Server:
+        heartbeat_requests = 0
+
+    server = Server()
+
+    class Runtime:
+        control_lock = nullcontext()
+        generation = None
+        _heartbeat_interval = None
+
+        @property
+        def heartbeat_interval(self):
+            return self._heartbeat_interval
+
+        @heartbeat_interval.setter
+        def heartbeat_interval(self, value) -> None:
+            self._heartbeat_interval = value
+            if value is not None:
+                server.heartbeat_requests += 1
+
+    class Transport:
+        _runtime = Runtime()
+
+    class Pool:
+        _transports = [Transport()]
+
+    heartbeat_before = stress_module._publish_heartbeat_phase(Pool(), server, 0.02)
+
+    assert heartbeat_before == 0
+    assert server.heartbeat_requests - heartbeat_before == 1
+
+
+def test_heartbeat_timed_publication_runs_only_after_every_worker_is_ready(monkeypatch) -> None:
+    worker_ready = 0
+    publication_ready_counts: list[int] = []
+    real_barrier = stress_module.threading.Barrier
+
+    class TrackingBarrier:
+        def __init__(self, parties, action=None) -> None:
+            self._action = action
+
+            def tracked_action() -> None:
+                publication_ready_counts.append(worker_ready)
+                if self._action is not None:
+                    self._action()
+
+            self._barrier = real_barrier(parties, action=tracked_action)
+
+        def wait(self, timeout=None):
+            nonlocal worker_ready
+            if threading.current_thread().name.startswith("eltdx-heartbeat-test"):
+                worker_ready += 1
+            return self._barrier.wait(timeout)
+
+    class Executor(stress_module.ThreadPoolExecutor):
+        def __init__(self, *args, **kwargs) -> None:
+            kwargs["thread_name_prefix"] = "eltdx-heartbeat-test"
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(stress_module.threading, "Barrier", TrackingBarrier)
+    monkeypatch.setattr(stress_module, "ThreadPoolExecutor", Executor)
+
+    impact = stress_module.run_heartbeat_impact(100, blocks=3)
+
+    expected_workloads = 8 + impact["phases"] * 2
+    assert len(publication_ready_counts) == expected_workloads
+    assert publication_ready_counts == [5 * (index + 1) for index in range(expected_workloads)]
+    assert all(
+        sample["launch_boundary"] == "worker barrier action: counter, interval, timer, release"
+        for condition in ("without_heartbeat", "with_heartbeat")
+        for sample in impact[condition]["samples"]
+    )
+
+
+def test_heartbeat_cleanup_cause_chain_cannot_cycle_on_reused_exception() -> None:
+    primary = RuntimeError("shared primary")
+    cleanup = RuntimeError("cleanup")
+    cleanup.__cause__ = primary
+
+    with pytest.raises(RuntimeError, match="shared primary") as raised:
+        stress_module._raise_primary_with_cleanup(primary, cleanup)
+
+    seen = set()
+    current = raised.value
+    while current is not None:
+        assert id(current) not in seen
+        seen.add(id(current))
+        current = current.__cause__
+    assert cleanup in (raised.value.__cause__, raised.value.__context__)
+
+
+def test_heartbeat_cleanup_cause_chain_cannot_cycle_on_shared_descendant() -> None:
+    shared = RuntimeError("shared descendant")
+    previous = RuntimeError("previous")
+    previous.__cause__ = shared
+    primary = RuntimeError("primary")
+    primary.__cause__ = previous
+    cleanup = RuntimeError("cleanup")
+    cleanup.__cause__ = shared
+
+    with pytest.raises(RuntimeError, match="primary") as raised:
+        stress_module._raise_primary_with_cleanup(primary, cleanup)
+
+    seen = set()
+    current = raised.value
+    while current is not None:
+        assert id(current) not in seen
+        seen.add(id(current))
+        current = current.__cause__
+    assert raised.value.__cause__ is cleanup
+    assert cleanup.__cause__ is shared
+    assert shared.__cause__ is None
+
+
+def test_heartbeat_cleanup_cause_chain_cannot_self_cycle_on_reused_error() -> None:
+    shared = RuntimeError("shared phase and barrier failure")
+
+    with pytest.raises(RuntimeError, match="shared phase and barrier failure") as raised:
+        stress_module._raise_primary_with_cleanup(shared, shared)
+
+    assert raised.value is shared
+    assert raised.value.__cause__ is not shared
+
+
+def test_heartbeat_quiescence_rejects_missing_generation(monkeypatch) -> None:
+    class Runtime:
+        control_lock = nullcontext()
+        heartbeat_interval = None
+        generation = None
+        active_task = None
+        pending_task = None
+        cancel_requests = {}
+
+    class Transport:
+        _runtime = Runtime()
+
+    class Pool:
+        _transports = [Transport()]
+
+        def connect(self) -> None:
+            pass
+
+    clock = [0.0]
+
+    class AdvancingEvent:
+        def wait(self, timeout) -> None:
+            clock[0] += timeout
+
+    monkeypatch.setattr(stress_module.threading, "Event", AdvancingEvent)
+    monkeypatch.setattr(stress_module.time, "monotonic", lambda: clock[0])
+
+    with pytest.raises(AssertionError, match="wire quiescence"):
+        stress_module._synchronize_disabled_heartbeat_pool(Pool(), 1, timeout=0.002)
+
+
+@pytest.mark.parametrize(
+    "dirty_state",
+    ["active_exchange", "tx_bytes", "tx_offset", "decoded_frames", "buffered_bytes", "receive_drained"],
+)
+def test_heartbeat_quiescence_waits_for_every_wire_and_receive_state(monkeypatch, dirty_state: str) -> None:
+    class Decoder:
+        buffered_bytes = 0
+
+    class Generation:
+        generation_id = 1
+        state = stress_module.TcpState.READY
+        active_exchange = None
+        tx_bytes = b""
+        tx_offset = 0
+        decoded_frames = []
+        receive_drained = True
+        decoder = Decoder()
+
+    generation = Generation()
+    if dirty_state == "active_exchange":
+        generation.active_exchange = object()
+    elif dirty_state == "tx_bytes":
+        generation.tx_bytes = b"pending"
+    elif dirty_state == "tx_offset":
+        generation.tx_offset = 1
+    elif dirty_state == "decoded_frames":
+        generation.decoded_frames = [object()]
+    elif dirty_state == "buffered_bytes":
+        generation.decoder.buffered_bytes = 1
+    else:
+        generation.receive_drained = False
+
+    class Runtime:
+        control_lock = nullcontext()
+        heartbeat_interval = None
+        active_task = None
+        pending_task = None
+        cancel_requests = {}
+
+        def __init__(self) -> None:
+            self.generation = generation
+
+    class Transport:
+        _runtime = Runtime()
+
+    class Pool:
+        _transports = [Transport()]
+
+        def connect(self) -> None:
+            pass
+
+    waits = 0
+
+    class ClearingEvent:
+        def wait(self, _timeout) -> None:
+            nonlocal waits
+            waits += 1
+            generation.active_exchange = None
+            generation.tx_bytes = b""
+            generation.tx_offset = 0
+            generation.decoded_frames = []
+            generation.decoder.buffered_bytes = 0
+            generation.receive_drained = True
+
+    monkeypatch.setattr(stress_module.threading, "Event", ClearingEvent)
+
+    assert stress_module._synchronize_disabled_heartbeat_pool(Pool(), 1, timeout=0.1) == 1
+    assert waits == 1
+
+
+def test_heartbeat_barrier_closes_every_warmup_and_timed_phase(monkeypatch) -> None:
+    completed = 0
+    connect_points: list[int] = []
+    slot_connect_points: list[tuple[int, int]] = []
+    lock = threading.Lock()
+    real_execute_unique = stress_module._execute_unique
+    real_connect = stress_module.PooledSocketTransport.connect
+    real_slot_connect = stress_module.SocketTransport._connect_with_deadline
+
+    def tracked_execute_unique(transport, token):
+        nonlocal completed
+        result = real_execute_unique(transport, token)
+        with lock:
+            completed += 1
+        return result
+
+    def tracked_connect(pool) -> None:
+        with lock:
+            connect_points.append(completed)
+        real_connect(pool)
+
+    def tracked_slot_connect(slot, *args, **kwargs):
+        result = real_slot_connect(slot, *args, **kwargs)
+        with lock:
+            slot_connect_points.append((id(slot), completed))
+        return result
+
+    monkeypatch.setattr(stress_module, "_execute_unique", tracked_execute_unique)
+    monkeypatch.setattr(stress_module.PooledSocketTransport, "connect", tracked_connect)
+    monkeypatch.setattr(stress_module.SocketTransport, "_connect_with_deadline", tracked_slot_connect)
+
+    requests = 101
+    blocks = 3
+    impact = run_heartbeat_impact(requests, blocks=blocks)
+    expected_connect_points = [0, 32]
+    completed_at_barrier = 32
+    for _ in range(impact["phases"]):
+        completed_at_barrier += 100
+        expected_connect_points.append(completed_at_barrier)
+        completed_at_barrier += requests
+        expected_connect_points.append(completed_at_barrier)
+
+    assert connect_points == expected_connect_points
+    expected_slot_ids = {slot_id for slot_id, point in slot_connect_points if point == 0}
+    assert len(expected_slot_ids) == impact["pool_size"]
+    for point in expected_connect_points:
+        assert {slot_id for slot_id, completed_at in slot_connect_points if completed_at == point} == expected_slot_ids
+    assert len(slot_connect_points) == len(expected_connect_points) * impact["pool_size"]
+    assert impact["configuration_slot_barriers"] == impact["pool_size"] * (
+        1 + impact["phases"] * 2
+    )
+    base_order = [
+        "without_heartbeat",
+        "with_heartbeat",
+        "with_heartbeat",
+        "without_heartbeat",
+        "with_heartbeat",
+        "without_heartbeat",
+        "without_heartbeat",
+        "with_heartbeat",
+    ]
+    assert impact["phase_schedule"] == [
+        {"block": block, "phase": phase, "condition": condition}
+        for block in range(blocks)
+        for phase, condition in enumerate(base_order if block % 2 == 0 else reversed(base_order))
+    ]
+    assert all(
+        sample["generation_ids_before"] == sample["generation_ids_after"]
+        and sample["accept_count_before"] == sample["accept_count_after"]
+        for condition in ("without_heartbeat", "with_heartbeat")
+        for sample in impact[condition]["samples"]
+    )
+
+
+def test_heartbeat_configuration_lock_and_quiescence_are_observed() -> None:
+    class TrackingLock:
+        def __init__(self, runtime) -> None:
+            self.runtime = runtime
+            self.held = False
+
+        def __enter__(self) -> None:
+            assert not self.held
+            self.held = True
+            if self.runtime.pool.connect_calls:
+                self.runtime.snapshot_entries += 1
+                if self.runtime.snapshot_entries >= 2:
+                    self.runtime.active_task = None
+                    self.runtime.pending_task = None
+                    self.runtime.cancel_requests.clear()
+
+        def __exit__(self, *_args) -> None:
+            self.held = False
+
+    class Generation:
+        def __init__(self, runtime) -> None:
+            self.runtime = runtime
+            self._last_activity_at = 0.0
+            self.generation_id = 1
+            self.state = stress_module.TcpState.READY
+            self.active_exchange = None
+            self.tx_bytes = b""
+            self.tx_offset = 0
+            self.decoded_frames = ()
+            self.receive_drained = True
+
+            class Decoder:
+                buffered_bytes = 0
+
+            self.decoder = Decoder()
+
+        @property
+        def last_activity_at(self) -> float:
+            return self._last_activity_at
+
+        @last_activity_at.setter
+        def last_activity_at(self, value: float) -> None:
+            assert self.runtime.control_lock.held
+            self._last_activity_at = value
+
+    class Runtime:
+        def __init__(self, state: str) -> None:
+            self.pool = None
+            self.snapshot_entries = 0
+            self.active_task = object() if state == "active" else None
+            self.pending_task = object() if state == "pending" else None
+            self.cancel_requests = {1: object()} if state == "cancel" else {}
+            self.control_lock = TrackingLock(self)
+            self._heartbeat_interval = 1.0
+            self.generation = Generation(self)
+
+        @property
+        def heartbeat_interval(self) -> float | None:
+            return self._heartbeat_interval
+
+        @heartbeat_interval.setter
+        def heartbeat_interval(self, value: float | None) -> None:
+            assert self.control_lock.held
+            self._heartbeat_interval = value
+
+    class Transport:
+        def __init__(self, runtime) -> None:
+            self._runtime = runtime
+
+    class Pool:
+        def __init__(self) -> None:
+            self.connect_calls = 0
+            runtimes = [Runtime("active"), Runtime("pending"), Runtime("cancel")]
+            for runtime in runtimes:
+                runtime.pool = self
+            self._transports = [Transport(runtime) for runtime in runtimes]
+
+        def connect(self) -> None:
+            self.connect_calls += 1
+
+    pool = Pool()
+
+    assert stress_module._synchronize_disabled_heartbeat_pool(pool, 3, timeout=0.1) == 3
+    assert pool.connect_calls == 1
+    assert all(transport._runtime.snapshot_entries >= 2 for transport in pool._transports)
+    assert all(transport._runtime.heartbeat_interval is None for transport in pool._transports)
+
+
+def test_heartbeat_initial_connect_failure_preserves_primary_and_closes_pool(monkeypatch) -> None:
+    instances = []
+
+    class Transport:
+        _runtime = None
+
+    class FailingPool:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.closed = False
+            self._transports = [Transport()]
+            instances.append(self)
+
+        def connect(self) -> None:
+            raise RuntimeError("injected heartbeat pool connect failure")
+
+        def close(self) -> None:
+            self.closed = True
+            raise RuntimeError("injected heartbeat pool close failure")
+
+    monkeypatch.setattr(stress_module, "PooledSocketTransport", FailingPool)
+
+    with pytest.raises(RuntimeError, match="injected heartbeat pool connect failure") as raised:
+        stress_module.run_heartbeat_impact(100, blocks=3)
+
+    assert len(instances) == 1
+    assert instances[0].closed
+    assert raised.value.__cause__ is not None
+    assert "interval reset" in str(raised.value.__cause__)
+    assert "pool close" in str(raised.value.__cause__)
+
+
+def test_heartbeat_probe_failure_after_connect_preserves_primary_and_closes_pool(monkeypatch) -> None:
+    instances = []
+
+    class ProbeServer:
+        host = "127.0.0.1:1"
+        heartbeat_responses = 0
+        heartbeat_responses_by_connection = {}
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            pass
+
+        def wait_for_heartbeat_response_connections(self, *_args, **_kwargs) -> bool:
+            raise RuntimeError("injected heartbeat probe failure")
+
+    class Transport:
+        _runtime = None
+
+    class ConnectedPool:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.closed = False
+            self._transports = [Transport()]
+            instances.append(self)
+
+        def connect(self) -> None:
+            pass
+
+        def close(self) -> None:
+            self.closed = True
+            raise RuntimeError("injected heartbeat probe close failure")
+
+    monkeypatch.setattr(stress_module, "StressServer", ProbeServer)
+    monkeypatch.setattr(stress_module, "PooledSocketTransport", ConnectedPool)
+
+    with pytest.raises(RuntimeError, match="injected heartbeat probe failure") as raised:
+        stress_module.run_heartbeat_impact(100, blocks=3)
+
+    assert len(instances) == 1
+    assert instances[0].closed
+    assert raised.value.__cause__ is not None
+    assert "interval reset" in str(raised.value.__cause__)
+    assert "pool close" in str(raised.value.__cause__)
+
+
+@pytest.mark.parametrize("reuse_phase_and_barrier", [False, True])
+def test_heartbeat_timed_failure_preserves_primary_when_phase_barrier_also_fails(
+    monkeypatch,
+    reuse_phase_and_barrier: bool,
+) -> None:
+    failure_state = {"armed": False, "reset_failures": 0}
+    shared_phase_error = RuntimeError("injected shared timed phase failure")
+
+    class Generation:
+        last_activity_at = 0.0
+        generation_id = 1
+        state = stress_module.TcpState.READY
+        active_exchange = None
+        tx_bytes = b""
+        tx_offset = 0
+        decoded_frames = ()
+        receive_drained = True
+
+        class Decoder:
+            buffered_bytes = 0
+
+        decoder = Decoder()
+
+    class Runtime:
+        def __init__(self) -> None:
+            self.control_lock = nullcontext()
+            self._heartbeat_interval = None
+            self.generation = Generation()
+            self.active_task = None
+            self.pending_task = None
+            self.cancel_requests = {}
+
+        @property
+        def heartbeat_interval(self):
+            return self._heartbeat_interval
+
+        @heartbeat_interval.setter
+        def heartbeat_interval(self, value) -> None:
+            if value is None and failure_state["armed"] and not reuse_phase_and_barrier:
+                failure_state["reset_failures"] += 1
+                raise RuntimeError(f"injected interval reset failure {failure_state['reset_failures']}")
+            self._heartbeat_interval = value
+
+    class Transport:
+        _runtime = Runtime()
+
+    class Server:
+        host = "127.0.0.1:1"
+        accept_count = 4
+        heartbeat_responses = 4
+        heartbeat_responses_by_connection = {1: 1, 2: 1, 3: 1, 4: 1}
+        heartbeat_requests = 0
+        heartbeat_during_business = 0
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            pass
+
+        def wait_for_heartbeat_response_connections(self, *_args, **_kwargs) -> bool:
+            return True
+
+        def heartbeat_response_snapshot(self):
+            return {}
+
+        def wait_for_heartbeat_response_round(self, *_args, **_kwargs) -> bool:
+            return True
+
+    class Pool:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self._transports = [Transport() for _ in range(4)]
+            self.connect_calls = 0
+
+        def connect(self) -> None:
+            self.connect_calls += 1
+            if self.connect_calls == 4:
+                failure_state["armed"] = True
+                if reuse_phase_and_barrier:
+                    raise shared_phase_error
+                raise RuntimeError("injected timed phase barrier failure")
+
+        def close(self) -> None:
+            pass
+
+    calls = 0
+
+    def execute(_pool, token):
+        nonlocal calls
+        calls += 1
+        if calls > 32 + 100:
+            if reuse_phase_and_barrier:
+                raise shared_phase_error
+            raise RuntimeError("injected timed business failure")
+        return {"requested_token": token}
+
+    monkeypatch.setattr(stress_module, "StressServer", Server)
+    monkeypatch.setattr(stress_module, "PooledSocketTransport", Pool)
+    monkeypatch.setattr(stress_module, "_execute_unique", execute)
+
+    expected = "injected shared timed phase failure" if reuse_phase_and_barrier else "injected timed business failure"
+    with pytest.raises(RuntimeError, match=expected) as raised:
+        stress_module.run_heartbeat_impact(100, blocks=3)
+
+    causes = []
+    seen = {id(raised.value)}
+    cause = raised.value.__cause__
+    while cause is not None:
+        assert id(cause) not in seen
+        seen.add(id(cause))
+        causes.append(str(cause))
+        cause = cause.__cause__
+    if reuse_phase_and_barrier:
+        assert raised.value is shared_phase_error
+    else:
+        assert any("injected timed phase barrier failure" in item for item in causes)
+        assert any("injected interval reset failure" in item for item in causes)
 
 
 def test_one_thousand_generation_changes_keep_one_actor_and_no_resources() -> None:
@@ -113,15 +822,17 @@ def test_close_latency_is_bounded_idle_and_under_load() -> None:
 
 def test_idle_actor_blocks_and_heartbeat_defers_under_continuous_work() -> None:
     idle = run_idle_cpu_sample(0.2)
-    impact = run_heartbeat_impact(1000)
+    impact = run_heartbeat_impact(4000)
 
     assert idle["cpu_ratio"] < 0.1
+    assert impact["requests_per_phase"] == 4000
     assert impact["blocks"] == 4
     assert impact["phases"] == 32
     assert impact["idle_probe_heartbeats"] >= 4
     assert impact["idle_probe_connections"] == 4
     assert impact["paced_heartbeat_requests"] >= 32
     assert impact["paced_business_requests"] == 32
+    assert impact["configuration_slot_barriers"] == impact["pool_size"] * (1 + impact["phases"] * 2)
     assert impact["heartbeat_during_business"] == 0
     assert impact["unique_responses"] == impact["business_requests"]
     assert impact["duplicate_responses"] == 0
@@ -129,10 +840,28 @@ def test_idle_actor_blocks_and_heartbeat_defers_under_continuous_work() -> None:
     assert impact["unexpected_responses"] == 0
     assert impact["cross_request_completions"] == 0
     assert impact["cross_generation_completions"] == 0
+    assert impact["without_heartbeat"]["heartbeat_requests_total"] == 0
     assert impact["with_heartbeat"]["heartbeat_requests_total"] == 0
     expected_phase_positions = [phase for phase in range(8) for _ in range(2)]
     assert sorted(sample["phase"] for sample in impact["without_heartbeat"]["samples"]) == expected_phase_positions
     assert sorted(sample["phase"] for sample in impact["with_heartbeat"]["samples"]) == expected_phase_positions
     assert impact["throughput_estimator"] == "aggregate_elapsed_ratio"
+    assert all(
+        sample["generation_ids_before"] == sample["generation_ids_after"]
+        and sample["accept_count_before"] == sample["accept_count_after"]
+        for condition in ("without_heartbeat", "with_heartbeat")
+        for sample in impact[condition]["samples"]
+    )
     assert impact["median_block_throughput_ratio"] > 0
-    assert impact["throughput_ratio"] > 0.99
+    assert impact["throughput_ratio"] > 0.99, {
+        "throughput_ratio": impact["throughput_ratio"],
+        "block_throughput_ratios": impact["block_throughput_ratios"],
+        "without_heartbeat_seconds": [
+            sample["seconds"] for sample in impact["without_heartbeat"]["samples"]
+        ],
+        "with_heartbeat_seconds": [
+            sample["seconds"] for sample in impact["with_heartbeat"]["samples"]
+        ],
+        "without_heartbeat_requests": impact["without_heartbeat"]["heartbeat_requests_total"],
+        "with_heartbeat_requests": impact["with_heartbeat"]["heartbeat_requests_total"],
+    }

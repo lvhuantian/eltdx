@@ -936,6 +936,11 @@ class ShutdownAttempt:
 class StartupAttempt:
     pool_epoch: int
     retire_event: threading.Event
+    dns_preflight: bool = False
+    dns_started_at: float | None = None
+    dns_completed_at: float | None = None
+    request_deadline: float | None = None
+    dns_ready: threading.Event = field(default_factory=threading.Event)
     broker: LeaseBroker | None = None
     push_buffer: PushBuffer | None = None
     configured: list[tuple[SocketTransport, RuntimeRegistration]] = field(default_factory=list)
@@ -1643,6 +1648,9 @@ class PooledSocketTransport:
         self._startup_active = False
         self._startup_aborted = threading.Event()
         self._startup_attempt: StartupAttempt | None = None
+        self._published_startup_attempt: StartupAttempt | None = None
+        self._startup_observer_lock = threading.Lock()
+        self._observable_startup_attempt: StartupAttempt | None = None
         self._startup_cleanup_error: BaseException | None = None
         self._connect_broker: LeaseBroker | None = None
         self._connect_futures: tuple[Future[Any], ...] = ()
@@ -2054,16 +2062,69 @@ class PooledSocketTransport:
         broker, push_buffer, _ = self._ensure_started_before(None)
         return broker, push_buffer
 
+    def _observe_overlapping_dns_attempt(
+        self,
+        entered_at: float,
+        waited_attempt: StartupAttempt | None,
+    ) -> StartupAttempt | None:
+        with self._startup_observer_lock:
+            attempt = self._observable_startup_attempt
+            if (
+                attempt is None
+                or not attempt.dns_preflight
+                or attempt.dns_started_at is None
+                or (waited_attempt is not None and attempt is not waited_attempt)
+                or (attempt.dns_completed_at is not None and entered_at > attempt.dns_completed_at)
+            ):
+                return None
+            return attempt
+
+    def _observable_dns_deadline(self, attempt: StartupAttempt) -> float | None:
+        with self._startup_observer_lock:
+            if self._observable_startup_attempt is not attempt:
+                return None
+            return attempt.request_deadline
+
+    def _complete_startup_dns_preflight(
+        self,
+        attempt: StartupAttempt,
+        completed_at: float,
+        request_deadline: float | None,
+    ) -> None:
+        with self._startup_observer_lock:
+            attempt.dns_completed_at = completed_at
+            attempt.request_deadline = request_deadline
+        attempt.dns_ready.set()
+
+    def _set_observable_startup_attempt(self, attempt: StartupAttempt | None) -> None:
+        with self._startup_observer_lock:
+            self._observable_startup_attempt = attempt
+
     def _ensure_started_before(
         self,
         deadline: float | None,
     ) -> tuple[LeaseBroker, PushBuffer, float | None]:
+        entered_at = time.monotonic()
+        waited_attempt: StartupAttempt | None = None
         while True:
             if deadline is None:
                 self._condition.acquire()
                 acquired = True
             else:
-                acquired = self._condition.acquire(timeout=max(0.0, deadline - time.monotonic()))
+                acquired = self._condition.acquire(
+                    timeout=max(0.0, deadline - time.monotonic())
+                )
+                if not acquired:
+                    observed_attempt = self._observe_overlapping_dns_attempt(entered_at, waited_attempt)
+                    if observed_attempt is not None:
+                        if waited_attempt is None:
+                            waited_attempt = observed_attempt
+                        observed_attempt.dns_ready.wait()
+                        shared_deadline = self._observable_dns_deadline(observed_attempt)
+                        if shared_deadline is not None:
+                            acquired = self._condition.acquire(
+                                timeout=max(0.0, shared_deadline - time.monotonic())
+                            )
             if not acquired:
                 raise ResponseTimeoutError("7709 response timed out during pool startup admission")
             try:
@@ -2090,14 +2151,55 @@ class PooledSocketTransport:
                         reported_state = PoolState.CLOSING
                     raise ConnectionClosedError(f"7709 pool is not usable: {reported_state.name}")
                 if self._state is PoolState.RUNNING and self._broker is not None and self._push_buffer is not None:
+                    published_attempt = self._published_startup_attempt
+                    if (
+                        published_attempt is not None
+                        and published_attempt.request_deadline is not None
+                        and (
+                            waited_attempt is published_attempt
+                            or (
+                                published_attempt.dns_preflight
+                                and published_attempt.dns_completed_at is not None
+                                and waited_attempt is None
+                                and entered_at
+                                <= published_attempt.dns_completed_at
+                            )
+                        )
+                    ):
+                        deadline = published_attempt.request_deadline
                     return self._broker, self._push_buffer, deadline
                 if self._state in (PoolState.CLOSING, PoolState.FAILED, PoolState.FAILED_CLOSING, PoolState.FAILED_CLOSED):
                     raise ConnectionClosedError(f"7709 pool is not usable: {self._state.name}")
                 if self._startup_active:
-                    remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+                    active_attempt = self._startup_attempt
+                    crosses_active_dns = (
+                        active_attempt is not None
+                        and active_attempt.dns_preflight
+                        and active_attempt.dns_started_at is not None
+                        and (
+                            active_attempt.dns_completed_at is None
+                            or entered_at <= active_attempt.dns_completed_at
+                        )
+                    )
+                    if crosses_active_dns:
+                        waited_attempt = active_attempt
+                    if (
+                        crosses_active_dns
+                        and active_attempt is not None
+                        and active_attempt.request_deadline is not None
+                    ):
+                        deadline = active_attempt.request_deadline
+                    dns_wait = (
+                        crosses_active_dns
+                        and active_attempt is not None
+                        and active_attempt.request_deadline is None
+                    )
+                    remaining = None if deadline is None or dns_wait else max(0.0, deadline - time.monotonic())
                     if remaining == 0 or not self._condition.wait(timeout=remaining):
                         raise ResponseTimeoutError("7709 response timed out during pool startup")
                     continue
+                if deadline is not None and deadline <= time.monotonic():
+                    raise ResponseTimeoutError("7709 response timed out during pool startup")
                 self._startup_active = True
                 self._startup_aborted.clear()
                 self._startup_cleanup_error = None
@@ -2107,8 +2209,17 @@ class PooledSocketTransport:
                 retire_event = threading.Event()
                 self._epoch_retire_event = retire_event
                 self._shutdown_failed = threading.Event()
-                startup_attempt = StartupAttempt(candidate_epoch, retire_event)
+                dns_preflight = _requires_dns(self._hosts)
+                startup_attempt = StartupAttempt(
+                    candidate_epoch,
+                    retire_event,
+                    dns_preflight=dns_preflight,
+                    dns_started_at=time.monotonic() if dns_preflight else None,
+                )
                 self._startup_attempt = startup_attempt
+                self._published_startup_attempt = None
+                self._set_observable_startup_attempt(startup_attempt)
+                waited_attempt = None
                 break
             finally:
                 self._condition.release()
@@ -2117,15 +2228,27 @@ class PooledSocketTransport:
         push_buffer: PushBuffer | None = None
         configured: list[tuple[SocketTransport, RuntimeRegistration]] = []
         try:
-            dns_preflight = _requires_dns(self._hosts)
+            dns_preflight = startup_attempt.dns_preflight
             try:
                 endpoint_sets = [resolve_hosts(_rotate_hosts(self._hosts, index)) for index in range(self._pool_size)]
             except OSError as exc:
-                if dns_preflight and deadline is not None:
-                    deadline = time.monotonic() + self._timeout
+                if dns_preflight:
+                    dns_completed_at = time.monotonic()
+                    if deadline is not None:
+                        deadline = dns_completed_at + self._timeout
+                    self._complete_startup_dns_preflight(startup_attempt, dns_completed_at, None)
                 raise ConnectionClosedError("7709 unable to resolve any configured host") from exc
-            if dns_preflight and deadline is not None:
-                deadline = time.monotonic() + self._timeout
+            except BaseException:
+                if dns_preflight:
+                    self._complete_startup_dns_preflight(startup_attempt, time.monotonic(), None)
+                raise
+            if dns_preflight:
+                dns_completed_at = time.monotonic()
+                if deadline is not None:
+                    deadline = dns_completed_at + self._timeout
+                self._complete_startup_dns_preflight(startup_attempt, dns_completed_at, deadline)
+            else:
+                dns_completed_at = None
             if deadline is None:
                 self._condition.acquire()
                 acquired = True
@@ -2134,6 +2257,8 @@ class PooledSocketTransport:
             if not acquired:
                 raise ResponseTimeoutError("7709 response timed out publishing pool endpoints")
             try:
+                if dns_preflight:
+                    self._condition.notify_all()
                 if (
                     self._epoch != observed_epoch
                     or self._state is not PoolState.STARTING
@@ -2253,6 +2378,7 @@ class PooledSocketTransport:
                     publish = True
                 if publish:
                     self._startup_active = False
+                    self._published_startup_attempt = startup_attempt
                     startup_attempt.completed.set()
                     if self._startup_attempt is startup_attempt:
                         self._startup_attempt = None
@@ -2682,6 +2808,9 @@ class PooledSocketTransport:
                         self._state = PoolState.FAILED_CLOSED
                         if pool_configuration_cleared and self._startup_attempt is startup_attempt:
                             self._startup_attempt = None
+                        if pool_configuration_cleared:
+                            self._published_startup_attempt = None
+                            self._set_observable_startup_attempt(None)
                     elif normal_cleanup:
                         self._state = PoolState.STOPPED
                         self._broker = None
@@ -2691,6 +2820,8 @@ class PooledSocketTransport:
                         self._shutdown_failed = threading.Event()
                         if self._startup_attempt is startup_attempt:
                             self._startup_attempt = None
+                        self._published_startup_attempt = None
+                        self._set_observable_startup_attempt(None)
                     else:
                         self._state = PoolState.FAILED_CLOSING
                         errors.append(TransportCloseTimeoutError("7709 pool shutdown did not reach a terminal state"))

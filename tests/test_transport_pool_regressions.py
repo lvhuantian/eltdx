@@ -12,12 +12,13 @@ import pytest
 from actor_support import Scripted7709Server, handshake_payload, read_request, response_bytes
 from eltdx.exceptions import ConnectionClosedError, ResponseTimeoutError, TransportCloseTimeoutError
 from eltdx.protocol.constants import TYPE_SECURITY_COUNT
+from eltdx.protocol.frame import ResponseFrame
 from eltdx.transport import socket as socket_module
 from eltdx.transport.actor import cancel_ticket
 from eltdx.transport import actor as actor_module
 from eltdx.transport import pool as pool_module
 from eltdx.transport.pool import LeaseBroker, PinCompletion, PinWaiter, PinnedTransportProxy, PooledSocketTransport
-from eltdx.transport.push import PushBuffer
+from eltdx.transport.push import PushBuffer, PushFrame
 
 
 class DelayedSetEvent:
@@ -1633,6 +1634,29 @@ def test_pinned_proxy_preserves_connection_snapshot_properties() -> None:
         assert proxy.connected_host == slot.connected_host
         assert proxy.last_handshake == slot.last_handshake
         assert proxy.last_heartbeat == slot.last_heartbeat
+    finally:
+        proxy.close()
+        broker.close()
+
+
+def test_pinned_proxy_preserves_request_and_push_success_paths(monkeypatch) -> None:
+    broker, _, _, proxy = _new_fake_proxy()
+    first = ResponseFrame(0, 1, 0x0547, 1, 1, b"a", b"a" * 17)
+    second = ResponseFrame(0, 2, 0x0547, 1, 1, b"b", b"b" * 17)
+    third = ResponseFrame(0, 3, 0x0547, 1, 1, b"c", b"c" * 17)
+    fourth = ResponseFrame(0, 4, 0x0547, 1, 1, b"d", b"d" * 17)
+    try:
+        assert proxy.request("ping") == "pong"
+        assert proxy._push_buffer.offer_nowait(PushFrame(2, 1, "127.0.0.1:7709", first))
+        assert proxy._push_buffer.offer_nowait(PushFrame(2, 1, "127.0.0.1:7709", second))
+        assert proxy.poll_push() is first
+        assert proxy.drain_pushes() == [second]
+
+        monkeypatch.setattr(pool_module, "_parse_push", lambda item: ("parsed", item.response.msg_id))
+        assert proxy._push_buffer.offer_nowait(PushFrame(2, 1, "127.0.0.1:7709", third))
+        assert proxy.poll_push(parse=True) == ("parsed", 3)
+        assert proxy._push_buffer.offer_nowait(PushFrame(2, 1, "127.0.0.1:7709", fourth))
+        assert proxy.drain_pushes(parse=True) == [("parsed", 4)]
     finally:
         proxy.close()
         broker.close()
