@@ -1323,3 +1323,59 @@ retained Actor/Pool/lifecycle six-file matrix passed **291 tests in 13.05s**.
 Actor and regression test files again match the `792b3db` retained baseline;
 only this progress ledger and the pre-existing user-owned result-document edit
 remain modified.
+
+## Post-`e9d2c8c` Broker Reclaim-Marker Red Baseline
+
+The next candidate targets a true per-request steady path. Every Broker
+`acquire()`, `release()`, and `validate()` enters `_assign_waiters_locked()`,
+which currently copies and scans every active lease cancellation even when no
+release failure or admission cancellation has occurred. With three leases
+held in a pool of four, an isolated 300,000 acquire/release C/E/E/C upper-bound
+diagnostic measured control `197,954.63` then `131,650.70` cycles/s versus a
+scan-disabled experiment `255,692.59` then `247,748.95` cycles/s. The drift
+makes this non-acceptance evidence, but it proves the scan is material in the
+exact saturated Broker path.
+
+The candidate gives each Broker/epoch one private reclaim-pending Event. Every
+lease retains that exact Event, and `_mark_lease_cancelled()` sets cancellation
+before setting the marker. Queued and batch leases require more than a lease
+field: their exact per-AdmissionWaiter cancellation Event must also set the
+same Broker marker, including timeout/interrupt paths that cannot reacquire
+the Broker condition. Reclaim runs under the Broker condition as
+`if marker.is_set(): marker.clear(); scan`; clear-before-scan preserves any
+concurrent later set for the next entry. Pin waiter reclamation remains a
+separate unchanged path. Old-epoch leases retain only their old Broker marker,
+and a late mark cannot target a replacement lease because lease identity and
+cancellation remain exact.
+
+Deterministic red tests require a healthy acquire/release to avoid enumerating
+active cancellation state, require direct immediate-lease cancellation to
+publish the marker and lazily restore capacity, and require an assigned queued
+lease's exact cancellation Event to publish the marker and restore capacity.
+Existing release-timeout, concurrent batch assignment, abandon, pin-terminal,
+deadline, Event ABA, and capacity tests remain mandatory controls.
+
+Historical-source audit stopped this candidate before test or production
+edits. The earlier rejected “Broker no-waiter fast path” already combined an
+empty-waiter skip with a monotonic reclaim marker. It saved roughly 10-18
+percent but less than one microsecond in isolated Broker operations, while the
+real loopback diagnostic regressed no-backlog p99 in both adjacent pairs by
+about `0.177ms` and `0.089ms`; that source and its experimental tests were
+fully removed. Later ticket-identity timing placed Broker plus facade medians
+at only about `0.069ms` and explicitly rejected further sub-millisecond Broker
+edits as the dominant fix.
+
+The broker-aware AdmissionWaiter Event described above would close a real
+correctness gap in a naive lease-only marker and extend the skip into queued
+saturated admission, but its healthy sequential/no-backlog effect is the same
+previously rejected source family. It cannot meet the frozen rule requiring
+every workload and tail metric to improve in both adjacent blocks. No red test,
+production edit, performance declaration, reservation, or artifact was
+created. This is a historical duplicate rejection, not a new sampleable
+candidate.
+
+Exact checkpoint `e9d2c8c` also completed remote verification successfully:
+Draft PR #12 remained open/draft; Pages and Ubuntu Python 3.10-3.13, Windows
+Actor Python 3.11/3.13, and package build all passed. The remote green state
+proves the retained baseline after armed-bit removal, not F06 performance
+acceptance.
