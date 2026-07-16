@@ -14,8 +14,8 @@ The result document remains historical evidence only until FINAL rewrites it.
 | Branch | `actor-transport-refactor` |
 | Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), confirmed OPEN and draft at pushed HEAD `907e3e69bc8c8a38e1b8bd39af1f0bf0ecd38789` |
 | Final-review correction base | `cc46e6042e60b1d70732ae813b089f9c8b572572` |
-| Latest pushed correction checkpoint | `79232870c337a94e5d79eca723d8bf5d09371e89`; CI run `29486968573` and Pages run `29486968576` passed |
-| Current local follow-up | Formal campaign `fifo-v2-7923287-a` completed all eight attempt-1 cells once with clean evidence but failed four performance gates. This exact source and campaign will not be sampled again; diagnose and implement a correctness-preserving hot-path improvement before declaring another campaign |
+| Latest pushed correction checkpoint | `7e78bca98bbf1380145dd041fb6db6005570fc48`; exact CI run `29490966892` and Pages run `29490966925` passed |
+| Current local follow-up | Successor cooperation skip-send failed fixed development diagnostics and was fully removed; evaluate the next reviewed pre-send hot-path candidate without resampling exact `7923287` or its campaign |
 | Baseline worktree | User-owned modification in `ACTOR_REFACTOR_RESULT.md`; preserve and integrate, do not overwrite |
 | Superseded result | Existing `COMPLETE` claim and 183-test evidence |
 
@@ -770,3 +770,89 @@ and exact-head CI before declaring any successor campaign. Never rerun exact
 `907e3e6` or `7923287`, and never resample
 `fifo-v1-ca43972-a`, `fifo-v2-72ef660-a`, `fifo-v2-2da7651-a`, or
 `fifo-v2-0183c49-a`.
+
+## Post-`7e78bca` Successor-Cooperation Red Baseline
+
+The frozen `fifo-v2-7923287-a` campaign is structurally clean but failed all
+four aggregate performance gates. Its exact source and campaign will not be
+sampled again. Read-only diagnosis ranked the redundant Windows socketpair
+wakeup at the top: the Actor explicitly cooperates for its next caller after a
+successful external response, but submit/cancel/stop still write the socketpair
+while the Actor is already waiting or yielding for that exact control work.
+
+Before any production edit, deterministic grace, terminal-yield, exact pending
+cancel, and STOP regressions were added alongside two green safety controls for
+post-window notification and the non-blocking finalizer fallback. The exact
+command was:
+
+```powershell
+python -m pytest -q tests/test_transport_actor_regressions.py::test_successor_cooperation_skips_redundant_socket_wakeup tests/test_transport_actor_regressions.py::test_successor_notifier_sends_after_cooperation_window_exits tests/test_transport_actor_regressions.py::test_successor_cooperation_keeps_pending_cancel_visible_without_socket_wakeup tests/test_transport_actor_regressions.py::test_successor_cooperation_wakes_stop_without_socket_send tests/test_transport_actor_regressions.py::test_successor_cooperation_finalizer_keeps_nonblocking_socket_fallback --tb=short
+```
+
+Result: **4 failed, 2 passed in 0.94s**. Both grace and yield modes wrote the
+socket; cancel wrote twice; STOP wrote once. Notification after the cooperation
+window still wrote once, and `abandon_actor()` retained its conservative
+best-effort socket fallback. Production changes must make the four red cases
+pass without weakening those two green controls.
+
+The first implementation binds the decision to the existing publication
+critical section: Actor entry/exit and submit/cancel/normal-stop publication
+all use the exact runtime `control_lock`; grace uses the Event while terminal
+yield needs no extra Event signal; every physical socket send remains outside
+the lock. The non-blocking finalizer retains its unconditional Event/socket
+fallback. Event-set failure falls back to a physical socket wake, and
+wait/yield exceptions clear cooperation in `finally`.
+
+Focused successor and wakeup failure checks passed **15 tests** across the new
+race/exception nodes and the retained notify-failure ticket terminalization.
+The expanded Actor/Pool/lifecycle six-file matrix passed **300 tests in
+13.00s**. Exact remote `7e78bca` CI independently passed Ubuntu Python
+3.10-3.13, Windows Actor Python 3.11/3.13, package build, and Pages before this
+uncommitted implementation was measured.
+
+A current-diff adversarial review then found that explicit private
+`_notify_actor(runtime, None)` no longer reloaded the current writer as it did
+at `7e78bca`; the exact compatibility regression failed **1 test in 0.71s**
+before distinguishing an unprepared legacy `None` from a prepared publisher's
+exact no-writer snapshot.
+
+## Successor-Cooperation Development Diagnostic Declaration
+
+This is an isolated development decision aid, not a formal acceptance
+campaign and not a rerun of `fifo-v2-7923287-a`. Both control and experiment
+use the same dirty source bytes and the current benchmark script SHA256
+`B09AB7130752AE0C562B63BA04D2B1BEA42F1E168C060F13D6E86E9BBA277B84`.
+Control disables only the new skip decision at runtime, so it retains the old
+physical socket send without restoring or sampling exact `7923287` source.
+
+Run exactly one C/E/E/C sequence, with no concurrent task pytest/stress/
+benchmark process. Each cell uses a fresh real loopback transport/server and
+contains, in this order: 1,500 sequential requests after 300 warmups; 10,000
+pool-4/concurrency-100 saturated requests after 500 warmups; and 500
+pool-4/four-worker fixed cohorts after 50 warmup cohorts. Server delay is 5ms.
+Retain every raw latency and completion record plus source/script identity in a
+single external artifact under `C:\Users\ax\Desktop\eltdx\artifacts`. Require
+all 54,000 measured requests to succeed uniquely with duplicate, missing,
+unexpected, cross-request, cross-generation, record/provenance mismatch, and
+boundary-cleanup errors all zero. Compare both adjacent C/E blocks; reject the
+candidate if sequential, saturated, or no-backlog tail does not improve
+stably. These samples cannot replace a formal FIFO-v2 campaign.
+
+The one declared process completed all four cells in exact C/E/E/C order.
+Artifact `successor-cooperation-dev-ceec-7e78bca-dirty.json` is 2,491,396
+bytes with SHA256
+`C796C04E3C9AC1178A6A2B417CC772143483FF8E1FA2AAFDFD8A51DC6CC92AB2`.
+It contains exactly 54,000 requests, successes, server requests, unique
+responses, and completion records; all duplicate/missing/unexpected/
+cross-request/cross-generation counts are zero, and all 2,200 cohort boundary
+checks are clean.
+
+The candidate **FAILED** the predeclared stability rule. Adjacent C0/E1 and
+C3/E2 throughput ratios were sequential `0.968826/0.972417`, saturated
+`0.975131/1.012629`, and no-backlog `1.028561/0.999493`. Corresponding p99
+deltas were sequential `+0.0960/+0.2040ms`, saturated
+`+6.5276/+5.5127ms`, and no-backlog `+0.0371/-0.1288ms`. Sequential regressed
+in both blocks, saturated throughput disagreed by direction, and no-backlog
+p99 disagreed by direction. The production candidate, its deterministic
+experimental tests, and temporary runner are therefore removed; the raw
+artifact and this rejection record remain. No formal campaign was run.
