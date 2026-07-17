@@ -12,10 +12,10 @@ The result document remains historical evidence only until FINAL rewrites it.
 | Baseline HEAD | `994c49b51f47255bdcd9cdc3308a5a554f37588b` |
 | Base | `71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
 | Branch | `actor-transport-refactor` |
-| Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), confirmed OPEN and draft at pushed HEAD `eacbfc0696b6912c5d9a50c7194194fec7f230bc` |
+| Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), confirmed OPEN and draft at pushed HEAD `e455234f20cde5132628f9e3ec06a85e0c48e5da` |
 | Final-review correction base | `cc46e6042e60b1d70732ae813b089f9c8b572572` |
-| Latest pushed correction checkpoint | `eacbfc0696b6912c5d9a50c7194194fec7f230bc`; exact CI run `29527247127` and Pages run `29527247083` passed |
-| Current local follow-up | F01-F05 correctness and F06 heavy/resource/build/CI evidence are closed; F06 performance is blocked on an architectural specification choice after all safe hot-path source families were rejected |
+| Latest pushed correction checkpoint | `e455234f20cde5132628f9e3ec06a85e0c48e5da`; exact CI run `29527719605` and Pages run `29527719401` passed |
+| Current local follow-up | User selected performance option 1 on 2026-07-17: preserve Actor socket ownership and record the frozen old-implementation performance failures as an approved architecture exception; finalize spec/result without resampling |
 | Baseline worktree | User-owned modification in `ACTOR_REFACTOR_RESULT.md`; preserve and integrate, do not overwrite |
 | Superseded result | Existing `COMPLETE` claim and 183-test evidence |
 
@@ -40,7 +40,7 @@ again before FINAL evidence is accepted.
 | F03 connect and failover | COMPLETE (`2e48be0`) | Candidate/attempt budgets, next-endpoint retry, Windows peer verification, non-busy rearm, and seven real/fault-injected regressions |
 | F04 Broker and pinned leases | CORRECTNESS CLOSED; CHECKPOINT CANDIDATE | Failed lease and assigned pin reservation use exact cancellation for lazy reclaim; all assignment paths reclaim before capacity checks; snapshots release waiter/Event ownership |
 | F05 lifecycle and shutdown | CORRECTNESS CLOSED; CHECKPOINT CANDIDATE | Runtime registration rechecks retire after append, so either abandon snapshots the runtime or the registering thread stops it itself |
-| F06 stress, performance, resources, compatibility | HEAVY/RESOURCE/HEARTBEAT CLOSED; PERFORMANCE BLOCKED | Exact `2a4e396` heavy/resource evidence and `eacbfc0` local/remote matrices pass. Formal `fifo-v2-7923287-a` still fails sequential/saturated throughput and sequential/no-backlog p99; no authorized safe candidate remains |
+| F06 stress, performance, resources, compatibility | CLOSED WITH USER-APPROVED PERFORMANCE EXCEPTION | Exact heavy/resource/heartbeat/build/CI hard gates pass. Frozen `fifo-v2-7923287-a` remains FAIL and is fully disclosed; plan revision 1.2 authorizes the architecture exception without rerun or retrospective PASS |
 | Final-review correctness correction | COMPLETE (`a53cc09`) | 443-test correctness snapshot plus deterministic two-endpoint generation failover; exact CI and Pages passed |
 | FINAL independent review and CI | PENDING | Two clean adversarial reviews; local matrix/build/docs and exact-HEAD CI/Pages green |
 
@@ -1522,3 +1522,29 @@ these choices, no in-scope implementation path can make the remaining
 performance evidence pass. The Goal must remain incomplete; the user-owned
 `ACTOR_REFACTOR_RESULT.md` is not rewritten, the temporary ledger is retained,
 and no PR merge/tag/release/publication action is taken.
+
+## User-Authorized Performance Resolution
+
+On 2026-07-17 the user selected option 1 after the blocker audit: preserve
+Actor-exclusive TCP socket ownership, strict FIFO, the synchronous public API,
+and exactly `pool_size=N` Actors/connections. Caller-side direct send is not
+authorized. The user accepts the measured architecture cost as a delivery
+exception rather than reopening A/B/C/D/E correctness boundaries.
+
+`ACTOR_REFACTOR_PLAN.md` is revised to version 1.2, SHA256
+`22F614FE77B223B7EF9C2FED4010EE1F2FA78E0A02979BAB4AED0E3E88E494C6`.
+The original 95% throughput and 10%/0.2ms latency targets, every immutable raw
+campaign, and every verifier FAIL remain unchanged. In particular,
+`fifo-v2-7923287-a` is not rerun or reclassified: sequential/saturated
+throughput remain `0.939010/0.923169`, sequential p99 misses by `0.00238ms`,
+and no-backlog p99 misses by `0.9257ms`. Revision 1.2 changes only FINAL
+completion policy: these disclosed failures no longer block this delivery
+because the user chose the safer ownership architecture. Concurrency=N,
+heartbeat, idle CPU, close, resource cleanup, unique-response and all cross
+counters remain hard gates with no exception.
+
+No production source, test, benchmark, verifier, artifact, threshold result,
+or raw data is changed by this authorization checkpoint. Future performance-
+sensitive changes must use the FINAL Actor implementation as their prospective
+baseline with a rule frozen before sampling; the exception cannot be reused to
+hide a future regression.
