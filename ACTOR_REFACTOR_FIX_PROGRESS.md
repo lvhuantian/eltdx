@@ -12,10 +12,10 @@ The result document remains historical evidence only until FINAL rewrites it.
 | Baseline HEAD | `994c49b51f47255bdcd9cdc3308a5a554f37588b` |
 | Base | `71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
 | Branch | `actor-transport-refactor` |
-| Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), confirmed OPEN and draft at pushed HEAD `5ff6447d2acaa04ab8c406970c2a6b81e8ccd94f` |
+| Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), confirmed OPEN and draft at pushed HEAD `3287b6a775e6c9fe7a0bcecfe134fc94b6d6634d` |
 | Final-review correction base | `cc46e6042e60b1d70732ae813b089f9c8b572572` |
-| Latest pushed correction checkpoint | `5ff6447d2acaa04ab8c406970c2a6b81e8ccd94f`; exact CI run `29548551526` and Pages run `29548551540` passed |
-| Current local follow-up | Post-authorization control-priority correction passes 547 tests and two independent adversarial reviews; checkpoint commit/push pending |
+| Latest pushed correction checkpoint | `3287b6a775e6c9fe7a0bcecfe134fc94b6d6634d`; exact CI run `29550869583` and Pages run `29550869581` passed |
+| Current local follow-up | Exact-`3287b6a` heavy/resource/build evidence passes; artifact review and permanent result integration are next |
 | Baseline worktree | User-owned modification in `ACTOR_REFACTOR_RESULT.md`; preserve and integrate, do not overwrite |
 | Superseded result | Existing `COMPLETE` claim and 183-test evidence |
 
@@ -42,7 +42,7 @@ again before FINAL evidence is accepted.
 | F05 lifecycle and shutdown | CORRECTNESS CLOSED; CHECKPOINT CANDIDATE | Runtime registration rechecks retire after append, so either abandon snapshots the runtime or the registering thread stops it itself |
 | F06 stress, performance, resources, compatibility | CLOSED WITH USER-APPROVED PERFORMANCE EXCEPTION | Exact heavy/resource/heartbeat/build/CI hard gates pass. Frozen `fifo-v2-7923287-a` remains FAIL and is fully disclosed; plan revision 1.2 authorizes the architecture exception without rerun or retrospective PASS |
 | Final-review correctness correction | COMPLETE (`a53cc09`) | 443-test correctness snapshot plus deterministic two-endpoint generation failover; exact CI and Pages passed |
-| Post-authorization control-priority correction | CHECKPOINT CANDIDATE; TWO REVIEWS CLEAN | Heartbeat admission, new TCP generation start, phase/terminal response handling, connect success and all final failure paths now linearize against business, exact cancel and STOP under the Actor control lock |
+| Post-authorization control-priority correction | COMPLETE (`3287b6a`) | Heartbeat admission, new TCP generation start, phase/terminal response handling, connect success and all final failure paths linearize against business, exact cancel and STOP; two reviews and exact CI/Pages pass |
 | FINAL independent review and CI | PENDING | Two clean adversarial reviews; local matrix/build/docs and exact-HEAD CI/Pages green |
 
 ## Current Acceptance Blocker
@@ -1617,5 +1617,65 @@ Current verification:
 - `python -m compileall -q src tests` and `git diff --check` pass (CRLF warnings
   only).
 - Two fresh independent read-only reviews returned CLEAN for implementation,
-  lock order, failure/retry behavior and regression mapping. No checkpoint has
-  been created or pushed for this local correction yet.
+  lock order, failure/retry behavior and regression mapping. At that review
+  point no checkpoint had been created or pushed for the local correction.
+
+The correction was then committed as
+`3287b6a775e6c9fe7a0bcecfe134fc94b6d6634d` with
+`Fix-Checkpoint: F06-CONTROL`, pushed normally, and verified by exact CI run
+`29550869583` and Pages run `29550869581`. Ubuntu Python 3.10-3.13, Windows
+Python 3.11/3.13, the Python 3.13 package build and strict Pages build all
+passed. The PR remained open, draft and unmerged.
+
+## Exact `3287b6a` Final Heavy, Resource, Build, And Docs Evidence
+
+A clean detached worktree at exact
+`3287b6a775e6c9fe7a0bcecfe134fc94b6d6634d` ran the unchanged heavy command:
+
+```powershell
+python scripts/stress_actor_transport.py --generations 10000 --requests 100000 --pool-size 4 --concurrency 100 --close-samples 100 --heartbeat-requests 1000 --idle-seconds 0.5 --resource-rounds 8 --resource-warmup 3 --resource-generations 50 --output C:\Users\ax\Desktop\eltdx\eltdx-src\artifacts\actor_stress_final_3287b6a.json
+```
+
+The process passed in `185.4s` on Windows 11 / Python 3.12.6. The artifact
+records `implementation_sha=3287b6a775e6c9fe7a0bcecfe134fc94b6d6634d`,
+`worktree_dirty=false`, workload SHA256
+`F7E187E3960002FBF0194C686182C3676152EBA7C6FD68AB4BC46EDE8262E5B1`,
+and artifact SHA256
+`224872904E29C3905C55087656B38155586BB8CFBEAEAE5F5E1333693724176F`.
+The detached worktree was clean and was removed after the artifact was saved.
+
+- 10,000 generations completed in `24.813711s`; accepts were exactly
+  `5000/5000`, all 10,000 logical responses were unique, all duplicate/missing/
+  unexpected/cross-request/cross-generation counters were zero, and the same
+  Actor object/thread identity reached generation 10,000 and closed fully.
+- 100,000 mixed requests completed in `93.119775s`; server business traffic was
+  `21500/78543`, accepts `43/82`, all 43 retries crossed endpoints, server
+  maximum active was exactly 4, all 100,000 responses were unique and all cross
+  counters were zero. Broker waiters/pin waiters/leases and Actor threads were
+  zero after close; all four owned-resource snapshots and PushBuffer closed.
+- Idle close p50/p95/p99 was `3.0985/3.9851/5.7324ms`; loaded close was
+  `2.4216/2.9370/4.6375ms`. Every future/ticket terminalized within the close
+  timeout and all 800 retained resource snapshots closed.
+- Heavy heartbeat ratio was `0.998884`, block ratios
+  `0.998003/1.004117/1.020108/0.974237`, 35,232 unique responses, timed
+  heartbeat `0/0`, idle CPU ratio zero and all cross counters zero.
+- After three warmups, all eight Windows handle samples were exactly `201`;
+  exact plateau was true, monotonic growth false, Actor threads zero, owned
+  resources closed and both cross counters zero.
+
+An independent raw-artifact review returned CLEAN. It recomputed the exact
+736,903-byte artifact SHA, reconciled every server request/accept/retry count,
+verified the unchanged Actor/thread identity assertions, all 800 close cleanup
+rows, heartbeat phase fences and the Windows handle plateau. The artifact
+workload SHA is the clean detached worktree's CRLF byte hash; the LF checkout
+byte hash differs only by line endings and Git reports the worktree clean.
+
+Final local package/docs commands passed on the same source bytes:
+
+- Stable full suite: `547 passed in 250.14s`.
+- `python -m build`: `eltdx-1.0.2.tar.gz` SHA256
+  `04F3457FF0032E244A50728D1BEE42B9AC5B9E4A131BF471C004E12A1CCBE9A5`;
+  wheel SHA256
+  `0709D124B9055BC2AEBDFFB8F067DA16C522C03666F5F0866460AD19FED960A6`.
+- `python -m mkdocs build --strict`: PASS in `3.64s`.
+- `python -m compileall -q src tests scripts`: PASS.
