@@ -14,7 +14,7 @@ below succeed.
 | Authoritative spec | `ACTOR_REFACTOR_PLAN.md`, revision 1.3 |
 | Spec SHA256 | `C38A3791C4C0B44677325797110BD283AB0D0580E103952C2F2DEAD6839618B2` |
 | Performance authorization spec commit | `5ff6447d2acaa04ab8c406970c2a6b81e8ccd94f` (revision 1.2) |
-| Final procedural spec commit | `SPEC-CANDIDATE`, replaced with its exact SHA before FINAL |
+| Final procedural spec commit | `e924d4d4e1d500bafa55ea314ecd23cfc042eea4` (revision 1.3) |
 | Refactor base | `71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
 | Overturned acceptance | `994c49b51f47255bdcd9cdc3308a5a554f37588b` |
 | Corrected implementation | `3287b6a775e6c9fe7a0bcecfe134fc94b6d6634d` |
@@ -22,8 +22,8 @@ below succeed.
 | Final manifest commit | `SELF`, defined below |
 | Branch | `actor-transport-refactor` |
 | Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), OPEN, draft, unmerged |
-| Latest evidence CI | [run 29551509105](https://github.com/electkismet/eltdx/actions/runs/29551509105), SUCCESS |
-| Latest evidence Pages | [run 29551509107](https://github.com/electkismet/eltdx/actions/runs/29551509107), strict build SUCCESS |
+| Latest evidence CI | [run 29552971634](https://github.com/electkismet/eltdx/actions/runs/29552971634), SUCCESS |
+| Latest evidence Pages | [run 29552971677](https://github.com/electkismet/eltdx/actions/runs/29552971677), strict build SUCCESS |
 
 `SELF` is the newest first-parent commit containing this manifest, with no
 `ACTOR_REFACTOR_FIX_PROGRESS.md`, and with trailer `Fix-Checkpoint: FINAL`:
@@ -55,11 +55,11 @@ after they finish.
 | Post-hotpath correctness | `3201d3d`, `907e3e6` | Actor/pin race fixes and exact correction checks |
 | Revision-7/final campaign | `f7355c0`, `7923287`, `7e78bca` | Heartbeat/DNS evidence, revision-7 checks and immutable FIFO-v2 FAIL |
 | Rejected successor candidates | `29b250e`, `f0a329a`, `89d6439`, `792b3db`, `e9d2c8c`, `2a4e396` | Wake, pre-send, snapshot, diagnostic and Broker candidates rejected without favorable resampling |
-| Exception/control/final evidence | `eacbfc0`, `e455234`, `5ff6447`, `3287b6a`, `e94f9cd` | Exact heavy evidence, blocker audit, revision 1.2 authorization, control priority and exact final-source evidence |
+| Exception/control/final evidence | `eacbfc0`, `e455234`, `5ff6447`, `3287b6a`, `e94f9cd`, `e924d4d` | Exact heavy evidence, blocker audit, revision 1.2 authorization, control priority, exact final-source evidence and revision 1.3 manifest candidate |
 | FINAL | `SELF` | Permanent evidence, clean reviews, ledger removal, exact-HEAD verification |
 
 This table covers every commit from the original A00-A09 implementation and
-every correction-cycle commit from `994c49b` through `e94f9cd`. All were
+every correction-cycle commit from `994c49b` through `e924d4d`. All were
 appended and pushed normally; no published commit was amended, rebased or
 force-pushed.
 
@@ -200,6 +200,17 @@ misrepresented as old-HEAD failures: malformed heartbeat, request-retry plus
 cancel, and request-final plus cancel already passed at `5ff6447`. They protect
 the final terminal-claim ordering introduced later.
 
+Permanent reproduction-to-fix mapping (all nodes are deterministic):
+
+| Area | Regression nodes |
+| --- | --- |
+| A: receive/request boundary | `tests/test_transport_actor_regressions.py::test_old_decoded_batch_cannot_complete_next_request_after_64_frame_budget`; `::test_handshake_batch_tail_cannot_complete_business_exchange`; `::test_decoded_backlog_then_eof_reconnects_instead_of_failing_actor`; `::test_response_requires_new_receive_identity_and_complete_send`; `::test_legal_push_burst_above_decoded_queue_limit_keeps_response_live` |
+| B: request identity, cancel, build isolation | `tests/test_transport_actor_regressions.py::test_late_cancel_of_completed_ticket_does_not_cancel_next_lease_zero_request`; `::test_cancel_request_during_connect_drops_generation_before_terminal`; `::test_ready_actor_survives_request_build_errors`; `tests/test_transport_pool_regressions.py::test_late_cancel_on_reused_pinned_lease_is_noop`; `::test_invalid_payload_releases_normal_and_pinned_capacity` |
+| C: endpoint rotation and Windows connect | `tests/test_transport_failover_regressions.py::test_handshake_eof_retry_starts_next_real_loopback_host`; `::test_business_eof_retry_starts_next_real_loopback_host`; `::test_partial_business_response_eof_retries_next_real_loopback_host`; `::test_response_attempt_timeout_retries_next_host_within_absolute_deadline`; `::test_all_failed_hosts_share_one_absolute_deadline`; `::test_windows_closed_first_endpoint_reaches_healthy_before_shared_deadline` |
+| D: Broker, pin, capacity | `tests/test_transport_pool_regressions.py::test_admission_waiter_late_set_cannot_wake_next_acquire`; `::test_pinned_close_timeout_can_finish_cleanup_and_restore_capacity`; `::test_concurrent_pin_close_shares_control_lock_timeout`; `::test_pinned_connect_is_an_active_operation_for_close`; `::test_pin_close_before_first_wire_submission_rejects_operation`; `tests/test_transport_pool.py::test_lease_broker_assigns_waiters_fifo_and_releases_exactly_once` |
+| E: Actor/pool lifecycle | `tests/test_transport_lifecycle_regressions.py::test_runtime_registered_after_pool_fatal_is_stopped_immediately`; `::test_close_cannot_return_while_unpublished_candidate_is_alive`; `::test_concurrent_pool_close_cannot_overwrite_failed_closing`; `::test_pool_connect_stops_real_candidate_blocked_during_startup`; `::test_fatal_during_pool_join_cannot_be_published_as_stopped`; `::test_guard_abandon_cannot_miss_runtime_appended_after_snapshot` |
+| Post-authorization control/terminal ownership | `tests/test_transport_actor_regressions.py::test_business_submission_wins_heartbeat_admission_race`; `::test_control_change_wins_heartbeat_admission_race`; `::test_control_winner_prevents_new_generation_connect`; `::test_control_winner_prevents_decoded_response_success`; `::test_control_winner_prevents_handshake_phase_advance`; `::test_control_winner_prevents_connect_ticket_success`; `::test_control_winner_prevents_terminal_failure`; `::test_late_cancel_after_terminal_claim_is_noop_without_token` |
+
 Final local commands on production source `3287b6a`:
 
 | Command | Result |
@@ -325,6 +336,12 @@ No result was discarded, replaced or resampled.
 | Stored report | `954192977dee7699dfd1c8991e0dcf2694fa8a3047ab0174fb93849083ead4d1` |
 | Independent replay | `15339fd279e6330672553a7aa53d18498de6666213ddbd0dfa2549505d328b7f` |
 
+The immutable raw campaign store is intentionally retained outside the Git
+worktree at `C:\Users\ax\Desktop\eltdx\artifacts`: 55 files totaling
+408,825,518 bytes. Its canonical declaration, bundle, report and replay hashes
+match the table above. It is acceptance evidence, not an in-repository build
+output or unnoticed temporary directory.
+
 Across 32 cases, all 1,000,000 requests, successes, server requests, wire
 attempts, unique responses, completion rows and raw latency rows matched
 exactly. Duplicate, missing, unexpected, cross-request, cross-generation,
@@ -363,8 +380,9 @@ before sampling; this exception cannot hide a future regression.
 
 ## Cross-Platform CI and Builds
 
-Exact evidence checkpoint `e94f9cda179d10be9a8f49f7cbafff9e3ea7ec66`
-run [29551509105](https://github.com/electkismet/eltdx/actions/runs/29551509105):
+Exact revision-1.3 manifest candidate
+`e924d4d4e1d500bafa55ea314ecd23cfc042eea4` passed
+[CI run 29552971634](https://github.com/electkismet/eltdx/actions/runs/29552971634):
 
 | Platform | Python | Result |
 | --- | --- | --- |
@@ -374,7 +392,7 @@ run [29551509105](https://github.com/electkismet/eltdx/actions/runs/29551509105)
 | Ubuntu | 3.13 | 546 passed, 1 Windows-only skip, wheel/sdist build SUCCESS |
 | Windows | 3.11 | Full suite, 547 passed, SUCCESS |
 | Windows | 3.13 | Full suite, 547 passed, SUCCESS |
-| Pages | [run 29551509107](https://github.com/electkismet/eltdx/actions/runs/29551509107) | strict build and artifact upload SUCCESS |
+| Pages | [run 29552971677](https://github.com/electkismet/eltdx/actions/runs/29552971677) | strict build and artifact upload SUCCESS |
 
 The Windows jobs run the full suite, including all correction regression files
 and the real Windows refused-first `connect_ex` test. Pages deployment remains
@@ -387,7 +405,7 @@ both Windows jobs. Windows has zero skipped tests. There are no xfail or flaky
 markers, plugins, rerun rules, or intermittent-failure allowlists masking a
 failure.
 
-The `71089c0..e94f9cd` scope review covers all 39 changed files. Project runtime
+The `71089c0..e924d4d` scope review covers all 39 changed files. Project runtime
 dependencies remain exactly `dependencies = []`; no 7615 implementation or
 business-command facade was changed. The `client.py`, host and registry edits
 are bounded 7709 transport integration/validation changes, while the two MCP
@@ -405,9 +423,20 @@ added. An independent scope/CI reviewer reached the same conclusion.
   lock order, retry/failure behavior and regression mapping are clean.
 - An independent audit of the exact final heavy artifact recomputed its SHA and
   reconciled all server, retry, close, heartbeat and resource counters CLEAN.
-- Two fresh read-only FINAL manifest/code/scope reviews are required after this
-  document is complete. Any finding is fixed rather than recorded as an
-  accepted risk.
+- A fresh correctness/manifest reviewer found production code CLEAN and ran
+  253 key A-E regression nodes in 14.13s. Its two manifest findings (exact
+  procedural-spec identity and permanent reproduction-node mapping) were fixed;
+  the independent rereview confirmed both fixes CLEAN and validated every node
+  named in the permanent A-E/control table.
+- A separate fresh scope/CI reviewer returned CLEAN for exact `e924d4d`: all 59
+  earlier first-parent checkpoints were accounted for, CI/Pages and marker
+  audits reconciled, PR/scope/dependency constraints held, all detached
+  worktrees were clean and no task-owned process was running.
+- FINAL cleanup removed all ten detached evidence worktrees and all in-repository
+  artifacts, build/site outputs, pytest caches and `__pycache__` directories.
+  Only the primary worktree remains; `git clean -nd` and `git clean -ndX` are
+  empty, and no task-owned Python, pytest, stress or MkDocs process is alive.
+  The separate immutable raw campaign store described above remains deliberate.
 - The FINAL commit must have no progress ledger, no untracked non-ignored file,
   no task-owned process, and two or more clean independent review conclusions.
 - Local HEAD, remote branch, PR head, FINAL CI, and FINAL Pages must all resolve
