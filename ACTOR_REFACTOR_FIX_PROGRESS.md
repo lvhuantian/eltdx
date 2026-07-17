@@ -6,8 +6,8 @@
 - Branch: `actor-transport-refactor`.
 - Reopened parent HEAD: `7f8e120dbddf37197f7718f8712589184cc20df8`.
 - Draft PR: https://github.com/electkismet/eltdx/pull/12 (OPEN, draft, unmerged).
-- Status: second checkpoint implementation and local verification complete;
-  FINAL evidence is still in progress.
+- Status: exact correction evidence is complete; permanent result rewrite and
+  final post-evidence reviews are in progress.
 - The old `9a60e76` completion conclusion remains overturned. The green checks on
   `7f8e120` are historical and cannot validate the upcoming checkpoint.
 
@@ -96,11 +96,8 @@ for either correctness or a current failure.
 
 ## Remaining Before FINAL
 
-- Close the pin terminal publication identity race found by the final
-  Pool/lifecycle review, create and push its non-interactive checkpoint, and
-  inspect exact-head CI/Pages.
-- Re-run the affected focused/full/resource/performance evidence after the
-  correction and repeat final independent adversarial reviews.
+- Repeat final independent adversarial reviews against the exact correction
+  checkpoint and its retained evidence.
 - Replace the overturned conclusion in `ACTOR_REFACTOR_RESULT.md`, move all
   evidence there, then delete this temporary file in the FINAL commit.
 - Wait for exact FINAL HEAD CI and Pages success. Do not merge the PR.
@@ -149,3 +146,65 @@ data, but they must be labeled supplemental. The retained formal schema-4
 campaign against `71089c0` remains the historical architecture-performance
 FAIL authorized by the user-selected ownership/FIFO/pool-size design; it is
 not reclassified by the supplemental `9a60e769` comparison.
+
+## Exact `48b32d6` Evidence Checkpoint
+
+`48b32d6f248fd0e36a2e5d8199e21e5dc0215a61` (`Fix-Checkpoint: L03R`)
+contains the pin publication identity fix and four new deterministic
+regressions. Local, remote branch and Draft PR #12 head were exact; the PR
+remained OPEN, draft, unmerged, base `main`.
+
+- CI [run 29573695623](https://github.com/electkismet/eltdx/actions/runs/29573695623):
+  SUCCESS. Ubuntu Python 3.10-3.13 each ran 595 passed/1 Windows-only skip;
+  Windows 3.11/3.13 ran 596 passed; the Python 3.13 package build passed.
+- Pages [run 29573695645](https://github.com/electkismet/eltdx/actions/runs/29573695645):
+  strict build/upload SUCCESS; PR deployment skipped as expected.
+- Frozen local complete suite: **596 passed in 273.14s**.
+- Local `python -m build` and `twine check`: PASS for both artifacts.
+  Wheel: 308,699 bytes, SHA256
+  `7E3D3E967DC5298DF49A1DF092D2F2494AAEC6855395663F9943D0917A6DE72B`.
+  Sdist: 366,467 bytes, SHA256
+  `79BC290FCD62A44C1488629ACC588EE0644B9BE543447C833FC85E075B89989F`.
+- Local MkDocs strict build: PASS in 2.81s.
+
+Retained exact stress artifact:
+`actor-lock-l03r-stress-48b32d6.json`, 736,906 bytes, SHA256
+`D874E3346479C78592BE205C595EE2EEC7AD18AD8C19586F1BA781E24E8079E3`.
+It records exact clean `48b32d6` on Windows 11 / Python 3.12.6:
+
+- 10,000 generations retain one Runtime/Actor/thread identity, use two real
+  loopback servers, return 10,000 unique values and leave every ownership,
+  stale and cross counter at zero;
+- 100,000 requests at pool 4/concurrency 100: 853.371 rps, server maximum
+  active exactly 4, 36 real cross-endpoint retries, 100,000 unique values and
+  all duplicate/missing/unexpected/cross counters zero;
+- after close, Actor threads, TCP, selectors, wakeups, tickets, cancels,
+  Broker waiters/pin waiters/leases and Push frames/bytes are all cleared or
+  closed;
+- idle close p50/p99 3.1005/4.1792ms; loaded 2.7476/4.1612ms;
+- heartbeat ratio 1.002961, absolute impact 0.2961% <1%, 35,232 unique and
+  cross counters zero;
+- three warmups then eight measured Windows resource rounds are exactly
+  `202,202,202,202,202,202,202,202`, with no monotonic growth; idle CPU is 0.
+
+The exact correction supplemental A/B used fixed order
+baseline/current/current/baseline, clean roots `9a60e769` and `48b32d6`, and
+workload SHA256
+`b09ab7130752ae0c562b63ba04d2b1bea42f1e168c060f13d6e86e9bba277b84`.
+All 180,000 responses and completion rows reconcile; every error, duplicate,
+missing, unexpected, cross-request and cross-generation count is zero.
+
+| Artifact | SHA256 |
+| --- | --- |
+| `actor-lock-l03r-baseline-a-9a60e769.json` | `0575A797800E412C0095D4ED838C29B0FFC6132808CB5CCA811B0DD8E90399FA` |
+| `actor-lock-l03r-current-a-48b32d6.json` | `A4551C3AC99AAA8F4AC1A9FB28E7297B0239882001829F15F8EBAA15089FB4BC` |
+| `actor-lock-l03r-current-b-48b32d6.json` | `913F5CDFF61C16BEC21B9A57AD87CD49A4CE4FDFE573B4550A6C68941134E692` |
+| `actor-lock-l03r-baseline-b-9a60e769.json` | `E12E64DDEC4FAC54EE76EA79067BE617B63A8B7557C5E4D7F2B4440628C61D62` |
+
+Across nine cases, aggregate throughput ratios are 0.969577-0.995312 and all
+p50/p99 deltas pass `max(10%, 0.2ms)`. Sequential baseline/current is
+157.2195/156.4825 rps, p50 6.26395/6.29725ms and p99 7.6822/7.8308ms.
+Pool 4/concurrency 100 is 601.9305/583.618 rps, p50
+163.6542/168.9172ms and p99 177.8418/183.69225ms. These schema-2 files are
+supplemental correction-regression evidence only and are not accepted by the
+frozen schema-4 verifier.
