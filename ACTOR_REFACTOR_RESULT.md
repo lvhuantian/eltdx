@@ -5,10 +5,12 @@ transport refactor. It explicitly supersedes the invalid COMPLETE claim at
 `994c49b` and all earlier 183-test acceptance evidence. The later `9a60e769`
 completion claim was itself reopened on 2026-07-17 after deterministic tests
 proved that the Actor thread could still block on Pool, Broker, Proxy and
-sibling-Actor locks. The external-lock correction is now frozen at exact source
-`abd58c3`, with retained evidence and exact-source CI/Pages. Delivery becomes
-COMPLETE only after this manifest-only `SELF` commit passes its own exact
-CI and Pages gates; the source-evidence checks cannot be substituted for them.
+sibling-Actor locks. The resulting external-lock correction reached
+`f5b63bb`, but was reopened again on 2026-07-17 after deterministic tests found
+fatal/admission and fatal/push publication windows. The epoch-retirement
+correction is frozen at production source `f290981`; delivery becomes COMPLETE
+only after the final `SELF` documentation commit passes its own exact CI and
+Pages gates. Source-evidence checks cannot be substituted for those gates.
 
 ## Delivery Identity
 
@@ -25,6 +27,9 @@ CI and Pages gates; the source-evidence checks cannot be substituted for them.
 | Reopened baseline | `9a60e769160c8e146525e7d53fd5fa40dac012b9` |
 | Current external-lock correction | `abd58c39aef6f905075788d4482eac43e673ba63` |
 | Evidence ledger checkpoint | `eac784b` (`Fix-Checkpoint: L04E2`) |
+| Epoch-retirement baseline | `f5b63bb01d5317b9e637ede55c3c1003b0f0138d` |
+| Epoch-retirement red tests | `d6b9296be7ffbd50b743243cc556dc52d5232565` |
+| Current epoch-retirement production | `f290981cf6b61eae84414f4d0cc2494d512b67bd` |
 | Final manifest commit | `SELF`, resolved by the first-parent FINAL trailer below |
 | Branch | `actor-transport-refactor` |
 | Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), OPEN, draft, unmerged |
@@ -65,6 +70,7 @@ after they finish.
 | Exception/control/final evidence | `eacbfc0`, `e455234`, `5ff6447`, `3287b6a`, `e94f9cd`, `e924d4d` | Exact heavy evidence, blocker audit, revision 1.2 authorization, control priority, exact final-source evidence and revision 1.3 manifest candidate |
 | Overturned FINAL | `9a60e76` | Reopened: Actor external-lock blocking remained |
 | External-lock correction | `7f8e120`, `8b68542`, `f5ad8a3`, `48b32d6`, `166ae61`, `abd58c3`, `eac784b` | Nonblocking Actor handoff, deferred settlement, bounded FIFO lease pulses, two pin publication corrections, per-call identity cell and exact evidence ledger |
+| Epoch-retirement correction | `d6b9296`, `f290981` | Deterministic red publication races, permanent epoch/local termination, condition-owned Broker/Push drain and failure-cell-independent fatal fanout |
 | FINAL manifest | `SELF` | Permanent result plus temporary progress-ledger deletion; exact-SHA CI/Pages resolved after push |
 
 This table covers every commit from the original A00-A09 implementation and
@@ -153,6 +159,19 @@ force-pushed.
   exact call ID and its terminal Event. Active transition replaces that single
   state reference; stale success, timeout fallback, publish and clear paths can
   only touch their detached old Event and cannot overwrite the new call.
+- Every pool epoch now gives Broker and Push the same permanent retirement
+  Event; each component also has a permanent local-close Event. Broker lease,
+  batch, queued waiter, assignment, pin reservation, reclaim and heartbeat
+  publication paths recheck that predicate after their canonical container and
+  immutable snapshot change, then drain and reject if retirement won.
+- Fatal fanout retires the epoch, publishes Broker/Push close, wakes immutable
+  waiter/pin/push snapshots and stops every same-epoch Actor before attempting
+  the failure-cell try-lock. The try-lock controls only reason bookkeeping;
+  current runtime fatal snapshots remain authoritative if it is contended.
+- Push offer checks termination before locking, after locking and after append;
+  a losing append is removed. Poll rechecks permanent termination after waiter
+  registration and Event clear, and fatal/error is observed before any buffered
+  frame. Broker and Push close always retry their idempotent drain.
 
 ## Compatibility and Scope
 
@@ -555,6 +574,59 @@ above was rerun from trial zero. The valid pre-fix diagnostic
 `9a60e769` versus `8b685420` found concurrency-100 ratios 0.611/0.537/0.365;
 it led to the durable first-live lease pulse and publication-idempotency fix,
 but is not FINAL performance evidence.
+
+### Epoch-retirement correction evidence
+
+Exact production source `f290981cf6b61eae84414f4d0cc2494d512b67bd`
+has the following isolated local evidence on Windows 11 / CPython 3.12.6:
+
+| Evidence | Result |
+| --- | --- |
+| Deterministic retirement regressions | 20 passed; 20 independent processes each passed all 20 |
+| Complete transport matrix | 408 passed in 16.43s |
+| Complete pytest | 618 passed in 270.78s |
+| Stress test file | 26 passed in 258.80s |
+| Package | wheel and sdist built; `twine check` passed |
+| Documentation | MkDocs strict passed in 3.22s |
+
+The retained stress artifact is
+`C:\Users\ax\Desktop\eltdx\artifacts\actor-retirement-r03-stress-f290981.json`,
+SHA256 `132CEA0280A15451B4787324903C69F91949B5E0B2272DB3B01F0453EACDFBEB`.
+It records 10,000 generation changes in 27.216346s and 100,000 mixed requests
+at pool 4/concurrency 100 in 118.642250s. Both workloads have exact unique
+response counts and zero duplicate, missing, unexpected, cross-request or
+cross-generation completions. Mixed maximum business concurrency is exactly
+4; after close Broker leases and Push frames/bytes are zero, every retained
+Actor-owned resource is closed, all 100 idle plus 100 loaded close samples are
+terminal/clean, and eight measured Windows resource counts are exactly 201.
+
+The prospective performance directory is
+`C:\Users\ax\Desktop\eltdx\artifacts\retirement-perf-f290981-a`: 16 files,
+88,075,994 bytes, aggregate manifest SHA256
+`6F9C5F67C6EAB7A1C85298832D1D987613EA633B519ABDBA598BB6ADD64013D4`.
+It compares clean detached `f5b63bb` and `f290981` roots with identical
+workload SHA256 `4ddd761f...`, using seven declared adjacent A/B pairs in a
+balanced 14-trial order. All attempt-1 trials ran once without overlap or
+replacement; the existing schema-4 case validator recomputed all 1,750,000 raw
+latency rows and completion records with `errors=[]`.
+
+| Frozen prospective gate | Result |
+| --- | ---: |
+| Sequential throughput median paired ratio >= 0.98 | 0.997723, PASS |
+| Saturated throughput median paired ratio >= 0.98 | 0.998816, PASS |
+| Saturated p50/p99 role-median ratio <= 1.05 | 0.997220 / 0.995354, PASS |
+| No-backlog p99 delta <= max(1ms, 10%) | -0.0999ms <= 1.0000ms, PASS |
+
+The historical Actor-vs-legacy formal campaign above remains **FAIL,
+user-approved architecture exception**. This prospective correction result
+does not reclassify it. No thread, runtime dependency, background cleanup
+worker, unbounded queue or per-request publication object was added; the new
+assigned-waiter snapshot remains bounded by `max_pending_requests`.
+
+The exact package hashes are wheel
+`F7AACE52D9D73D318BE32437272D9B363C14CCEE9829B0079C15E7F4E35F6AC8`
+and sdist
+`83C74FC8A5E3FD9CF504DF05B95364EFF99EE7888587B5272E9273C80DAA11F5`.
 
 ## Cross-Platform CI and Builds
 
