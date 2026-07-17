@@ -12,10 +12,10 @@ The result document remains historical evidence only until FINAL rewrites it.
 | Baseline HEAD | `994c49b51f47255bdcd9cdc3308a5a554f37588b` |
 | Base | `71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
 | Branch | `actor-transport-refactor` |
-| Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), confirmed OPEN and draft at pushed HEAD `3287b6a775e6c9fe7a0bcecfe134fc94b6d6634d` |
+| Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), confirmed OPEN, draft and unmerged at pushed HEAD `e94f9cda179d10be9a8f49f7cbafff9e3ea7ec66` |
 | Final-review correction base | `cc46e6042e60b1d70732ae813b089f9c8b572572` |
-| Latest pushed correction checkpoint | `3287b6a775e6c9fe7a0bcecfe134fc94b6d6634d`; exact CI run `29550869583` and Pages run `29550869581` passed |
-| Current local follow-up | Exact-`3287b6a` heavy/resource/build evidence passes; artifact review and permanent result integration are next |
+| Latest pushed correction checkpoint | `e94f9cda179d10be9a8f49f7cbafff9e3ea7ec66`; exact CI run `29551509105` and Pages run `29551509107` passed |
+| Current local follow-up | Plan revision 1.3 and permanent result manifest integration are complete locally; candidate checkpoint, exact CI/Pages, final rereviews and cleanup remain |
 | Baseline worktree | User-owned modification in `ACTOR_REFACTOR_RESULT.md`; preserve and integrate, do not overwrite |
 | Superseded result | Existing `COMPLETE` claim and 183-test evidence |
 
@@ -43,7 +43,7 @@ again before FINAL evidence is accepted.
 | F06 stress, performance, resources, compatibility | CLOSED WITH USER-APPROVED PERFORMANCE EXCEPTION | Exact heavy/resource/heartbeat/build/CI hard gates pass. Frozen `fifo-v2-7923287-a` remains FAIL and is fully disclosed; plan revision 1.2 authorizes the architecture exception without rerun or retrospective PASS |
 | Final-review correctness correction | COMPLETE (`a53cc09`) | 443-test correctness snapshot plus deterministic two-endpoint generation failover; exact CI and Pages passed |
 | Post-authorization control-priority correction | COMPLETE (`3287b6a`) | Heartbeat admission, new TCP generation start, phase/terminal response handling, connect success and all final failure paths linearize against business, exact cancel and STOP; two reviews and exact CI/Pages pass |
-| FINAL independent review and CI | PENDING | Two clean adversarial reviews; local matrix/build/docs and exact-HEAD CI/Pages green |
+| FINAL independent review and CI | IN PROGRESS | Permanent manifest candidate is being finalized; two clean adversarial rereviews, cleanup, ledger deletion and exact FINAL CI/Pages remain |
 
 ## Current Acceptance Blocker
 
@@ -1679,3 +1679,38 @@ Final local package/docs commands passed on the same source bytes:
   `0709D124B9055BC2AEBDFFB8F067DA16C522C03666F5F0866460AD19FED960A6`.
 - `python -m mkdocs build --strict`: PASS in `3.64s`.
 - `python -m compileall -q src tests scripts`: PASS.
+
+## Permanent Manifest Candidate Integration
+
+Plan revision 1.3 now unifies the post-`994c49b` recovery protocol on
+F00-F06/FINAL, this FIX ledger and `Fix-Checkpoint:` trailers without changing
+the revision-1.2 performance authorization. Its exact SHA256 is
+`C38A3791C4C0B44677325797110BD283AB0D0580E103952C2F2DEAD6839618B2`.
+
+The permanent result now contains the complete grouped first-parent checkpoint
+chain, exact-final stress/resource/build evidence, raw frozen performance
+values and FAIL verdict, the user-authorized architecture exception, and the
+revision-7 dirty-source disclosure. The remaining FINAL-review manifest fields
+were resolved as follows:
+
+- exact-final push high-water is 1,024 frames / 28,612 bytes against configured
+  limits 1,024 / 8,388,608;
+- deterministic FIFO admission reaches three ordered waiters against limit four
+  and returns to zero; heavy stress uses the default pending limit 256;
+- an exact-source read-only tracking probe of the 1,101-frame legal burst
+  observed decoded append high-water 910, 846 queued after the immediate
+  64-frame fairness slice, four partial decoder bytes and no premature ticket
+  terminal; the hard decoded queue limit is 1,024;
+- the only test skip marker is the explicit non-Windows guard for the real
+  Windows `connect_ex` regression, exactly matching Ubuntu's one skip; Windows
+  runs it and has no skip. No xfail/flaky/rerun allowlist exists;
+- `71089c0..e94f9cd` changes 39 files. Runtime dependencies remain empty, 7615
+  implementation is untouched, client/host/registry changes are bounded 7709
+  integration, MCP changes are test-only connection stubs, and Pages/docs scope
+  is Actor-specific. No merge, main update, tag, release or publication occurred.
+
+The first two FINAL reviews found only manifest completeness/protocol and
+cleanup findings; they found no new production-code blocker. Plan/result edits
+resolve the manifest findings. Ten detached evidence worktrees and generated
+ignored outputs remain intentionally pending until the manifest candidate has
+been committed, pushed, checked and rereviewed; task process audit found none.
