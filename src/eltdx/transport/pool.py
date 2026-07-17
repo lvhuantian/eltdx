@@ -1901,7 +1901,12 @@ class PinnedTransportProxy:
         self._condition.release()
         self._wire_terminal(call_id, deadline=deadline)
         if self._active_call != call_id:
+            # A newer call may publish between the terminal transition and this clear.
             self._published_terminal.clear()
+            if self._published_terminal_call != call_id:
+                self._published_terminal.set()
+                for waiter in self._waiter_snapshot:
+                    waiter.completed.set()
 
     def _cancel_interrupted_waiter(self, waiter: PinWaiter, deadline: float) -> None:
         waiter.cancelled.set()

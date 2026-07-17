@@ -96,18 +96,56 @@ for either correctness or a current failure.
 
 ## Remaining Before FINAL
 
-- Create and push the non-interactive performance-correction checkpoint commit.
-- Confirm local, remote branch, and PR HEAD identities and inspect exact-head CI/Pages.
-- Run the fresh exact-checkpoint performance campaign against baseline
-  `9a60e769`, plus 10,000 generations, 100,000 unique requests, two-server
-  failover stress, heartbeat, Windows resource warmup/repetition, and thread/
-  socket/selector/wakeup/ticket/waiter/lease cleanup evidence.
-- Run package build, MkDocs strict/Pages build, and the required Windows and
-  Ubuntu/Python matrix (local where applicable and exact-head CI).
-- Re-run final independent adversarial reviews after all evidence is frozen.
+- Close the pin terminal publication identity race found by the final
+  Pool/lifecycle review, create and push its non-interactive checkpoint, and
+  inspect exact-head CI/Pages.
+- Re-run the affected focused/full/resource/performance evidence after the
+  correction and repeat final independent adversarial reviews.
 - Replace the overturned conclusion in `ACTOR_REFACTOR_RESULT.md`, move all
   evidence there, then delete this temporary file in the FINAL commit.
 - Wait for exact FINAL HEAD CI and Pages success. Do not merge the PR.
 
 Do not delete this file until all replacement FINAL evidence is recorded in
 `ACTOR_REFACTOR_RESULT.md` and exact FINAL HEAD CI/Pages have succeeded.
+
+## Final-Review Reopen After `f5ad8a3`
+
+The final Pool/lifecycle review found that
+`PinnedTransportProxy._settle_published_terminal` cleared one shared Event
+after settling an old call without rechecking `_published_terminal_call`. If
+the old terminal assigned the next FIFO call and that call published before
+the old settler cleared the Event, the new call's wake was erased.
+
+The deterministic red selection covers a real old-terminal assignment plus
+new publication before return, controlled publication before the actual
+`Event.clear`, publication after the actual clear, and exact-old cleanup:
+
+```text
+2 failed, 2 passed, 79 deselected in 0.88s
+```
+
+Both failures are the expected lost-new-publication assertions on exact
+`f5ad8a3`; the after-clear and exact-old controls pass. The current correction
+clears the old Event, rereads the monotonic call identity, and restores both
+the publication Event and waiter-snapshot wakes if a newer call appeared in
+any clear window.
+
+Correction verification on the frozen worktree:
+
+- five focused publication/deadline tests: 20 independent pytest processes,
+  each **5 passed**;
+- complete Pool regression file: **83 passed in 1.94s**;
+- complete lifecycle regression file: **92 passed in 7.78s**;
+- Actor/Pool core selection: **156 passed in 4.14s**;
+- complete suite: **596 passed in 273.14s**;
+- independent Pool/lifecycle review: **CLEAN**, including two controlled
+  concurrent-settler sequences and final capacity cleanup;
+- `git diff --check`: PASS with only expected LF-to-CRLF worktree warnings.
+
+The final evidence review also rejected the four schema-2 `actor-lock-l03p`
+A/B JSON files as input to the frozen schema-4 performance verifier. Their
+same-workload ratios and clean identities remain useful correction-regression
+data, but they must be labeled supplemental. The retained formal schema-4
+campaign against `71089c0` remains the historical architecture-performance
+FAIL authorized by the user-selected ownership/FIFO/pool-size design; it is
+not reclassified by the supplemental `9a60e769` comparison.
