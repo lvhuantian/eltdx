@@ -65,6 +65,43 @@ class _RetireOnAppend(deque):
         self._retire.set()
 
 
+class _RetireOnSecondAppend(deque):
+    def __init__(self, values, retire: threading.Event) -> None:
+        super().__init__(values)
+        self._retire = retire
+        self._append_count = 0
+
+    def append(self, item) -> None:
+        super().append(item)
+        self._append_count += 1
+        if self._append_count == 2:
+            self._retire.set()
+
+
+class _PauseBeforePopleft(deque):
+    def __init__(self, values, entered: threading.Event, allow_read: threading.Event) -> None:
+        super().__init__(values)
+        self._entered = entered
+        self._allow_read = allow_read
+
+    def popleft(self):
+        self._entered.set()
+        assert self._allow_read.wait(timeout=2)
+        return super().popleft()
+
+
+class _PauseBeforeIter(deque):
+    def __init__(self, values, entered: threading.Event, allow_read: threading.Event) -> None:
+        super().__init__(values)
+        self._entered = entered
+        self._allow_read = allow_read
+
+    def __iter__(self):
+        self._entered.set()
+        assert self._allow_read.wait(timeout=2)
+        return super().__iter__()
+
+
 class _RetireOnSet(dict):
     def __init__(self, values, retire: threading.Event) -> None:
         super().__init__(values)
@@ -72,6 +109,37 @@ class _RetireOnSet(dict):
 
     def __setitem__(self, key, value) -> None:
         super().__setitem__(key, value)
+        self._retire.set()
+
+
+class _RetireOnValues(dict):
+    def __init__(self, values, retire: threading.Event) -> None:
+        super().__init__(values)
+        self._retire = retire
+
+    def values(self):
+        self._retire.set()
+        return super().values()
+
+
+class _RetireOnGet(dict):
+    def __init__(self, values, retire: threading.Event) -> None:
+        super().__init__(values)
+        self._retire = retire
+
+    def get(self, key, default=None):
+        value = super().get(key, default)
+        self._retire.set()
+        return value
+
+
+class _RetireOnDelete(dict):
+    def __init__(self, values, retire: threading.Event) -> None:
+        super().__init__(values)
+        self._retire = retire
+
+    def __delitem__(self, key) -> None:
+        super().__delitem__(key)
         self._retire.set()
 
 
@@ -113,6 +181,54 @@ class _ClearRetiresEvent(_MustBeSignalledEvent):
         self.clear_calls += 1
         super().clear()
         self._retire.set()
+
+
+class _FirstSetPausesEvent:
+    def __init__(self, entered: threading.Event, allow_first: threading.Event) -> None:
+        self._event = _REAL_EVENT()
+        self._entered = entered
+        self._allow_first = allow_first
+        self._lock = threading.Lock()
+        self._set_calls = 0
+
+    def set(self) -> None:
+        with self._lock:
+            self._set_calls += 1
+            first = self._set_calls == 1
+        if first:
+            self._entered.set()
+            assert self._allow_first.wait(timeout=2)
+        self._event.set()
+
+    def clear(self) -> None:
+        self._event.clear()
+
+    def is_set(self) -> bool:
+        return self._event.is_set()
+
+    def wait(self, timeout: float | None = None) -> bool:
+        return self._event.wait(timeout)
+
+
+class _SetThenPauseEvent:
+    def __init__(self, entered: threading.Event, allow_set: threading.Event) -> None:
+        self._event = _REAL_EVENT()
+        self._entered = entered
+        self._allow_set = allow_set
+
+    def set(self) -> None:
+        self._event.set()
+        self._entered.set()
+        assert self._allow_set.wait(timeout=2)
+
+    def clear(self) -> None:
+        self._event.clear()
+
+    def is_set(self) -> bool:
+        return self._event.is_set()
+
+    def wait(self, timeout: float | None = None) -> bool:
+        return self._event.wait(timeout)
 
 
 @pytest.mark.parametrize("count", (1, 2))
@@ -217,7 +333,7 @@ def test_release_and_reclaim_never_republish_idle_capacity_after_retirement(acti
     broker = LeaseBroker(1, pool_size=1, max_pending_requests=1)
     _bind_broker_retirement(broker, retire)
     lease = broker.acquire(time.monotonic() + 1)
-    retire.set()
+    broker._idle_slots = _RetireOnAppend(broker._idle_slots, retire)
     if action == "release":
         broker.release(lease)
     else:
@@ -236,9 +352,48 @@ def test_heartbeat_rejects_retired_epoch() -> None:
     retire = _REAL_EVENT()
     broker = LeaseBroker(1, pool_size=1, max_pending_requests=1)
     _bind_broker_retirement(broker, retire)
-    retire.set()
+    lease = broker.acquire(time.monotonic() + 1)
+    broker._active_leases = _RetireOnValues(broker._active_leases, retire)
 
     assert not broker.allows_heartbeat()
+    assert broker._closed and broker._drained
+    assert not broker._active_leases
+    assert lease.state is LeaseState.RELEASED
+
+
+def test_validate_drains_when_retirement_wins_final_recheck() -> None:
+    retire = _REAL_EVENT()
+    broker = LeaseBroker(1, pool_size=1, max_pending_requests=1)
+    _bind_broker_retirement(broker, retire)
+    lease = broker.acquire(time.monotonic() + 1)
+    broker._active_leases = _RetireOnGet(broker._active_leases, retire)
+
+    assert not broker.validate(lease)
+    assert broker._closed and broker._drained
+    assert not broker._active_leases
+    assert lease.state is LeaseState.RELEASED
+
+
+@pytest.mark.parametrize("cancelled_before_release", (False, True))
+def test_pin_release_and_reclaim_drain_retirement_critical_window(
+    cancelled_before_release: bool,
+) -> None:
+    retire = _REAL_EVENT()
+    broker = LeaseBroker(1, pool_size=1, max_pending_requests=2)
+    _bind_broker_retirement(broker, retire)
+    lease = broker.acquire(time.monotonic() + 1)
+    completed = _REAL_EVENT()
+    cancelled = _REAL_EVENT()
+    broker.reserve_pin_waiter(completed, cancelled=cancelled)
+    broker._pin_waiter_events = _RetireOnDelete(broker._pin_waiter_events, retire)
+    if cancelled_before_release:
+        cancelled.set()
+
+    broker.release_pin_waiter(completed)
+
+    assert broker._closed and broker._drained
+    assert not broker._active_leases
+    assert lease.state is LeaseState.RELEASED
 
 
 def test_close_after_abandon_retries_full_broker_drain() -> None:
@@ -290,6 +445,21 @@ def test_push_append_is_rolled_back_when_retirement_wins() -> None:
 
     assert not push.offer_nowait(_frame(1))
     assert not push._frames and push._bytes == 0
+
+
+def test_push_rollback_removes_exact_new_frame_not_equal_predecessor() -> None:
+    retire = _REAL_EVENT()
+    push = PushBuffer(1)
+    _bind_push_retirement(push, retire)
+    push._frames = _RetireOnSecondAppend(push._frames, retire)
+    first = _frame(1)
+    second = _frame(1)
+    assert first == second and first is not second
+
+    assert push.offer_nowait(first)
+    assert not push.offer_nowait(second)
+
+    assert len(push._frames) == 1 and push._frames[0] is first
 
 
 def test_push_poll_registration_rechecks_permanent_retirement(
@@ -360,6 +530,39 @@ def test_fatal_error_preempts_buffered_push_frame() -> None:
     assert raised.value is error
 
 
+@pytest.mark.parametrize("operation", ("poll", "drain"))
+def test_fatal_during_push_read_preempts_buffered_frame(operation: str) -> None:
+    retire = _REAL_EVENT()
+    push = PushBuffer(1)
+    _bind_push_retirement(push, retire)
+    assert push.offer_nowait(_frame(1))
+    read_entered = _REAL_EVENT()
+    allow_read = _REAL_EVENT()
+    container_type = _PauseBeforePopleft if operation == "poll" else _PauseBeforeIter
+    push._frames = container_type(push._frames, read_entered, allow_read)
+    error = RuntimeError(f"fatal during push {operation}")
+    outcome: list[object] = []
+
+    def read() -> None:
+        try:
+            outcome.append(push.poll() if operation == "poll" else push.drain())
+        except BaseException as exc:
+            outcome.append(exc)
+
+    reader = threading.Thread(target=read)
+    reader.start()
+    assert read_entered.wait(timeout=2)
+    retire.set()
+    push.abandon(error)
+    allow_read.set()
+    reader.join(timeout=2)
+
+    assert not reader.is_alive()
+    assert outcome == [error]
+    assert push._closed and push._drained
+    assert not push._frames and push._bytes == 0
+
+
 def test_push_close_timeout_can_be_retried_to_clear_residual_frames() -> None:
     push = PushBuffer(1)
     assert push.offer_nowait(_frame(1))
@@ -414,8 +617,82 @@ def test_failure_cell_contention_cannot_gate_fatal_fanout() -> None:
     assert push.snapshot().closed
 
 
-def test_two_actor_fatals_each_complete_epoch_fanout() -> None:
+def test_failure_cell_contention_recovers_unregistered_handle_fatal() -> None:
     retire = _REAL_EVENT()
+    broker = LeaseBroker(1, pool_size=1, max_pending_requests=1)
+    push = PushBuffer(1)
+    guard = PoolRuntimeGuard()
+    guard.configure(broker, push, retire_event=retire)
+    handle = pool_module.ActorFatalHandle(weakref.ref(guard), 1, weakref.ref(broker), retire)
+    runtime = ActorRuntime(1, ())
+    error = RuntimeError("fatal before runtime registration")
+    runtime.fatal_error = error
+
+    with guard._failure_cell.lock:
+        handle.publish(runtime, error)
+        assert guard.failure() is error
+
+    assert not guard._runtime_snapshot
+    assert handle._published.is_set() and handle._error is error
+
+
+def test_pre_registration_fatal_reason_precedes_observable_retirement() -> None:
+    set_entered = _REAL_EVENT()
+    allow_set = _REAL_EVENT()
+    retire = _SetThenPauseEvent(set_entered, allow_set)
+    broker = LeaseBroker(1, pool_size=1, max_pending_requests=1)
+    push = PushBuffer(1)
+    guard = PoolRuntimeGuard()
+    guard.configure(broker, push, retire_event=retire)
+    handle = pool_module.ActorFatalHandle(weakref.ref(guard), 1, weakref.ref(broker), retire)
+    runtime = ActorRuntime(1, ())
+    error = RuntimeError("fatal while retirement publication pauses")
+    runtime.fatal_error = error
+    publisher = threading.Thread(target=lambda: handle.publish(runtime, error))
+    publisher.start()
+    assert set_entered.wait(timeout=2)
+
+    try:
+        assert guard.failure() is error
+        assert guard.finish_epoch(pool_epoch=1, broker=broker) is error
+    finally:
+        allow_set.set()
+        publisher.join(timeout=2)
+
+    assert not publisher.is_alive()
+    assert handle._published.is_set() and handle._error is error
+
+
+def test_fatal_force_wake_does_not_trust_in_progress_normal_publication() -> None:
+    broker = LeaseBroker(1, pool_size=1, max_pending_requests=2)
+    active = broker.acquire(time.monotonic() + 1)
+    set_entered = _REAL_EVENT()
+    allow_first_set = _REAL_EVENT()
+    completed = _FirstSetPausesEvent(set_entered, allow_first_set)
+    waiter = AdmissionWaiter(1, 99, time.monotonic() + 1, False, completed=completed)
+    with broker._condition:
+        broker._waiters.append(waiter)
+        broker._waiter_snapshot = (waiter,)
+    releaser = threading.Thread(target=lambda: broker.release(active))
+    releaser.start()
+    assert set_entered.wait(timeout=2)
+
+    try:
+        broker.abandon()
+        assert completed.is_set()
+        assert waiter.state is AdmissionState.CLOSED
+    finally:
+        allow_first_set.set()
+        releaser.join(timeout=2)
+
+    assert not releaser.is_alive()
+
+
+@pytest.mark.parametrize("paused_index", (0, 1))
+def test_two_actor_fatals_each_complete_epoch_fanout(paused_index: int) -> None:
+    first_set_entered = _REAL_EVENT()
+    allow_first_set = _REAL_EVENT()
+    retire = _FirstSetPausesEvent(first_set_entered, allow_first_set)
     broker = LeaseBroker(1, pool_size=2, max_pending_requests=2)
     push = PushBuffer(1)
     _bind_broker_retirement(broker, retire)
@@ -432,20 +709,23 @@ def test_two_actor_fatals_each_complete_epoch_fanout() -> None:
     errors = (RuntimeError("first fatal"), RuntimeError("second fatal"))
     for runtime, error in zip(runtimes, errors):
         runtime.fatal_error = error
-    barrier = threading.Barrier(3)
+    paused = threading.Thread(
+        target=lambda: handles[paused_index].publish(
+            runtimes[paused_index], errors[paused_index]
+        )
+    )
+    paused.start()
+    assert first_set_entered.wait(timeout=2)
+    other = 1 - paused_index
+    handles[other].publish(runtimes[other], errors[other])
 
-    def publish(index: int) -> None:
-        barrier.wait(timeout=2)
-        handles[index].publish(runtimes[index], errors[index])
+    assert paused.is_alive()
+    assert broker.snapshot().closed and push.snapshot().closed
+    assert all(runtime.stop_requested for runtime in runtimes)
+    allow_first_set.set()
+    paused.join(timeout=2)
 
-    threads = [threading.Thread(target=publish, args=(index,)) for index in range(2)]
-    for thread in threads:
-        thread.start()
-    barrier.wait(timeout=2)
-    for thread in threads:
-        thread.join(timeout=2)
-
-    assert all(not thread.is_alive() for thread in threads)
+    assert not paused.is_alive()
     assert all(handle._published.is_set() for handle in handles)
     assert all(runtime.stop_requested for runtime in runtimes)
     assert broker.snapshot().closed and push.snapshot().closed

@@ -167,11 +167,8 @@ class PushBuffer:
                 accepted = True
             if self._termination_requested():
                 if accepted:
-                    try:
-                        self._frames.remove(frame)
-                    except ValueError:
-                        pass
-                    else:
+                    if self._frames and self._frames[-1] is frame:
+                        self._frames.pop()
                         self._bytes -= size
                 return False
             if dropped:
@@ -203,6 +200,17 @@ class PushBuffer:
                     if self._frames:
                         frame = self._frames.popleft()
                         self._bytes -= frame.wire_size
+                        if self._published_error is not None:
+                            error = self._published_error
+                            self._drain_closed_locked(error)
+                            raise error
+                        if self._error is not None:
+                            error = self._error
+                            self._drain_closed_locked(error)
+                            raise error
+                        if self._retire_event.is_set():
+                            self._drain_closed_locked()
+                            return None
                         return frame
                     if self._close_published or self._closed or self._close_requested.is_set():
                         return None
@@ -241,6 +249,17 @@ class PushBuffer:
                 return []
             self._raise_gap_locked()
             frames = list(self._frames)
+            if self._published_error is not None:
+                error = self._published_error
+                self._drain_closed_locked(error)
+                raise error
+            if self._error is not None:
+                error = self._error
+                self._drain_closed_locked(error)
+                raise error
+            if self._retire_event.is_set():
+                self._drain_closed_locked()
+                return []
             self._frames.clear()
             self._bytes = 0
             return frames

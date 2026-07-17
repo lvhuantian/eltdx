@@ -183,7 +183,7 @@ class LeaseBroker:
     def _refresh_waiter_snapshot_locked(self) -> None:
         self._waiter_snapshot = tuple(self._waiters) + tuple(self._assigned_waiters.values())
 
-    def _drain_retired_locked(self) -> None:
+    def _drain_retired_locked(self, *, force_wake: bool = True) -> None:
         waiters = self._waiter_snapshot
         if self._waiters or self._assigned_waiters:
             waiters = tuple(self._waiters) + tuple(self._assigned_waiters.values())
@@ -192,7 +192,7 @@ class LeaseBroker:
                 waiter.state = AdmissionState.CLOSED
                 waiter.error = ConnectionClosedError("7709 pool closed during admission")
             waiter.cancelled.set()
-            if not waiter.wake_started:
+            if force_wake or not waiter.wake_started:
                 _wake_admission_waiter(waiter)
         self._waiters.clear()
         self._assigned_waiters.clear()
@@ -213,11 +213,11 @@ class LeaseBroker:
         self._closed = True
         self._drained = True
 
-    def _publish_close_request(self) -> None:
+    def _publish_close_request(self, *, force_wake: bool = True) -> None:
         self._close_requested.set()
         for waiter in self._waiter_snapshot:
             waiter.cancelled.set()
-            if not waiter.wake_started:
+            if force_wake or not waiter.wake_started:
                 _wake_admission_waiter(waiter)
         for lease in self._active_lease_snapshot:
             _mark_lease_cancelled(lease)
@@ -500,7 +500,10 @@ class LeaseBroker:
                 and (lease.cancellation is None or not lease.cancellation.is_set())
                 and self._active_leases.get(lease.lease_id) is lease
             )
-            return valid and not self._termination_requested()
+            if self._termination_requested():
+                self._drain_retired_locked()
+                return False
+            return valid
         finally:
             self._condition.release()
             for assigned in wake:
@@ -553,16 +556,20 @@ class LeaseBroker:
             self._reclaim_cancelled_pin_waiters_locked()
             if completed is not None:
                 if completed not in self._pin_waiter_events:
+                    if self._termination_requested():
+                        self._drain_retired_locked()
                     return
                 del self._pin_waiter_events[completed]
                 self._pin_waiter_snapshot = tuple(self._pin_waiter_events)
             if self._pin_waiters > 0:
                 self._pin_waiters -= 1
+            if self._termination_requested():
+                self._drain_retired_locked()
         finally:
             self._condition.release()
 
     def close(self, *, deadline: float | None = None) -> None:
-        self._publish_close_request()
+        self._publish_close_request(force_wake=False)
         if deadline is None:
             self._condition.acquire()
             acquired = True
@@ -571,7 +578,7 @@ class LeaseBroker:
         if not acquired:
             raise TransportCloseTimeoutError("7709 pool broker close blocked before deadline")
         try:
-            self._drain_retired_locked()
+            self._drain_retired_locked(force_wake=False)
             self._condition.notify_all()
         finally:
             self._condition.release()
@@ -654,7 +661,10 @@ class LeaseBroker:
                 lease.state is LeaseState.ACTIVE and not lease.pinned
                 for lease in self._active_leases.values()
             )
-            return allowed and not self._termination_requested()
+            if self._termination_requested():
+                self._drain_retired_locked()
+                return False
+            return allowed
         finally:
             self._condition.release()
 
@@ -697,6 +707,11 @@ class LeaseBroker:
             self._pin_waiter_snapshot = tuple(self._pin_waiter_events)
             if self._pin_waiters > 0:
                 self._pin_waiters -= 1
+            if self._termination_requested():
+                self._drain_retired_locked()
+                return
+        if self._termination_requested():
+            self._drain_retired_locked()
 
     def _new_lease_locked(
         self,
@@ -790,6 +805,7 @@ class PoolRuntimeGuard:
         self._push_buffer: PushBuffer | None = None
         self._runtimes: list[ActorRuntime] = []
         self._runtime_snapshot: tuple[ActorRuntime, ...] = ()
+        self._fatal_handle_snapshot: tuple[ActorFatalHandle, ...] = ()
         self._fatal_error: BaseException | None = None
         self._epoch: int | None = None
         self._state = GuardState.INACTIVE
@@ -835,6 +851,7 @@ class PoolRuntimeGuard:
             self._push_buffer = push_buffer
             self._runtimes = []
             self._runtime_snapshot = ()
+            self._fatal_handle_snapshot = ()
             self._fatal_error = None
             self._epoch = broker.pool_epoch
             self._state = GuardState.ACTIVE
@@ -1065,6 +1082,19 @@ class PoolRuntimeGuard:
                 ),
                 None,
             )
+        if publication is None:
+            publication = next(
+                (
+                    (handle._runtime, handle._error)
+                    for handle in self._fatal_handle_snapshot
+                    if handle.pool_epoch == pool_epoch
+                    and handle.broker_ref() is broker
+                    and handle._published.is_set()
+                    and handle._runtime is not None
+                    and handle._error is not None
+                ),
+                None,
+            )
         if (
             publication is None
             or state not in (GuardState.ACTIVE, GuardState.SEALED)
@@ -1194,6 +1224,19 @@ class PoolRuntimeGuard:
         )
         if runtime_fatal is not None:
             return runtime_fatal
+        handle_fatal = next(
+            (
+                handle._error
+                for handle in self._fatal_handle_snapshot
+                if handle.pool_epoch == epoch
+                and handle.broker_ref() is broker
+                and handle._published.is_set()
+                and handle._error is not None
+            ),
+            None,
+        )
+        if handle_fatal is not None:
+            return handle_fatal
         if deadline is None:
             self._lock.acquire()
             acquired = True
@@ -1224,7 +1267,37 @@ class PoolRuntimeGuard:
             if broker is not self._broker or pool_epoch != self._epoch:
                 return self._fatal_error
             error = self._fatal_error
+            publication = self._failure_cell.failure
+            if (
+                error is None
+                and publication is not None
+                and self._failure_cell.pool_epoch == pool_epoch
+                and self._failure_cell.broker is broker
+            ):
+                error = publication[1]
+            if error is None:
+                error = next(
+                    (
+                        runtime.fatal_error
+                        for runtime in self._runtime_snapshot
+                        if runtime.runtime_epoch == pool_epoch and runtime.fatal_error is not None
+                    ),
+                    None,
+                )
+            if error is None:
+                error = next(
+                    (
+                        handle._error
+                        for handle in self._fatal_handle_snapshot
+                        if handle.pool_epoch == pool_epoch
+                        and handle.broker_ref() is broker
+                        and handle._published.is_set()
+                        and handle._error is not None
+                    ),
+                    None,
+                )
             if error is not None:
+                self._fatal_error = error
                 self._state = GuardState.SEALED
                 self._refresh_publication_snapshot_locked()
                 return error
@@ -1232,6 +1305,7 @@ class PoolRuntimeGuard:
             self._push_buffer = None
             self._runtimes = []
             self._runtime_snapshot = ()
+            self._fatal_handle_snapshot = ()
             self._fatal_error = None
             self._epoch = None
             self._state = GuardState.INACTIVE
@@ -1240,6 +1314,17 @@ class PoolRuntimeGuard:
             return None
         finally:
             self._lock.release()
+
+    def register_fatal_handle(self, handle: ActorFatalHandle) -> bool:
+        with self._lock:
+            accepted = (
+                self._state in (GuardState.ACTIVE, GuardState.SEALED)
+                and handle.pool_epoch == self._epoch
+                and handle.broker_ref() is self._broker
+            )
+            if accepted and all(item is not handle for item in self._fatal_handle_snapshot):
+                self._fatal_handle_snapshot = self._fatal_handle_snapshot + (handle,)
+            return accepted
 
     def cleanup_failure(self, *, deadline: float | None = None) -> BaseException | None:
         state, epoch, broker, _, _, _, failure_cell = self._publication_snapshot
@@ -1312,15 +1397,20 @@ class ActorFatalHandle:
     _runtime: ActorRuntime | None = field(default=None, compare=False)
     _error: BaseException | None = field(default=None, compare=False)
 
-    def publish(self, runtime: ActorRuntime, error: BaseException) -> None:
-        self.retire_event.set()
+    def __post_init__(self) -> None:
         guard = self.guard_ref()
-        if guard is None:
-            return
+        if guard is not None:
+            guard.register_fatal_handle(self)
+
+    def publish(self, runtime: ActorRuntime, error: BaseException) -> None:
         object.__setattr__(self, "_runtime", runtime)
         if self._error is None:
             object.__setattr__(self, "_error", error)
         self._published.set()
+        self.retire_event.set()
+        guard = self.guard_ref()
+        if guard is None:
+            return
         guard.publish_failure(
             runtime,
             error,
