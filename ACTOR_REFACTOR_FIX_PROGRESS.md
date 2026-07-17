@@ -12,10 +12,10 @@ The result document remains historical evidence only until FINAL rewrites it.
 | Baseline HEAD | `994c49b51f47255bdcd9cdc3308a5a554f37588b` |
 | Base | `71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
 | Branch | `actor-transport-refactor` |
-| Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), confirmed OPEN and draft at pushed HEAD `e455234f20cde5132628f9e3ec06a85e0c48e5da` |
+| Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), confirmed OPEN and draft at pushed HEAD `5ff6447d2acaa04ab8c406970c2a6b81e8ccd94f` |
 | Final-review correction base | `cc46e6042e60b1d70732ae813b089f9c8b572572` |
-| Latest pushed correction checkpoint | `e455234f20cde5132628f9e3ec06a85e0c48e5da`; exact CI run `29527719605` and Pages run `29527719401` passed |
-| Current local follow-up | User selected performance option 1 on 2026-07-17: preserve Actor socket ownership and record the frozen old-implementation performance failures as an approved architecture exception; finalize spec/result without resampling |
+| Latest pushed correction checkpoint | `5ff6447d2acaa04ab8c406970c2a6b81e8ccd94f`; exact CI run `29548551526` and Pages run `29548551540` passed |
+| Current local follow-up | Post-authorization control-priority correction passes 547 tests and two independent adversarial reviews; checkpoint commit/push pending |
 | Baseline worktree | User-owned modification in `ACTOR_REFACTOR_RESULT.md`; preserve and integrate, do not overwrite |
 | Superseded result | Existing `COMPLETE` claim and 183-test evidence |
 
@@ -42,6 +42,7 @@ again before FINAL evidence is accepted.
 | F05 lifecycle and shutdown | CORRECTNESS CLOSED; CHECKPOINT CANDIDATE | Runtime registration rechecks retire after append, so either abandon snapshots the runtime or the registering thread stops it itself |
 | F06 stress, performance, resources, compatibility | CLOSED WITH USER-APPROVED PERFORMANCE EXCEPTION | Exact heavy/resource/heartbeat/build/CI hard gates pass. Frozen `fifo-v2-7923287-a` remains FAIL and is fully disclosed; plan revision 1.2 authorizes the architecture exception without rerun or retrospective PASS |
 | Final-review correctness correction | COMPLETE (`a53cc09`) | 443-test correctness snapshot plus deterministic two-endpoint generation failover; exact CI and Pages passed |
+| Post-authorization control-priority correction | CHECKPOINT CANDIDATE; TWO REVIEWS CLEAN | Heartbeat admission, new TCP generation start, phase/terminal response handling, connect success and all final failure paths now linearize against business, exact cancel and STOP under the Actor control lock |
 | FINAL independent review and CI | PENDING | Two clean adversarial reviews; local matrix/build/docs and exact-HEAD CI/Pages green |
 
 ## Current Acceptance Blocker
@@ -1548,3 +1549,73 @@ or raw data is changed by this authorization checkpoint. Future performance-
 sensitive changes must use the FINAL Actor implementation as their prospective
 baseline with a rule frozen before sampling; the exception cannot be reused to
 hide a future regression.
+
+## Post-Authorization Control-Priority Correction
+
+The authorization checkpoint `5ff6447d2acaa04ab8c406970c2a6b81e8ccd94f`
+passed exact CI run `29548551526` and Pages run `29548551540`. A subsequent
+read-only adversarial review found four correctness blocker classes that the green
+matrix did not exercise:
+
+- `_schedule_heartbeat()` released `control_lock` around `heartbeat_allowed()`
+  and published an internal active ticket without rechecking business, cancel,
+  STOP, generation or interval state. A business request already pending before
+  the heartbeat claim was incorrectly left behind the heartbeat.
+- `_start_next_endpoint()` could create a socket and call `connect_ex()` after
+  an exact cancel or STOP had already won the control lock immediately before a
+  new generation attempt.
+- `_route_frame()` could complete a decoded matching response as SUCCESS after
+  an exact cancel or STOP had already won the control lock. The cancel case also
+  left a stale token in `cancel_requests`.
+- Deadline, build-error, connect-failure and request-failure completion paths
+  could publish FAILED after an exact cancel or STOP had already won, including
+  stale cancel tokens and retry state advancing after STOP.
+
+Deterministic pre-fix reproductions:
+
+- `python -m pytest tests/test_transport_actor_regressions.py::test_business_submission_wins_heartbeat_admission_race -q`
+  failed because an internal heartbeat became `active_task` while the business
+  ticket was already `pending_task`.
+- `python -m pytest tests/test_transport_actor_regressions.py::test_control_winner_prevents_new_generation_connect -q`
+  failed both cancel and STOP cases with one socket factory/`connect_ex` attempt.
+- `python -m pytest tests/test_transport_actor_regressions.py::test_control_winner_prevents_decoded_response_success -q`
+  failed both cancel and STOP cases because the ticket became SUCCESS.
+- The handshake-phase, ConnectTicket-success, terminal-failure, retry-STOP and
+  terminal-claim late-cancel tests fail the corresponding old direct phase or
+  completion paths deterministically.
+
+The local correction now:
+
+- performs a second heartbeat admission check and internal ticket publication
+  atomically under `control_lock`, without holding that lock across the Broker
+  callback;
+- claims every new TCP generation under `control_lock` against the exact active
+  ticket, STOP and exact `(runtime_epoch, request_id, lease_id)` cancel identity;
+- gives response/connect terminal completion an exclusive `terminal_claimed`
+  ownership point under `control_lock`, so earlier cancel/STOP wins and later
+  cancel is a no-op without a stale token;
+- routes deadline, build, connect and request final failure through the same
+  terminal claim, while retry uses a non-terminal phase claim before advancing;
+- tests business, business+cancel, STOP and interval-disable heartbeat winners,
+  cancel/STOP before connect, decoded terminal response, handshake phase,
+  ConnectTicket success, final failure and retry progression.
+
+The malformed-heartbeat real-loopback test and the `request_retry/cancel` and
+`request_final/cancel` parameter cases are explicitly intermediate-fix
+regressions: they protect the final claim ordering but already passed at
+`5ff6447`; they are not represented as failures of `994c49b` or `5ff6447`.
+
+Current verification:
+
+- Focused latest evidence selection: `11 passed, 100 deselected in 0.51s`.
+- Full Actor regression file: `111 passed in 3.56s`.
+- Heartbeat hard-gate rerun: `1 passed in 209.30s` after one earlier full-run
+  ratio sample of `0.989062` missed the `>0.99` threshold; the miss is retained,
+  not relabeled, and the formal revision-7 artifact remains the canonical
+  heartbeat ratio evidence at `0.998163`.
+- Stable full local suite after all edits: `547 passed in 250.14s`.
+- `python -m compileall -q src tests` and `git diff --check` pass (CRLF warnings
+  only).
+- Two fresh independent read-only reviews returned CLEAN for implementation,
+  lock order, failure/retry behavior and regression mapping. No checkpoint has
+  been created or pushed for this local correction yet.

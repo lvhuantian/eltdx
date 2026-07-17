@@ -612,11 +612,15 @@ def cancel_ticket(
 ) -> bool:
     control_token = _acquire_control_lock(runtime, deadline, "cancel")
     try:
-        if ticket.runtime_epoch != runtime.runtime_epoch or (
-            ticket is not runtime.active_task and ticket is not runtime.pending_task
+        with ticket.lock:
+            terminal_claimed = ticket.terminal_claimed
+            terminal = ticket.state in TERMINAL_REQUEST_STATES
+        if (
+            ticket.runtime_epoch != runtime.runtime_epoch
+            or terminal_claimed
+            or (ticket is not runtime.active_task and ticket is not runtime.pending_task)
         ):
-            with ticket.lock:
-                return ticket.terminal_claimed and ticket.state not in TERMINAL_REQUEST_STATES
+            return terminal_claimed and not terminal
         runtime.cancel_requests[ticket.request_id] = CancelToken(
             runtime_epoch=runtime.runtime_epoch,
             request_id=ticket.request_id,
@@ -857,8 +861,15 @@ def _advance_active_task(runtime: ActorRuntime) -> None:
     if isinstance(task, ConnectTicket):
         generation = runtime.generation
         if generation is not None and generation.state in (TcpState.CONNECTED_UNHANDSHAKEN, TcpState.READY):
-            _complete_ticket(task, RequestState.SUCCESS, connected_host=generation.endpoint.host)
-            runtime.active_task = None
+            if _claim_active_ticket_terminal(runtime, task, generation=generation):
+                _complete_ticket(
+                    task,
+                    RequestState.SUCCESS,
+                    connected_host=generation.endpoint.host,
+                    terminal_claimed=True,
+                )
+                if runtime.active_task is task:
+                    runtime.active_task = None
         elif generation is None:
             runtime.endpoint_index = 0
             runtime.endpoints_remaining = len(runtime.endpoints)
@@ -943,7 +954,28 @@ def _apply_cancel(runtime: ActorRuntime, cancel: CancelToken) -> None:
         else:
             pending = None
     if pending is not None:
-        _complete_ticket(pending, RequestState.CANCELLED, error=ConnectionClosedError("7709 request cancelled"))
+        _complete_ticket(
+            pending,
+            RequestState.CANCELLED,
+            error=ConnectionClosedError("7709 request cancelled"),
+            terminal_claimed=True,
+        )
+
+
+def _exact_cancel_for_ticket(
+    runtime: ActorRuntime,
+    ticket: ConnectTicket | RequestTicket,
+) -> CancelToken | None:
+    cancel = runtime.cancel_requests.get(ticket.request_id)
+    if cancel is None:
+        return None
+    if (
+        cancel.runtime_epoch != runtime.runtime_epoch
+        or cancel.request_id != ticket.request_id
+        or cancel.lease_id != ticket.lease_id
+    ):
+        return None
+    return cancel
 
 
 def _start_request_attempt(runtime: ActorRuntime) -> None:
@@ -951,8 +983,11 @@ def _start_request_attempt(runtime: ActorRuntime) -> None:
     if not isinstance(ticket, RequestTicket):
         return
     if time.monotonic() >= ticket.deadline:
-        _complete_ticket(ticket, RequestState.FAILED, error=ResponseTimeoutError("7709 response timed out before connect"))
-        runtime.active_task = None
+        _fail_active_task(
+            runtime,
+            ResponseTimeoutError("7709 response timed out before connect"),
+            retryable=False,
+        )
         return
     ticket.attempts += 1
     attempts_remaining = 1 if ticket.internal else max(1, _MAX_REQUEST_ATTEMPTS - ticket.attempts + 1)
@@ -982,9 +1017,7 @@ def _begin_exchange(runtime: ActorRuntime, ticket: RequestTicket, command: int, 
         request = build_command_frame(command, payload, next_msg_id)
         frame = request.to_bytes()
     except Exception as exc:
-        _complete_ticket(ticket, RequestState.FAILED, error=exc)
-        if runtime.active_task is ticket:
-            runtime.active_task = None
+        _fail_active_task(runtime, exc, retryable=False)
         return False
     generation.exchange_counter += 1
     generation.tx_bytes = frame
@@ -1014,6 +1047,8 @@ def _start_next_endpoint(runtime: ActorRuntime) -> None:
     if not isinstance(ticket, (ConnectTicket, RequestTicket)):
         return
     while runtime.endpoints and runtime.endpoints_remaining > 0:
+        if not _claim_generation_start(runtime, ticket):
+            return
         now = time.monotonic()
         budget_deadline = _attempt_budget_deadline(ticket)
         if now >= budget_deadline:
@@ -1071,6 +1106,18 @@ def _start_next_endpoint(runtime: ActorRuntime) -> None:
     if runtime.last_error is not None:
         error.__cause__ = runtime.last_error
     _fail_active_task(runtime, error, retryable=True)
+
+
+def _claim_generation_start(runtime: ActorRuntime, ticket: ConnectTicket | RequestTicket) -> bool:
+    with runtime.control_lock:
+        claimed = (
+            not runtime.stop_requested
+            and runtime.active_task is ticket
+            and _exact_cancel_for_ticket(runtime, ticket) is None
+        )
+    if not claimed:
+        _drain_control(runtime)
+    return claimed
 
 
 def _next_message_id(runtime: ActorRuntime) -> int:
@@ -1276,7 +1323,7 @@ def _claim_generation_send(
     with runtime.control_lock:
         claimed = (
             not runtime.stop_requested
-            and exchange.ticket.request_id not in runtime.cancel_requests
+            and _exact_cancel_for_ticket(runtime, exchange.ticket) is None
             and time.monotonic() < _attempt_budget_deadline(exchange.ticket)
             and runtime.generation is generation
             and runtime.active_task is exchange.ticket
@@ -1379,12 +1426,21 @@ def _route_frame(runtime: ActorRuntime, generation: TcpGeneration, received: Rec
 
     ticket = exchange.ticket
     handshake_result: object | None = None
+    heartbeat_result: object | None = None
     if exchange.handshake or ticket.command == TYPE_HANDSHAKE:
         try:
             handshake_result = parse_command_response(TYPE_HANDSHAKE, response, {})
         except ProtocolError as exc:
             _handle_wire_failure(runtime, exc, retryable=True)
             return
+    elif ticket.command == TYPE_HEARTBEAT:
+        heartbeat_result = parse_command_response(TYPE_HEARTBEAT, response, {})
+    terminal_response = not exchange.handshake or ticket.command == TYPE_HANDSHAKE
+    if terminal_response:
+        if not _claim_active_ticket_terminal(runtime, ticket, generation=generation, exchange=exchange):
+            return
+    elif not _control_allows_active_ticket(runtime, ticket, generation=generation, exchange=exchange):
+        return
     if exchange.handshake:
         runtime.last_handshake = handshake_result
         generation.active_exchange = None
@@ -1398,7 +1454,7 @@ def _route_frame(runtime: ActorRuntime, generation: TcpGeneration, received: Rec
     elif ticket.command == TYPE_HANDSHAKE:
         runtime.last_handshake = handshake_result
     elif ticket.command == TYPE_HEARTBEAT:
-        runtime.last_heartbeat = parse_command_response(TYPE_HEARTBEAT, response, {})
+        runtime.last_heartbeat = heartbeat_result
     envelope = FrameEnvelope(
         runtime_epoch=runtime.runtime_epoch,
         tcp_generation=generation.generation_id,
@@ -1415,9 +1471,51 @@ def _route_frame(runtime: ActorRuntime, generation: TcpGeneration, received: Rec
     generation.tx_bytes = b""
     generation.tx_offset = 0
     generation.state = TcpState.READY
-    _complete_ticket(ticket, RequestState.SUCCESS, result=envelope)
-    runtime.active_task = None
+    _complete_ticket(ticket, RequestState.SUCCESS, result=envelope, terminal_claimed=True)
+    if runtime.active_task is ticket:
+        runtime.active_task = None
     _wait_for_successor(runtime, ticket)
+
+
+def _control_allows_active_ticket(
+    runtime: ActorRuntime,
+    ticket: ConnectTicket | RequestTicket,
+    *,
+    generation: TcpGeneration | None = None,
+    exchange: WireExchange | None = None,
+) -> bool:
+    with runtime.control_lock:
+        allowed = (
+            not runtime.stop_requested
+            and runtime.active_task is ticket
+            and _exact_cancel_for_ticket(runtime, ticket) is None
+            and (generation is None or runtime.generation is generation)
+            and (exchange is None or (generation is not None and generation.active_exchange is exchange))
+        )
+    if not allowed:
+        _drain_control(runtime)
+    return allowed
+
+
+def _claim_active_ticket_terminal(
+    runtime: ActorRuntime,
+    ticket: ConnectTicket | RequestTicket,
+    *,
+    generation: TcpGeneration | None = None,
+    exchange: WireExchange | None = None,
+) -> bool:
+    with runtime.control_lock:
+        claimed = (
+            not runtime.stop_requested
+            and runtime.active_task is ticket
+            and _exact_cancel_for_ticket(runtime, ticket) is None
+            and (generation is None or runtime.generation is generation)
+            and (exchange is None or (generation is not None and generation.active_exchange is exchange))
+            and _claim_ticket_terminal(ticket)
+        )
+    if not claimed:
+        _drain_control(runtime)
+    return claimed
 
 
 def _wait_for_successor(runtime: ActorRuntime, ticket: RequestTicket) -> None:
@@ -1466,8 +1564,15 @@ def _finish_connect(runtime: ActorRuntime, generation: TcpGeneration) -> None:
     runtime.connected_host = generation.endpoint.host
     ticket = runtime.active_task
     if isinstance(ticket, ConnectTicket):
-        _complete_ticket(ticket, RequestState.SUCCESS, connected_host=generation.endpoint.host)
-        runtime.active_task = None
+        if _claim_active_ticket_terminal(runtime, ticket, generation=generation):
+            _complete_ticket(
+                ticket,
+                RequestState.SUCCESS,
+                connected_host=generation.endpoint.host,
+                terminal_claimed=True,
+            )
+            if runtime.active_task is ticket:
+                runtime.active_task = None
     elif isinstance(ticket, RequestTicket):
         generation.receive_drained = False
         _set_generation_interest(runtime, generation, selectors.EVENT_READ)
@@ -1546,35 +1651,51 @@ def _selector_timeout(runtime: ActorRuntime) -> float | None:
 
 
 def _schedule_heartbeat(runtime: ActorRuntime) -> None:
-    if runtime.active_task is not None:
-        return
     interval = runtime.heartbeat_interval
     generation = runtime.generation
     if interval is None or interval <= 0 or generation is None:
         return
     with runtime.control_lock:
-        if runtime.pending_task is not None or runtime.cancel_requests:
+        if (
+            runtime.stop_requested
+            or runtime.active_task is not None
+            or runtime.pending_task is not None
+            or runtime.cancel_requests
+            or runtime.generation is not generation
+            or runtime.heartbeat_interval != interval
+        ):
             return
     now = time.monotonic()
     if now < generation.last_activity_at + interval:
         return
-    if runtime.heartbeat_allowed is not None and not runtime.heartbeat_allowed():
-        generation.last_activity_at = now
-        return
+    allowed = runtime.heartbeat_allowed is None or runtime.heartbeat_allowed()
     with runtime.control_lock:
+        if runtime.generation is not generation or runtime.heartbeat_interval != interval:
+            return
+        if not allowed:
+            generation.last_activity_at = max(generation.last_activity_at, now)
+            return
+        claim_now = time.monotonic()
+        if (
+            runtime.stop_requested
+            or runtime.active_task is not None
+            or runtime.pending_task is not None
+            or runtime.cancel_requests
+            or claim_now < generation.last_activity_at + interval
+        ):
+            return
         runtime.request_id_counter += 1
-        request_id = runtime.request_id_counter
-    ticket = RequestTicket(
-        runtime_epoch=runtime.runtime_epoch,
-        lease_id=-1,
-        command=TYPE_HEARTBEAT,
-        request_payload_snapshot={},
-        deadline=time.monotonic() + runtime.request_timeout,
-        retry_safe=False,
-        request_id=request_id,
-        internal=True,
-    )
-    runtime.active_task = ticket
+        ticket = RequestTicket(
+            runtime_epoch=runtime.runtime_epoch,
+            lease_id=-1,
+            command=TYPE_HEARTBEAT,
+            request_payload_snapshot={},
+            deadline=claim_now + runtime.request_timeout,
+            retry_safe=False,
+            request_id=runtime.request_id_counter,
+            internal=True,
+        )
+        runtime.active_task = ticket
     _advance_active_task(runtime)
 
 
@@ -1586,17 +1707,9 @@ def _fail_active_task(
     sent_business: bool = False,
 ) -> None:
     ticket = runtime.active_task
-    if isinstance(ticket, ConnectTicket):
-        _complete_ticket(ticket, RequestState.FAILED, error=error)
-        runtime.active_task = None
+    if not isinstance(ticket, (ConnectTicket, RequestTicket)):
         return
     if isinstance(ticket, RequestTicket):
-        with runtime.control_lock:
-            cancel = runtime.cancel_requests.pop(ticket.request_id, None)
-        if cancel is not None:
-            _complete_ticket(ticket, RequestState.CANCELLED, error=ConnectionClosedError("7709 request cancelled"))
-            runtime.active_task = None
-            return
         can_retry = (
             retryable
             and not ticket.internal
@@ -1605,11 +1718,15 @@ def _fail_active_task(
             and (ticket.retry_safe or not sent_business)
         )
         if can_retry:
+            if not _control_allows_active_ticket(runtime, ticket):
+                return
             ticket.state = RequestState.ADMITTED
             _start_request_attempt(runtime)
             return
-        _complete_ticket(ticket, RequestState.FAILED, error=error)
-        runtime.active_task = None
+    if _claim_active_ticket_terminal(runtime, ticket):
+        _complete_ticket(ticket, RequestState.FAILED, error=error, terminal_claimed=True)
+        if runtime.active_task is ticket:
+            runtime.active_task = None
 
 
 def _complete_ticket(
@@ -1619,11 +1736,18 @@ def _complete_ticket(
     connected_host: str | None = None,
     result: object | None = None,
     error: BaseException | None = None,
+    terminal_claimed: bool = False,
 ) -> bool:
     with ticket.lock:
         if ticket.state in TERMINAL_REQUEST_STATES:
             return False
-        ticket.terminal_claimed = True
+        if terminal_claimed:
+            if not ticket.terminal_claimed:
+                return False
+        else:
+            if ticket.terminal_claimed:
+                return False
+            ticket.terminal_claimed = True
         ticket.state = state
         ticket.error = error
         ticket.completed_at = time.monotonic()
@@ -1725,7 +1849,7 @@ def _notify_submitted_ticket(
                 _claim_ticket_terminal(ticket)
                 runtime.pending_task = None
         if withdrawn:
-            _complete_ticket(ticket, RequestState.FAILED, error=exc)
+            _complete_ticket(ticket, RequestState.FAILED, error=exc, terminal_claimed=True)
 
 
 def _fail_actor_startup(runtime: ActorRuntime, error: BaseException) -> None:
@@ -1780,7 +1904,7 @@ def _finish_runtime(runtime: ActorRuntime, initial_cleanup_error: BaseException 
             if ticket is None:
                 continue
             try:
-                _complete_ticket(ticket, RequestState.CANCELLED, error=error)
+                _complete_ticket(ticket, RequestState.CANCELLED, error=error, terminal_claimed=True)
             except BaseException as exc:
                 cleanup_errors.append(exc)
         try:
@@ -1867,7 +1991,7 @@ def _first_non_push_cleanup_error(
 
 def _claim_ticket_terminal(ticket: ConnectTicket | RequestTicket) -> bool:
     with ticket.lock:
-        if ticket.state in TERMINAL_REQUEST_STATES:
+        if ticket.terminal_claimed or ticket.state in TERMINAL_REQUEST_STATES:
             return False
         ticket.terminal_claimed = True
         return True

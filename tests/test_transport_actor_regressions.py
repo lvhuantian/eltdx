@@ -14,7 +14,7 @@ from actor_support import Scripted7709Server, handshake_payload, read_request, r
 from eltdx.exceptions import ConnectionClosedError, ProtocolError, ResponseTimeoutError, UnsupportedCommandError
 from eltdx.hosts import resolve_hosts
 from eltdx.protocol.commands import parse_command_response
-from eltdx.protocol.constants import TYPE_HANDSHAKE, TYPE_SECURITY_COUNT, TYPE_SECURITY_LIST
+from eltdx.protocol.constants import TYPE_HANDSHAKE, TYPE_HEARTBEAT, TYPE_SECURITY_COUNT, TYPE_SECURITY_LIST
 from eltdx.protocol.frame import decode_response
 from eltdx.transport.actor import (
     ConnectTicket,
@@ -850,6 +850,151 @@ def test_matching_response_after_absolute_deadline_cannot_succeed() -> None:
         peer.close()
 
 
+@pytest.mark.parametrize("control", ("cancel", "stop"))
+def test_control_winner_prevents_decoded_response_success(monkeypatch, control: str) -> None:
+    endpoint = resolve_hosts(["127.0.0.1:9"])[0]
+    sock, peer = socket.socketpair()
+    sock.setblocking(False)
+    ticket = actor_module.RequestTicket(
+        1,
+        0,
+        TYPE_SECURITY_COUNT,
+        {"market": "sz"},
+        time.monotonic() + 1,
+        False,
+        request_id=1,
+    )
+    ticket.state = actor_module.RequestState.WAITING_RESPONSE
+    raw = response_bytes(7, TYPE_SECURITY_COUNT, (999).to_bytes(2, "little"))
+    generation = actor_module.TcpGeneration(1, sock, endpoint, actor_module.TcpState.READY)
+    generation.tx_bytes = b"abc"
+    generation.tx_offset = len(generation.tx_bytes)
+    generation.active_exchange = actor_module.WireExchange(
+        ticket,
+        TYPE_SECURITY_COUNT,
+        7,
+        TYPE_SECURITY_COUNT,
+        generation.tx_bytes,
+        False,
+        exchange_id=1,
+        sent_any=True,
+    )
+    generation.decoded_frames.append(
+        actor_module.ReceivedFrame(1, decode_response(raw), exchange_id=1, send_complete=True)
+    )
+    runtime = actor_module.ActorRuntime(1, (endpoint,))
+    runtime.state = RuntimeState.RUNNING
+    runtime.active_task = ticket
+    runtime.generation = generation
+    route_entered = threading.Event()
+    release_route = threading.Event()
+    original_route = actor_module._route_frame
+
+    def controlled_route(target_runtime, target_generation, received) -> None:
+        route_entered.set()
+        assert release_route.wait(timeout=2)
+        original_route(target_runtime, target_generation, received)
+
+    monkeypatch.setattr(actor_module, "_route_frame", controlled_route)
+    receiver = threading.Thread(target=actor_module._receive_generation_safely, args=(runtime, generation))
+    receiver.start()
+    try:
+        assert route_entered.wait(timeout=2)
+        if control == "cancel":
+            assert cancel_ticket(runtime, ticket)
+        else:
+            actor_module.request_actor_stop(runtime)
+    finally:
+        release_route.set()
+        receiver.join(timeout=2)
+
+    try:
+        assert not receiver.is_alive()
+        if control == "stop":
+            actor_module._finish_runtime(runtime)
+        assert ticket.state is actor_module.RequestState.CANCELLED
+        assert ticket.result is None
+        assert actor_module._exact_cancel_for_ticket(runtime, ticket) is None
+    finally:
+        if runtime.generation is not None:
+            actor_module._drop_generation(runtime, ConnectionClosedError("test cleanup"))
+        peer.close()
+
+
+@pytest.mark.parametrize("control", ("cancel", "stop"))
+def test_control_winner_prevents_handshake_phase_advance(monkeypatch, control: str) -> None:
+    endpoint = resolve_hosts(["127.0.0.1:9"])[0]
+    sock, peer = socket.socketpair()
+    sock.setblocking(False)
+    ticket = actor_module.RequestTicket(
+        1,
+        0,
+        TYPE_SECURITY_COUNT,
+        {"market": "sz"},
+        time.monotonic() + 1,
+        False,
+        request_id=1,
+    )
+    raw = response_bytes(7, TYPE_HANDSHAKE, handshake_payload())
+    generation = actor_module.TcpGeneration(1, sock, endpoint, actor_module.TcpState.HANDSHAKING)
+    generation.tx_bytes = b"abc"
+    generation.tx_offset = len(generation.tx_bytes)
+    exchange = actor_module.WireExchange(
+        ticket,
+        TYPE_HANDSHAKE,
+        7,
+        TYPE_HANDSHAKE,
+        generation.tx_bytes,
+        True,
+        exchange_id=1,
+        sent_any=True,
+    )
+    generation.active_exchange = exchange
+    generation.decoded_frames.append(
+        actor_module.ReceivedFrame(1, decode_response(raw), exchange_id=1, send_complete=True)
+    )
+    runtime = actor_module.ActorRuntime(1, (endpoint,))
+    runtime.state = RuntimeState.RUNNING
+    runtime.active_task = ticket
+    runtime.generation = generation
+    route_entered = threading.Event()
+    release_route = threading.Event()
+    original_route = actor_module._route_frame
+
+    def controlled_route(target_runtime, target_generation, received) -> None:
+        route_entered.set()
+        assert release_route.wait(timeout=2)
+        original_route(target_runtime, target_generation, received)
+
+    monkeypatch.setattr(actor_module, "_route_frame", controlled_route)
+    receiver = threading.Thread(target=actor_module._receive_generation_safely, args=(runtime, generation))
+    receiver.start()
+    try:
+        assert route_entered.wait(timeout=2)
+        if control == "cancel":
+            assert cancel_ticket(runtime, ticket)
+        else:
+            actor_module.request_actor_stop(runtime)
+    finally:
+        release_route.set()
+        receiver.join(timeout=2)
+
+    try:
+        assert not receiver.is_alive()
+        assert runtime.last_handshake is None
+        if control == "stop":
+            assert runtime.generation is generation
+            assert generation.active_exchange is exchange
+            assert not ticket.completed.is_set()
+            actor_module._finish_runtime(runtime)
+        assert ticket.state is actor_module.RequestState.CANCELLED
+        assert actor_module._exact_cancel_for_ticket(runtime, ticket) is None
+    finally:
+        if runtime.generation is not None:
+            actor_module._drop_generation(runtime, ConnectionClosedError("test cleanup"))
+        peer.close()
+
+
 def test_success_response_keeps_existing_read_interest_without_redundant_modify(monkeypatch) -> None:
     endpoint = resolve_hosts(["127.0.0.1:9"])[0]
     ticket = actor_module.RequestTicket(
@@ -1127,6 +1272,117 @@ def test_heartbeat_uses_receive_quiescence_gate() -> None:
     assert generation.active_exchange is None
 
 
+def test_business_submission_wins_heartbeat_admission_race(monkeypatch) -> None:
+    endpoint = resolve_hosts(["127.0.0.1:9"])[0]
+    generation = actor_module.TcpGeneration(1, WouldBlockSocket(), endpoint, actor_module.TcpState.READY)
+    generation.last_activity_at = 0
+    guard_entered = threading.Event()
+    release_guard = threading.Event()
+
+    def heartbeat_allowed() -> bool:
+        guard_entered.set()
+        assert release_guard.wait(timeout=2)
+        return True
+
+    runtime = actor_module.ActorRuntime(
+        1,
+        (endpoint,),
+        heartbeat_interval=1,
+        heartbeat_allowed=heartbeat_allowed,
+        request_timeout=1,
+    )
+    runtime.state = RuntimeState.RUNNING
+    runtime.generation = generation
+    advanced: list[object] = []
+    monkeypatch.setattr(actor_module, "_advance_active_task", lambda candidate: advanced.append(candidate.active_task))
+
+    scheduler = threading.Thread(target=actor_module._schedule_heartbeat, args=(runtime,))
+    scheduler.start()
+    business = None
+    try:
+        assert guard_entered.wait(timeout=2)
+        business = submit_request(
+            runtime,
+            lease_id=0,
+            command=TYPE_SECURITY_COUNT,
+            payload={"market": "sz"},
+            deadline=time.monotonic() + 1,
+            retry_safe=False,
+        )
+        assert runtime.pending_task is business
+    finally:
+        release_guard.set()
+        scheduler.join(timeout=2)
+
+    assert not scheduler.is_alive()
+    assert business is not None
+    assert runtime.active_task is None
+    assert runtime.pending_task is business
+    assert runtime.request_id_counter == business.request_id
+    assert advanced == []
+
+
+@pytest.mark.parametrize("control", ("cancel", "stop", "disable"))
+def test_control_change_wins_heartbeat_admission_race(monkeypatch, control: str) -> None:
+    endpoint = resolve_hosts(["127.0.0.1:9"])[0]
+    generation = actor_module.TcpGeneration(1, WouldBlockSocket(), endpoint, actor_module.TcpState.READY)
+    generation.last_activity_at = 0
+    guard_entered = threading.Event()
+    release_guard = threading.Event()
+
+    def heartbeat_allowed() -> bool:
+        guard_entered.set()
+        assert release_guard.wait(timeout=2)
+        return True
+
+    runtime = actor_module.ActorRuntime(
+        1,
+        (endpoint,),
+        heartbeat_interval=1,
+        heartbeat_allowed=heartbeat_allowed,
+        request_timeout=1,
+    )
+    runtime.state = RuntimeState.RUNNING
+    runtime.generation = generation
+    advanced: list[object] = []
+    monkeypatch.setattr(actor_module, "_advance_active_task", lambda candidate: advanced.append(candidate.active_task))
+
+    scheduler = threading.Thread(target=actor_module._schedule_heartbeat, args=(runtime,))
+    scheduler.start()
+    business = None
+    try:
+        assert guard_entered.wait(timeout=2)
+        if control == "cancel":
+            business = submit_request(
+                runtime,
+                lease_id=0,
+                command=TYPE_SECURITY_COUNT,
+                payload={"market": "sz"},
+                deadline=time.monotonic() + 1,
+                retry_safe=False,
+            )
+            assert cancel_ticket(runtime, business)
+        elif control == "stop":
+            actor_module.request_actor_stop(runtime)
+        else:
+            with runtime.control_lock:
+                runtime.heartbeat_interval = None
+    finally:
+        release_guard.set()
+        scheduler.join(timeout=2)
+
+    assert not scheduler.is_alive()
+    assert runtime.active_task is None
+    assert advanced == []
+    if control == "cancel":
+        assert business is not None
+        assert runtime.pending_task is business
+        assert runtime.request_id_counter == business.request_id
+        assert actor_module._exact_cancel_for_ticket(runtime, business) is not None
+    else:
+        assert runtime.request_id_counter == 0
+
+
 def test_completion_callback_exception_isolated_from_actor_runtime() -> None:
     release = threading.Event()
 
@@ -1232,6 +1488,193 @@ class StalledConnectSocket:
 class ImmediateConnectSocket(StalledConnectSocket):
     def connect_ex(self, _address) -> int:
         return 0
+
+
+@pytest.mark.parametrize("control", ("cancel", "stop"))
+def test_control_winner_prevents_new_generation_connect(monkeypatch, control: str) -> None:
+    created: list[StalledConnectSocket] = []
+
+    def factory(family: int, socktype: int, proto: int) -> StalledConnectSocket:
+        sock = StalledConnectSocket(family, socktype, proto)
+        created.append(sock)
+        return sock
+
+    start_entered = threading.Event()
+    release_start = threading.Event()
+    original_start = actor_module._start_next_endpoint
+
+    def controlled_start(runtime) -> None:
+        start_entered.set()
+        assert release_start.wait(timeout=2)
+        original_start(runtime)
+
+    monkeypatch.setattr(actor_module, "_start_next_endpoint", controlled_start)
+    runtime = start_actor(108, resolve_hosts(["127.0.0.1:9"]), socket_factory=factory)
+    ticket = submit_request(
+        runtime,
+        lease_id=0,
+        command=TYPE_SECURITY_COUNT,
+        payload={"market": "sz"},
+        deadline=time.monotonic() + 1,
+        retry_safe=False,
+    )
+    try:
+        assert start_entered.wait(timeout=2)
+        if control == "cancel":
+            assert cancel_ticket(runtime, ticket)
+        else:
+            actor_module.request_actor_stop(runtime)
+    finally:
+        release_start.set()
+
+    try:
+        with pytest.raises(ConnectionClosedError, match="cancelled|stopped"):
+            wait_ticket(ticket)
+        assert created == []
+        if control == "cancel":
+            assert runtime.state is RuntimeState.RUNNING
+        else:
+            assert runtime.stopped.wait(timeout=2)
+    finally:
+        close_actor(runtime)
+
+
+@pytest.mark.parametrize("entrypoint", ("ready", "finish_connect"))
+@pytest.mark.parametrize("control", ("cancel", "stop"))
+def test_control_winner_prevents_connect_ticket_success(entrypoint: str, control: str) -> None:
+    endpoint = resolve_hosts(["127.0.0.1:9"])[0]
+    sock, peer = socket.socketpair()
+    state = actor_module.TcpState.READY if entrypoint == "ready" else actor_module.TcpState.CONNECTING
+    generation = actor_module.TcpGeneration(1, sock, endpoint, state)
+    ticket = ConnectTicket(
+        runtime_epoch=1,
+        deadline=time.monotonic() + 1,
+        lease_id=0,
+        request_id=1,
+    )
+    runtime = actor_module.ActorRuntime(1, (endpoint,))
+    runtime.state = RuntimeState.RUNNING
+    runtime.generation = generation
+    runtime.active_task = ticket
+    try:
+        if control == "cancel":
+            assert cancel_ticket(runtime, ticket)
+        else:
+            actor_module.request_actor_stop(runtime)
+
+        if entrypoint == "ready":
+            actor_module._advance_active_task(runtime)
+        else:
+            actor_module._finish_connect(runtime, generation)
+        if control == "stop":
+            actor_module._finish_runtime(runtime)
+
+        assert ticket.state is actor_module.RequestState.CANCELLED
+        assert ticket.connected_host is None
+        assert actor_module._exact_cancel_for_ticket(runtime, ticket) is None
+    finally:
+        if runtime.generation is not None:
+            actor_module._drop_generation(runtime, ConnectionClosedError("test cleanup"))
+        peer.close()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ("request_deadline", "request_build", "request_retry", "request_final", "connect_final"),
+)
+@pytest.mark.parametrize("control", ("cancel", "stop"))
+def test_control_winner_prevents_terminal_failure(failure: str, control: str) -> None:
+    endpoint = resolve_hosts(["127.0.0.1:9"])[0]
+    runtime = actor_module.ActorRuntime(1, (endpoint,))
+    runtime.state = RuntimeState.RUNNING
+    peer = None
+    if failure == "connect_final":
+        ticket: ConnectTicket | actor_module.RequestTicket = ConnectTicket(
+            runtime_epoch=1,
+            deadline=time.monotonic() + 1,
+            lease_id=0,
+            request_id=1,
+        )
+    else:
+        ticket = actor_module.RequestTicket(
+            1,
+            0,
+            0x9999 if failure == "request_build" else TYPE_SECURITY_COUNT,
+            {"market": "sz"},
+            time.monotonic() - 1 if failure == "request_deadline" else time.monotonic() + 1,
+            False,
+            request_id=1,
+        )
+        if failure == "request_build":
+            sock, peer = socket.socketpair()
+            runtime.generation = actor_module.TcpGeneration(1, sock, endpoint, actor_module.TcpState.READY)
+        elif failure == "request_retry":
+            ticket.attempts = 1
+            ticket.state = actor_module.RequestState.WAITING_RESPONSE
+    runtime.active_task = ticket
+    try:
+        if control == "cancel":
+            assert cancel_ticket(runtime, ticket)
+        else:
+            actor_module.request_actor_stop(runtime)
+
+        if failure == "request_deadline":
+            actor_module._start_request_attempt(runtime)
+        elif failure == "request_build":
+            assert not actor_module._begin_exchange(runtime, ticket, ticket.command, handshake=False)
+        else:
+            actor_module._fail_active_task(
+                runtime,
+                ConnectionClosedError("injected failure"),
+                retryable=failure == "request_retry",
+            )
+
+        if failure == "request_retry":
+            assert ticket.attempts == 1
+            assert runtime.generation is None
+        if control == "stop":
+            assert ticket.state not in actor_module.TERMINAL_REQUEST_STATES
+            actor_module._finish_runtime(runtime)
+        assert ticket.state is actor_module.RequestState.CANCELLED
+        assert actor_module._exact_cancel_for_ticket(runtime, ticket) is None
+    finally:
+        if runtime.generation is not None:
+            actor_module._drop_generation(runtime, ConnectionClosedError("test cleanup"))
+        if peer is not None:
+            peer.close()
+
+
+def test_late_cancel_after_terminal_claim_is_noop_without_token() -> None:
+    endpoint = resolve_hosts(["127.0.0.1:9"])[0]
+    ticket = actor_module.RequestTicket(
+        1,
+        0,
+        TYPE_SECURITY_COUNT,
+        {"market": "sz"},
+        time.monotonic() + 1,
+        False,
+        request_id=1,
+    )
+    ticket.state = actor_module.RequestState.WAITING_RESPONSE
+    runtime = actor_module.ActorRuntime(1, (endpoint,))
+    runtime.state = RuntimeState.RUNNING
+    runtime.active_task = ticket
+
+    assert actor_module._claim_active_ticket_terminal(runtime, ticket)
+    assert ticket.terminal_claimed
+    assert ticket.state is actor_module.RequestState.WAITING_RESPONSE
+    assert cancel_ticket(runtime, ticket)
+    assert actor_module._exact_cancel_for_ticket(runtime, ticket) is None
+    assert runtime.active_task is ticket
+
+    assert actor_module._complete_ticket(
+        ticket,
+        actor_module.RequestState.SUCCESS,
+        result="claimed",
+        terminal_claimed=True,
+    )
+    runtime.active_task = None
+    assert wait_ticket(ticket) == "claimed"
 
 
 def test_cancel_request_during_connect_drops_generation_before_terminal() -> None:
@@ -1527,6 +1970,40 @@ def test_ready_actor_survives_request_build_errors(
             assert runtime.state is RuntimeState.RUNNING
             assert runtime.generation is generation
             assert transport.execute(TYPE_SECURITY_COUNT, {"market": "sz"}) == 202
+        finally:
+            release_server.set()
+            transport.close()
+
+
+def test_malformed_heartbeat_response_releases_owner_for_next_request() -> None:
+    release_server = threading.Event()
+
+    def malformed(conn) -> None:
+        msg_id, msg_type, _ = read_request(conn)
+        assert msg_type == TYPE_HANDSHAKE
+        conn.sendall(response_bytes(msg_id, msg_type, handshake_payload()))
+        msg_id, msg_type, _ = read_request(conn)
+        assert msg_type == TYPE_HEARTBEAT
+        conn.sendall(response_bytes(msg_id, msg_type, b"\x00"))
+
+    def healthy(conn) -> None:
+        msg_id, msg_type, _ = read_request(conn)
+        assert msg_type == TYPE_HANDSHAKE
+        conn.sendall(response_bytes(msg_id, msg_type, handshake_payload()))
+        msg_id, msg_type, _ = read_request(conn)
+        assert msg_type == TYPE_SECURITY_COUNT
+        conn.sendall(response_bytes(msg_id, msg_type, (303).to_bytes(2, "little")))
+        assert release_server.wait(timeout=2)
+
+    with Scripted7709Server([malformed, healthy]) as server:
+        transport = SocketTransport([server.host], timeout=1, heartbeat_interval=None)
+        try:
+            with pytest.raises(ProtocolError, match="invalid heartbeat payload length"):
+                transport.execute(TYPE_HEARTBEAT, {})
+            assert transport._request_lock.acquire(blocking=False)
+            transport._request_lock.release()
+            assert transport.execute(TYPE_SECURITY_COUNT, {"market": "sz"}) == 303
+            assert server.wait_for_connections(2)
         finally:
             release_server.set()
             transport.close()
