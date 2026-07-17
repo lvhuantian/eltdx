@@ -1321,6 +1321,12 @@ class PinCloseAttempt:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _PinActiveCall:
+    call_id: int
+    terminal: threading.Event = field(default_factory=_INTERNAL_EVENT, compare=False)
+
+
 class PinCompletion:
     propagate_settlement_error = True
 
@@ -1374,14 +1380,28 @@ class PinnedTransportProxy:
         self._waiter_snapshot: tuple[PinWaiter, ...] = ()
         self._close_waiters: list[PinWaiter] = []
         self._call_counter = 0
-        self._active_call: int | None = None
+        self._active_call_state: _PinActiveCall | None = None
         self._active_waiter: PinWaiter | None = None
         self._wire_call: int | None = None
         self._state = PinState.OPEN
         self._close_requested = threading.Event()
         self._close_attempt: PinCloseAttempt | None = None
-        self._published_terminal = threading.Event()
-        self._published_terminal_call: int | None = None
+
+    @property
+    def _active_call(self) -> int | None:
+        state = self._active_call_state
+        return state.call_id if state is not None else None
+
+    @_active_call.setter
+    def _active_call(self, call_id: int | None) -> None:
+        state = self._active_call_state
+        if state is not None and state.call_id == call_id:
+            return
+        self._active_call_state = _PinActiveCall(call_id) if call_id is not None else None
+
+    def _terminal_published(self) -> bool:
+        state = self._active_call_state
+        return state is not None and state.terminal.is_set()
 
     def _acquire_condition(self, deadline: float, *, closing: bool = False) -> None:
         if self._condition.acquire(timeout=max(0.0, deadline - time.monotonic())):
@@ -1658,7 +1678,7 @@ class PinnedTransportProxy:
             waiter.reserved = True
             self._waiters.append(waiter)
             self._refresh_waiter_snapshot_locked()
-            if self._published_terminal.is_set():
+            if self._terminal_published():
                 waiter.completed.set()
         finally:
             self._condition.release()
@@ -1670,7 +1690,7 @@ class PinnedTransportProxy:
                 raise
             if not woke:
                 break
-            published_wake = self._published_terminal.is_set()
+            published_wake = self._terminal_published()
             if published_wake:
                 self._settle_published_terminal(deadline)
             self._acquire_condition(deadline)
@@ -1689,7 +1709,7 @@ class PinnedTransportProxy:
                 if lease_terminal:
                     break
                 waiter.completed.clear()
-                if self._published_terminal.is_set():
+                if self._terminal_published():
                     waiter.completed.set()
             finally:
                 self._condition.release()
@@ -1885,28 +1905,23 @@ class PinnedTransportProxy:
                 pass
 
     def _publish_wire_terminal(self, call_id: int) -> None:
-        self._published_terminal_call = call_id
-        self._published_terminal.set()
+        state = self._active_call_state
+        if state is None or state.call_id != call_id:
+            return
+        state.terminal.set()
         for waiter in self._waiter_snapshot:
             waiter.completed.set()
 
     def _settle_published_terminal(self, deadline: float) -> None:
-        if not self._published_terminal.is_set():
+        state = self._active_call_state
+        if state is None or not state.terminal.is_set():
             return
-        call_id = self._published_terminal_call
-        if call_id is None:
-            return
+        call_id = state.call_id
         if not self._condition.acquire(timeout=max(0.0, deadline - time.monotonic())):
             raise ResponseTimeoutError("7709 response timed out settling pinned completion")
         self._condition.release()
         self._wire_terminal(call_id, deadline=deadline)
-        if self._active_call != call_id:
-            # A newer call may publish between the terminal transition and this clear.
-            self._published_terminal.clear()
-            if self._published_terminal_call != call_id:
-                self._published_terminal.set()
-                for waiter in self._waiter_snapshot:
-                    waiter.completed.set()
+        state.terminal.clear()
 
     def _cancel_interrupted_waiter(self, waiter: PinWaiter, deadline: float) -> None:
         waiter.cancelled.set()

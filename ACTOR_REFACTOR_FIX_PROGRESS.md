@@ -6,8 +6,9 @@
 - Branch: `actor-transport-refactor`.
 - Reopened parent HEAD: `7f8e120dbddf37197f7718f8712589184cc20df8`.
 - Draft PR: https://github.com/electkismet/eltdx/pull/12 (OPEN, draft, unmerged).
-- Status: exact correction evidence is complete; permanent result rewrite and
-  final post-evidence reviews are in progress.
+- Status: exact `48b32d6` evidence is superseded for FINAL after a later
+  deterministic stale-timeout publication blocker; the per-call correction
+  and new evidence are in progress.
 - The old `9a60e76` completion conclusion remains overturned. The green checks on
   `7f8e120` are historical and cannot validate the upcoming checkpoint.
 
@@ -96,8 +97,8 @@ for either correctness or a current failure.
 
 ## Remaining Before FINAL
 
-- Repeat final independent adversarial reviews against the exact correction
-  checkpoint and its retained evidence.
+- Freeze and push the per-call pin publication correction, then rerun exact
+  full/stress/resource/build/CI evidence and final independent reviews.
 - Replace the overturned conclusion in `ACTOR_REFACTOR_RESULT.md`, move all
   evidence there, then delete this temporary file in the FINAL commit.
 - Wait for exact FINAL HEAD CI and Pages success. Do not merge the PR.
@@ -201,10 +202,64 @@ missing, unexpected, cross-request and cross-generation count is zero.
 | `actor-lock-l03r-current-b-48b32d6.json` | `913F5CDFF61C16BEC21B9A57AD87CD49A4CE4FDFE573B4550A6C68941134E692` |
 | `actor-lock-l03r-baseline-b-9a60e769.json` | `E12E64DDEC4FAC54EE76EA79067BE617B63A8B7557C5E4D7F2B4440628C61D62` |
 
-Across nine cases, aggregate throughput ratios are 0.969577-0.995312 and all
-p50/p99 deltas pass `max(10%, 0.2ms)`. Sequential baseline/current is
-157.2195/156.4825 rps, p50 6.26395/6.29725ms and p99 7.6822/7.8308ms.
-Pool 4/concurrency 100 is 601.9305/583.618 rps, p50
-163.6542/168.9172ms and p99 177.8418/183.69225ms. These schema-2 files are
-supplemental correction-regression evidence only and are not accepted by the
-frozen schema-4 verifier.
+Across nine cases, pooled throughput ratios are 0.969600-0.995321. Sequential
+baseline/current is 157.217604/156.481948 rps; pool 4/concurrency 100 is
+601.914089/583.615987 rps. The schema-2 files contain per-run quantiles rather
+than raw latency arrays, so two-run p50/p99 values cannot be pooled. Required
+sequential and pool 4/concurrency 100 pair diagnostics pass the latency
+allowance, but pool 4/concurrency 10 pair B p99 is 21.1102/24.2162ms and exceeds
+its 2.11102ms allowance by 0.99498ms. These files are supplemental correction-
+regression evidence only and are not accepted by the frozen schema-4 verifier.
+
+## Final-Review Reopen After `166ae61`
+
+The final Actor review found a second deterministic pin publication blocker in
+the exact `48b32d6` source carried by evidence checkpoint `166ae61`. A stale
+call-1 settler can pass `_settle_published_terminal`'s first condition barrier,
+then lose `_wire_terminal(1)`'s second condition acquisition after call 2 has
+already become active and published. The timeout fallback unconditionally
+republished call 1 over call 2; the next owner then cleared the stale Event and
+left active call 2 without a terminal publication.
+
+The two behavior-only regressions were red on an exact detached `166ae61`
+worktree after applying only the tests:
+
+```text
+2 failed in 1.59s
+assert proxy._active_call is None
+E assert 2 is None
+```
+
+One test forces the old settler's second condition acquisition to expire after
+call 2 publishes; the other directly replays call 1 after call 2 publishes.
+Both therefore fail on the missing call-2 settlement rather than on a new
+implementation field. The temporary red worktree was removed after the run.
+
+The current correction replaces the shared latest-call/Event register with one
+immutable `_PinActiveCall` snapshot containing the exact call ID and its own
+Event. Active-call transition is one object-reference replacement. Actor and
+timeout publishers only set the Event in their captured exact state; an old
+state can neither replace nor clear a newer state. The Proxy retains only the
+one active state, so publication remains bounded and the Actor still acquires
+no Proxy/Broker/Pool lock.
+
+Current dirty-tree evidence after the behavior-only assertion correction:
+
+- eight success/timeout/direct-stale/before-during-after-clear/exact-old/
+  deadline cases: 20 independent pytest processes, each **8 passed**;
+- complete Pool regression file: **85 passed in 1.92s**;
+- complete lifecycle regression file: **92 passed in 7.82s**;
+- Actor/Pool core selection: **156 passed in 4.13s**;
+- frozen complete suite: **598 passed in 268.96s**. Source SHA256
+  `4AE60312C9BD979E9D1B4204398BDCDF761E1E1A09D857804061D73A76DD2C96`
+  and test SHA256
+  `A456103653C11A40104559792DA956929A1807A552091A0A860A67B84D776AAD`
+  were identical before and after the run;
+- independent Actor/nonblocking review: **CLEAN**;
+- independent Pool/pin/lifecycle review: **CLEAN** after requesting behavior-
+  only red assertions; the regressions and 20-process focused evidence were
+  rerun after that correction.
+
+The exact `48b32d6` CI, stress and supplemental A/B remain valid historical
+checkpoint evidence but cannot validate the new source. Full, stress/resource,
+build, CI and review evidence must be regenerated after the next clean commit.

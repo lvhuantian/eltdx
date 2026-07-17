@@ -715,13 +715,13 @@ def test_pin_old_terminal_settler_preserves_new_publication_before_return(monkey
     assert queued.assigned
     assert queued.completed.is_set()
     assert proxy._active_call == queued.call_id
-    assert proxy._published_terminal_call == queued.call_id
-    assert proxy._published_terminal.is_set()
+    assert proxy._active_call_state is not None
+    assert proxy._active_call_state.call_id == queued.call_id
+    assert proxy._active_call_state.terminal.is_set()
 
     monkeypatch.setattr(proxy, "_wire_terminal", real_terminal)
     proxy._settle_published_terminal(time.monotonic() + 1)
     assert proxy._active_call is None
-    assert not proxy._published_terminal.is_set()
     proxy.close()
 
 
@@ -747,8 +747,7 @@ def test_pin_old_terminal_clear_rechecks_concurrent_new_publication(publish_afte
                 super().clear()
 
     publication = ControlledClearEvent()
-    proxy._published_terminal = publication
-    proxy._active_call = 1
+    proxy._active_call_state = pool_module._PinActiveCall(1, publication)
     proxy._wire_call = 1
     proxy._publish_wire_terminal(1)
     errors: list[BaseException] = []
@@ -770,25 +769,106 @@ def test_pin_old_terminal_clear_rechecks_concurrent_new_publication(publish_afte
 
     assert not settler.is_alive()
     assert errors == []
-    assert proxy._published_terminal_call == 2
-    assert proxy._published_terminal.is_set()
+    assert proxy._active_call_state is not None
+    assert proxy._active_call_state.call_id == 2
+    assert proxy._active_call_state.terminal.is_set()
     proxy._settle_published_terminal(time.monotonic() + 1)
     assert proxy._active_call is None
-    assert not proxy._published_terminal.is_set()
     proxy.close()
 
 
 def test_pin_exact_old_terminal_publication_clears_without_replay() -> None:
     _, _, _, proxy = _new_fake_proxy(timeout=1)
     proxy._active_call = 1
+    state = proxy._active_call_state
+    assert state is not None
     proxy._wire_call = 1
     proxy._publish_wire_terminal(1)
 
     proxy._settle_published_terminal(time.monotonic() + 1)
 
     assert proxy._active_call is None
-    assert not proxy._published_terminal.is_set()
+    assert not state.terminal.is_set()
     proxy.close()
+
+
+def test_pin_stale_terminal_timeout_cannot_overwrite_newer_publication(monkeypatch) -> None:
+    broker, _, _, proxy = _new_fake_proxy(timeout=1, max_pending_requests=2)
+    first_call = proxy._admit(time.monotonic() + 1)
+    proxy._wire_call = first_call
+    queued = PinWaiter(first_call + 1, time.monotonic() + 1)
+    with proxy._condition:
+        proxy._call_counter = queued.call_id
+        proxy._waiters.append(queued)
+        proxy._refresh_waiter_snapshot_locked()
+    proxy._publish_wire_terminal(first_call)
+    old_settler_entered = threading.Event()
+    allow_old_settler = threading.Event()
+    old_settler_attempting = threading.Event()
+    real_terminal = proxy._wire_terminal
+    errors: list[BaseException] = []
+
+    def delayed_old_terminal(call_id: int, *, deadline=None) -> None:
+        old_settler_entered.set()
+        assert allow_old_settler.wait(timeout=2)
+        old_settler_attempting.set()
+        real_terminal(call_id, deadline=time.monotonic())
+
+    monkeypatch.setattr(proxy, "_wire_terminal", delayed_old_terminal)
+    stale_settler = threading.Thread(
+        target=lambda: _capture_call(
+            lambda: proxy._settle_published_terminal(time.monotonic() + 1),
+            errors,
+        )
+    )
+    stale_settler.start()
+    assert old_settler_entered.wait(timeout=2)
+
+    real_terminal(first_call, deadline=time.monotonic() + 1)
+    assert queued.assigned
+    with proxy._condition:
+        proxy._wire_call = queued.call_id
+        proxy._publish_wire_terminal(queued.call_id)
+        allow_old_settler.set()
+        assert old_settler_attempting.wait(timeout=2)
+    stale_settler.join(timeout=2)
+
+    assert not stale_settler.is_alive()
+    assert len(errors) == 1 and isinstance(errors[0], ResponseTimeoutError)
+    assert proxy._active_call == queued.call_id
+
+    monkeypatch.setattr(proxy, "_wire_terminal", real_terminal)
+    proxy._settle_published_terminal(time.monotonic() + 1)
+    assert proxy._active_call is None
+    proxy.close()
+    snapshot = broker.snapshot()
+    assert (snapshot.idle_slots, snapshot.active_leases, snapshot.pin_waiter_count) == (1, 0, 0)
+
+
+def test_pin_stale_terminal_publish_cannot_replace_newer_publication() -> None:
+    broker, _, _, proxy = _new_fake_proxy(timeout=1, max_pending_requests=2)
+    first_call = proxy._admit(time.monotonic() + 1)
+    proxy._wire_call = first_call
+    queued = PinWaiter(first_call + 1, time.monotonic() + 1)
+    with proxy._condition:
+        proxy._call_counter = queued.call_id
+        proxy._waiters.append(queued)
+        proxy._refresh_waiter_snapshot_locked()
+    proxy._publish_wire_terminal(first_call)
+    real_terminal = proxy._wire_terminal
+    real_terminal(first_call, deadline=time.monotonic() + 1)
+    with proxy._condition:
+        assert proxy._active_call == queued.call_id
+        proxy._wire_call = queued.call_id
+    proxy._publish_wire_terminal(queued.call_id)
+    proxy._publish_wire_terminal(first_call)
+
+    assert proxy._active_call == queued.call_id
+    proxy._settle_published_terminal(time.monotonic() + 1)
+    assert proxy._active_call is None
+    proxy.close()
+    snapshot = broker.snapshot()
+    assert (snapshot.idle_slots, snapshot.active_leases, snapshot.pin_waiter_count) == (1, 0, 0)
 
 
 def test_pin_published_terminal_settlement_forwards_absolute_deadline(monkeypatch) -> None:
@@ -810,7 +890,6 @@ def test_pin_published_terminal_settlement_forwards_absolute_deadline(monkeypatc
     assert observed == [(1, deadline)]
     monkeypatch.setattr(proxy, "_wire_terminal", real_terminal)
     proxy._wire_terminal(1)
-    proxy._published_terminal.clear()
     proxy.close()
 
 
