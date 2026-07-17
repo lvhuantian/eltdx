@@ -553,7 +553,7 @@ def test_terminal_hook_observes_success_before_cancel_close_and_caller_wakeup() 
 
     def completion(ticket) -> None:
         assert ticket.state.name == "SUCCESS"
-        assert not ticket.completed.is_set()
+        assert ticket.completed.is_set()
         terminal.set()
         assert publish.wait(timeout=2)
 
@@ -569,11 +569,11 @@ def test_terminal_hook_observes_success_before_cancel_close_and_caller_wakeup() 
             completion=completion,
         )
         try:
-            assert terminal.wait(timeout=2)
-            cancel_ticket(runtime, ticket)
-            request_actor_stop(runtime)
             publish.set()
             envelope = wait_ticket(ticket)
+            assert terminal.is_set()
+            cancel_ticket(runtime, ticket)
+            request_actor_stop(runtime)
             assert parse_command_response(envelope.command, envelope.response, envelope.request_payload_snapshot) == 9
         finally:
             publish.set()

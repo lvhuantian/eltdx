@@ -11,6 +11,7 @@ import pytest
 
 from actor_support import Scripted7709Server, handshake_payload, read_request, response_bytes
 from eltdx.exceptions import ConnectionClosedError, ResponseTimeoutError, TransportCloseTimeoutError
+from eltdx.hosts import resolve_hosts
 from eltdx.protocol.constants import TYPE_SECURITY_COUNT
 from eltdx.protocol.frame import ResponseFrame
 from eltdx.transport import socket as socket_module
@@ -19,6 +20,160 @@ from eltdx.transport import actor as actor_module
 from eltdx.transport import pool as pool_module
 from eltdx.transport.pool import LeaseBroker, PinCompletion, PinWaiter, PinnedTransportProxy, PooledSocketTransport
 from eltdx.transport.push import PushBuffer, PushFrame
+
+
+def test_lease_completion_returns_without_waiting_for_broker_condition() -> None:
+    broker = LeaseBroker(1, pool_size=1, max_pending_requests=1)
+    lease = broker.acquire(time.monotonic() + 1)
+    completion = pool_module.LeaseCompletion(broker, lease)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def hold_condition() -> None:
+        with broker._condition:
+            entered.set()
+            release.wait()
+
+    holder = threading.Thread(target=hold_condition)
+    holder.start()
+    assert entered.wait(timeout=2)
+    done = threading.Event()
+    caller = threading.Thread(target=lambda: (completion.publish(None), done.set()))
+    caller.start()
+    try:
+        assert done.wait(timeout=0.2)
+        assert lease.cancellation is not None and lease.cancellation.is_set()
+    finally:
+        release.set()
+        holder.join(timeout=2)
+        caller.join(timeout=2)
+    assert broker.snapshot().idle_slots == 1
+    assert broker.snapshot().active_leases == 0
+
+
+def test_duplicate_lease_publish_and_settle_reclaims_exactly_once(monkeypatch) -> None:
+    broker = LeaseBroker(1, pool_size=1, max_pending_requests=1)
+    lease = broker.acquire(time.monotonic() + 1)
+    completion = pool_module.LeaseCompletion(broker, lease)
+    release_calls = 0
+    real_release = broker.release
+
+    def count_release(*args, **kwargs):
+        nonlocal release_calls
+        release_calls += 1
+        return real_release(*args, **kwargs)
+
+    monkeypatch.setattr(broker, "release", count_release)
+    completion.publish(None)
+    completion.publish(None)
+    threads = [threading.Thread(target=completion.settle) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+    snapshot = broker.snapshot()
+    assert release_calls == 1
+    assert (snapshot.idle_slots, snapshot.active_leases) == (1, 0)
+
+
+def test_pin_completion_returns_before_proxy_condition_and_lazily_advances_fifo() -> None:
+    broker = LeaseBroker(1, pool_size=1, max_pending_requests=4)
+    lease = broker.acquire(time.monotonic() + 1, pinned=True)
+    proxy = PinnedTransportProxy(
+        broker,
+        lease,
+        socket_module.SocketTransport(["127.0.0.1:9"], timeout=1, heartbeat_interval=None),
+        PushBuffer(1),
+        timeout=1,
+    )
+    proxy._call_counter = 1
+    proxy._active_call = 1
+    proxy._wire_call = 1
+    admitted: list[object] = []
+    waiter_thread = threading.Thread(
+        target=lambda: admitted.append(proxy._admit(time.monotonic() + 1))
+    )
+    waiter_thread.start()
+    assert broker.wait_for_pin_waiters(1)
+    completion = PinCompletion(proxy, 1)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def hold_condition() -> None:
+        with proxy._condition:
+            entered.set()
+            release.wait()
+
+    holder = threading.Thread(target=hold_condition)
+    holder.start()
+    assert entered.wait(timeout=2)
+    done = threading.Event()
+    caller = threading.Thread(target=lambda: (completion.publish(None), done.set()))
+    caller.start()
+    try:
+        assert done.wait(timeout=0.2)
+    finally:
+        release.set()
+        holder.join(timeout=2)
+        caller.join(timeout=2)
+        completion.settle(None)
+        waiter_thread.join(timeout=2)
+    assert not waiter_thread.is_alive()
+    assert admitted == [2]
+    assert proxy._active_call == 2
+    proxy._wire_terminal(2)
+    proxy.close()
+
+
+def test_heartbeat_skips_broker_contention_and_actor_still_processes_stop() -> None:
+    broker = LeaseBroker(1, pool_size=1, max_pending_requests=1)
+    guard = pool_module.HeartbeatAdmissionGuard(broker)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def hold_condition() -> None:
+        with broker._condition:
+            entered.set()
+            release.wait()
+
+    holder = threading.Thread(target=hold_condition)
+    holder.start()
+    assert entered.wait(timeout=2)
+    guard_done = threading.Event()
+    guard_results: list[bool] = []
+    guard_caller = threading.Thread(
+        target=lambda: (guard_results.append(guard()), guard_done.set())
+    )
+    guard_caller.start()
+    try:
+        assert guard_done.wait(timeout=0.2)
+        assert guard_results == [False]
+        runtime = actor_module.start_actor(
+            1,
+            (),
+            heartbeat_interval=0.001,
+            heartbeat_allowed=guard,
+        )
+        tcp_socket = socket.socket()
+        generation = actor_module.TcpGeneration(
+            1,
+            tcp_socket,
+            resolve_hosts(["127.0.0.1:9"])[0],
+            actor_module.TcpState.READY,
+            last_activity_at=time.monotonic() - 1,
+        )
+        runtime.generation = generation
+        actor_module._notify_actor(runtime)
+        actor_module.request_actor_stop(runtime)
+        assert runtime.stopped.wait(timeout=0.2)
+        assert runtime.actor_thread is not None and not runtime.actor_thread.is_alive()
+    finally:
+        release.set()
+        holder.join(timeout=2)
+        guard_caller.join(timeout=2)
+        if "runtime" in locals() and not runtime.stopped.is_set():
+            actor_module.abandon_actor(runtime)
 
 
 class DelayedSetEvent:

@@ -2,30 +2,36 @@
 
 This is the permanent recovery and audit record for the eltdx 7709 Actor
 transport refactor. It explicitly supersedes the invalid COMPLETE claim at
-`994c49b` and all earlier 183-test acceptance evidence. The correction cycle is
-complete only at `SELF`, after the exact-HEAD CI and Pages checks described
-below succeed.
+`994c49b` and all earlier 183-test acceptance evidence. The later `9a60e769`
+completion claim was itself reopened on 2026-07-17 after deterministic tests
+proved that the Actor thread could still block on Pool, Broker, Proxy and
+sibling-Actor locks. This document is again in progress; COMPLETE requires a
+new exact FINAL HEAD, reviews, CI and Pages gates.
 
 ## Delivery Identity
 
 | Field | Value |
 | --- | --- |
-| Status | FINAL candidate; resolves to COMPLETE only after `SELF` exact-HEAD checks succeed |
+| Status | REOPENED at `9a60e769`; external-lock correction in progress |
 | Authoritative spec | `ACTOR_REFACTOR_PLAN.md`, revision 1.3 |
 | Spec SHA256 | `C38A3791C4C0B44677325797110BD283AB0D0580E103952C2F2DEAD6839618B2` |
 | Performance authorization spec commit | `5ff6447d2acaa04ab8c406970c2a6b81e8ccd94f` (revision 1.2) |
 | Final procedural spec commit | `e924d4d4e1d500bafa55ea314ecd23cfc042eea4` (revision 1.3) |
 | Refactor base | `71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
 | Overturned acceptance | `994c49b51f47255bdcd9cdc3308a5a554f37588b` |
-| Corrected implementation | `3287b6a775e6c9fe7a0bcecfe134fc94b6d6634d` |
-| Final evidence checkpoint | `e94f9cda179d10be9a8f49f7cbafff9e3ea7ec66` |
-| Final manifest commit | `SELF`, defined below |
+| Previous implementation checkpoint | `3287b6a775e6c9fe7a0bcecfe134fc94b6d6634d` |
+| Reopened baseline | `9a60e769160c8e146525e7d53fd5fa40dac012b9` |
+| Current external-lock correction | Uncommitted; see external checkpoint ledger |
+| Final manifest commit | PENDING; previous `SELF=9a60e769...` is overturned |
 | Branch | `actor-transport-refactor` |
 | Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), OPEN, draft, unmerged |
 | Latest evidence CI | [run 29552971634](https://github.com/electkismet/eltdx/actions/runs/29552971634), SUCCESS |
 | Latest evidence Pages | [run 29552971677](https://github.com/electkismet/eltdx/actions/runs/29552971677), strict build SUCCESS |
 
-`SELF` is the newest first-parent commit containing this manifest, with no
+The previous `SELF` rule remains historical protocol only and currently
+resolves to the overturned `9a60e769`. A later external-lock FINAL must
+re-establish it. `SELF` is the newest first-parent commit containing this
+manifest, with no
 `ACTOR_REFACTOR_FIX_PROGRESS.md`, and with trailer `Fix-Checkpoint: FINAL`:
 
 ```powershell
@@ -56,7 +62,8 @@ after they finish.
 | Revision-7/final campaign | `f7355c0`, `7923287`, `7e78bca` | Heartbeat/DNS evidence, revision-7 checks and immutable FIFO-v2 FAIL |
 | Rejected successor candidates | `29b250e`, `f0a329a`, `89d6439`, `792b3db`, `e9d2c8c`, `2a4e396` | Wake, pre-send, snapshot, diagnostic and Broker candidates rejected without favorable resampling |
 | Exception/control/final evidence | `eacbfc0`, `e455234`, `5ff6447`, `3287b6a`, `e94f9cd`, `e924d4d` | Exact heavy evidence, blocker audit, revision 1.2 authorization, control priority, exact final-source evidence and revision 1.3 manifest candidate |
-| FINAL | `SELF` | Permanent evidence, clean reviews, ledger removal, exact-HEAD verification |
+| Overturned FINAL | `9a60e76` | Reopened: Actor external-lock blocking remained |
+| External-lock correction | PENDING | Nonblocking publish/owner-settle implementation and fresh evidence |
 
 This table covers every commit from the original A00-A09 implementation and
 every correction-cycle commit from `994c49b` through `e924d4d`. All were
@@ -166,8 +173,8 @@ Intentional compatible extensions remain bounded defaults:
 | Actor business mailbox | 1 active wire ticket | 1 | deterministic control-priority and submission-gate regressions reject a second active exchange |
 | Pool admission | 3 FIFO waiters | 4 in the deterministic test; 256 by default and in heavy stress | `test_lease_broker_assigns_waiters_fifo_and_releases_exactly_once` observes waiter depths 1, 2 and 3 in order, then zero |
 | Active normal leases | 4 | `pool_size=4` | 100,000-request heavy workload records server maximum active exactly 4 and zero leases after close |
-| Push frames | 1,024 | 1,024 | exact-final heavy artifact records `max_frames_observed=1024` |
-| Push wire bytes | 28,612 | 8,388,608 | exact-final heavy artifact records `max_bytes_observed=28612` |
+| Push frames | 1,024 | 1,024 | deleted historical heavy JSON reported `max_frames_observed=1024`; fresh evidence pending |
+| Push wire bytes | 28,612 | 8,388,608 | deleted historical heavy JSON reported `max_bytes_observed=28612`; fresh evidence pending |
 | Incremental RX bytes | at most 32 | 32 in the bounded regression; 65,551 in production | 1,000-byte garbage feed asserts `max_buffer_observed <= 32` |
 | Resynchronization discard | exactly 1,000 | 1,000 in the bounded regression; 65,536 in production | the same feed reaches the configured discard boundary without retaining unbounded input |
 | Decoded-frame queue | 910 appended; 846 retained after the immediate 64-frame fairness slice | 1,024 | the 1,101-frame legal burst uses 18-byte frames and a 16,384-byte capped recv; an exact-source tracking probe observed 910/846 and the regression drains through the matching response without loss |
@@ -229,20 +236,20 @@ for the sdist and
 `0709D124B9055BC2AEBDFFB8F067DA16C522C03666F5F0866460AD19FED960A6`
 for the wheel.
 
-## Stress, Ownership, and Resources
+## Historical Stress, Ownership, and Resources
 
-Exact clean final-source command:
+Historical exact-`3287b6a` command:
 
 ```powershell
 python scripts/stress_actor_transport.py --generations 10000 --requests 100000 --pool-size 4 --concurrency 100 --close-samples 100 --heartbeat-requests 1000 --idle-seconds 0.5 --resource-rounds 8 --resource-warmup 3 --resource-generations 50 --output artifacts/actor_stress_final_3287b6a.json
 ```
 
-The Windows 11 / Python 3.12.6 process passed in 185.4s. The 736,903-byte
-artifact SHA256 is
-`224872904E29C3905C55087656B38155586BB8CFBEAEAE5F5E1333693724176F`;
-workload SHA256 is
-`F7E187E3960002FBF0194C686182C3676152EBA7C6FD68AB4BC46EDE8262E5B1`.
-It records exact implementation
+The Windows 11 / Python 3.12.6 process was recorded as passing in 185.4s. Its
+raw JSON was later deleted and is absent from Git and the external artifact
+store. The previously reported artifact/workload SHA256 values are therefore
+withdrawn as independently reproducible evidence. The values below are
+historical run output only and do not prove the current correction. The run
+recorded exact implementation
 `3287b6a775e6c9fe7a0bcecfe134fc94b6d6634d` and
 `worktree_dirty=false`.
 
@@ -289,24 +296,22 @@ Close latency over 100 samples per condition:
 All 400 loaded futures terminalized with the expected close error, every
 ticket was terminal, and all 800 retained Actor-owned resource snapshots were
 closed. Broker waiters, pin waiters and leases were zero; PushBuffer frames and
-bytes were zero and closed. An independent raw-artifact audit recomputed the
-artifact hash and reconciled every server, retry, close, heartbeat and resource
-counter without a finding.
+bytes were zero and closed. The raw file is no longer retained, so that earlier
+audit cannot be replayed from the current workspace.
 
-## Heartbeat Evidence
+## Historical Heartbeat Evidence
 
-The canonical revision-7 formal artifact SHA256 is
-`985A800AE0AD12463F9EE21018FA180AACF901FE6E63D58D9E5667E1F7761C9E`.
-It records implementation `907e3e69...` with `worktree_dirty=true`; it is the
-retained predeclared formal campaign, not an exact-final-source artifact.
+The revision-7 heartbeat JSON is no longer present in Git or the external
+artifact store. Its previously reported SHA256 is withdrawn as retained
+artifact evidence. The following values are historical output from dirty
+implementation `907e3e69...`, not current independently replayable evidence.
 It retains all 32 balanced phases, 260 configuration barriers and 131,232
 unique business responses. Timed heartbeat was `0/0`, duplicate/missing/
 unexpected/cross-request/cross-generation and generation/accept fence
 mismatches were all zero. Aggregate enabled/baseline throughput ratio was
 **0.998163**, impact 0.1837%, below the strict 1% limit.
 
-The clean exact-final-source `3287b6a` heavy artifact provides final-source
-applicability and independently produced ratio **0.998884**,
+The deleted clean `3287b6a` heavy JSON historically reported ratio **0.998884**,
 impact 0.1116%, with block ratios
 `0.998003/1.004117/1.020108/0.974237`, median block ratio `1.001060`,
 35,232 unique responses and all error/cross counters zero. It proves four idle
@@ -316,8 +321,8 @@ connection heartbeats and 32 paced heartbeats, with
 One earlier local full-suite sample measured `0.989062` and failed the strict
 `>0.99` node; it is retained as a failed sample, not reclassified. The node was
 rerun in isolation and passed in 209.30s, then the stable final local suite and
-exact CI matrix passed. The formal revision-7 artifact remains the canonical
-heartbeat acceptance record.
+exact CI matrix passed. Neither deleted JSON is a current acceptance artifact;
+the external-lock correction must produce fresh retained evidence.
 
 ## Performance Evidence
 
@@ -421,8 +426,8 @@ added. An independent scope/CI reviewer reached the same conclusion.
   terminal-ownership gaps after the performance exception. Every finding was
   reproduced, fixed and rereviewed CLEAN against `3287b6a`; implementation,
   lock order, retry/failure behavior and regression mapping are clean.
-- An independent audit of the exact final heavy artifact recomputed its SHA and
-  reconciled all server, retry, close, heartbeat and resource counters CLEAN.
+- An earlier audit of the now-deleted heavy JSON reported clean reconciliation;
+  it is historical only and cannot support the reopened correction.
 - A fresh correctness/manifest reviewer found production code CLEAN and ran
   253 key A-E regression nodes in 14.13s. Its two manifest findings (exact
   procedural-spec identity and permanent reproduction-node mapping) were fixed;

@@ -53,6 +53,8 @@ class PushBuffer:
         self._gap_pending = False
         self._closed = False
         self._error: BaseException | None = None
+        self._waiters: set[threading.Event] = set()
+        self._waiter_snapshot: tuple[threading.Event, ...] = ()
 
     @property
     def pending_count(self) -> int:
@@ -63,7 +65,11 @@ class PushBuffer:
         if frame.runtime_epoch != self.owner_epoch:
             return False
         size = frame.wire_size
-        with self._condition:
+        if not self._condition.acquire(blocking=False):
+            self._dropped_total += 1
+            self._gap_pending = True
+            return False
+        try:
             if self._closed:
                 return False
             dropped = 0
@@ -85,11 +91,14 @@ class PushBuffer:
             self._max_bytes_observed = max(self._max_bytes_observed, self._bytes)
             self._condition.notify()
             return accepted
+        finally:
+            self._condition.release()
 
     def poll(self, timeout: float | None = 0.0) -> PushFrame | None:
         deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
-        with self._condition:
-            while True:
+        waiter: threading.Event | None = None
+        while True:
+            with self._condition:
                 self._raise_gap_locked()
                 if self._frames:
                     frame = self._frames.popleft()
@@ -104,7 +113,18 @@ class PushBuffer:
                 remaining = None if deadline is None else deadline - time.monotonic()
                 if remaining is not None and remaining <= 0:
                     return None
-                self._condition.wait(remaining)
+                if waiter is None:
+                    waiter = threading.Event()
+                    self._waiters.add(waiter)
+                    self._waiter_snapshot = tuple(self._waiters)
+                else:
+                    waiter.clear()
+            waiter.wait(remaining)
+            with self._condition:
+                if waiter in self._waiters:
+                    self._waiters.remove(waiter)
+                    self._waiter_snapshot = tuple(self._waiters)
+                waiter = None
 
     def drain(self) -> list[PushFrame]:
         with self._condition:
@@ -115,6 +135,7 @@ class PushBuffer:
             return frames
 
     def close(self, error: BaseException | None = None) -> None:
+        wake: tuple[threading.Event, ...] = ()
         with self._condition:
             if self._closed:
                 return
@@ -122,7 +143,10 @@ class PushBuffer:
             self._error = error
             self._frames.clear()
             self._bytes = 0
+            wake = self._waiter_snapshot
             self._condition.notify_all()
+        for waiter in wake:
+            waiter.set()
 
     def close_before_deadline(self, deadline: float, error: BaseException | None = None) -> None:
         acquired = self._condition.acquire(timeout=max(0.0, deadline - time.monotonic()))
@@ -133,8 +157,11 @@ class PushBuffer:
         finally:
             self._condition.release()
 
-    def abandon(self) -> None:
+    def abandon(self, error: BaseException | None = None) -> None:
         self._closed = True
+        self._error = error
+        for waiter in self._waiter_snapshot:
+            waiter.set()
         acquired = self._condition.acquire(blocking=False)
         if not acquired:
             return

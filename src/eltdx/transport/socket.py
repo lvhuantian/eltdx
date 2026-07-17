@@ -66,7 +66,16 @@ class _TerminalCompletion:
         self._guard = threading.Lock()
         self._done = False
 
-    def __call__(self, ticket: object | None) -> None:
+    def publish(self, ticket: object | None) -> None:
+        callback_publish = getattr(self._callback, "publish_nonblocking", None)
+        if callback_publish is not None:
+            callback_publish(ticket)
+        if self._request_gate is not None and self._request_token is not None:
+            self._request_gate.publish_release_token(self._request_token)
+
+    publish_nonblocking = publish
+
+    def settle(self, ticket: object | None = None) -> None:
         with self._guard:
             if self._done:
                 return
@@ -77,6 +86,10 @@ class _TerminalCompletion:
         finally:
             if self._request_gate is not None and self._request_token is not None:
                 self._request_gate.release_token(self._request_token)
+
+    def __call__(self, ticket: object | None) -> None:
+        self.publish(ticket)
+        self.settle(ticket)
 
 
 class _RequestGate(IdentityGate):

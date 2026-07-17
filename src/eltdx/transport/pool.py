@@ -131,10 +131,13 @@ class LeaseBroker:
         self._idle_slots = deque(range(pool_size))
         self._waiters: deque[AdmissionWaiter] = deque()
         self._active_leases: dict[int, SlotLease] = {}
+        self._active_lease_snapshot: tuple[SlotLease, ...] = ()
+        self._waiter_snapshot: tuple[AdmissionWaiter, ...] = ()
         self._waiter_counter = 0
         self._lease_counter = 0
         self._pin_waiters = 0
         self._pin_waiter_events: dict[Any, threading.Event | None] = {}
+        self._pin_waiter_snapshot: tuple[Any, ...] = ()
         self._closed = False
 
     def acquire(self, deadline: float, *, pinned: bool = False) -> SlotLease:
@@ -175,6 +178,7 @@ class LeaseBroker:
                 completed=completed,
             )
             self._waiters.append(waiter)
+            self._waiter_snapshot = tuple(self._waiters)
             self._condition.notify_all()
         finally:
             self._condition.release()
@@ -276,6 +280,7 @@ class LeaseBroker:
                 return False
             lease.state = LeaseState.RELEASED
             del self._active_leases[lease.lease_id]
+            self._active_lease_snapshot = tuple(self._active_leases.values())
             if self._closed:
                 return True
             self._idle_slots.append(lease.slot_id)
@@ -301,6 +306,7 @@ class LeaseBroker:
                 wake.append(waiter)
                 continue
             if len(self._idle_slots) < waiter.slot_count:
+                self._waiter_snapshot = tuple(self._waiters)
                 return
             self._waiters.popleft()
             leases = tuple(
@@ -315,6 +321,7 @@ class LeaseBroker:
             waiter.assigned_lease = leases[0]
             waiter.state = AdmissionState.ASSIGNED
             wake.append(waiter)
+        self._waiter_snapshot = tuple(self._waiters)
 
     def validate(self, lease: SlotLease, *, deadline: float | None = None) -> bool:
         wake: list[AdmissionWaiter] = []
@@ -362,6 +369,7 @@ class LeaseBroker:
             self._pin_waiters += 1
             if completed is not None:
                 self._pin_waiter_events[completed] = cancelled
+                self._pin_waiter_snapshot = tuple(self._pin_waiter_events)
             self._condition.notify_all()
         finally:
             self._condition.release()
@@ -380,6 +388,7 @@ class LeaseBroker:
                 if completed not in self._pin_waiter_events:
                     return
                 del self._pin_waiter_events[completed]
+                self._pin_waiter_snapshot = tuple(self._pin_waiter_events)
             if self._pin_waiters > 0:
                 self._pin_waiters -= 1
         finally:
@@ -406,11 +415,14 @@ class LeaseBroker:
                     waiter.error = ConnectionClosedError("7709 pool closed during admission")
                     wake.append(waiter)
             self._waiters.clear()
+            self._waiter_snapshot = ()
             for lease in self._active_leases.values():
                 lease.state = LeaseState.RELEASED
             self._active_leases.clear()
+            self._active_lease_snapshot = ()
             pin_wake = tuple(self._pin_waiter_events)
             self._pin_waiter_events.clear()
+            self._pin_waiter_snapshot = ()
             self._pin_waiters = 0
         finally:
             self._condition.release()
@@ -421,12 +433,12 @@ class LeaseBroker:
 
     def abandon(self) -> None:
         self._closed = True
-        for waiter in tuple(self._waiters):
+        for waiter in self._waiter_snapshot:
             waiter.cancelled.set()
             waiter.completed.set()
-        for lease in tuple(self._active_leases.values()):
+        for lease in self._active_lease_snapshot:
             _mark_lease_cancelled(lease)
-        for completed in tuple(self._pin_waiter_events):
+        for completed in self._pin_waiter_snapshot:
             completed.set()
 
     def snapshot(self) -> BrokerSnapshot:
@@ -446,8 +458,10 @@ class LeaseBroker:
             assigned.completed.set()
         return snapshot
 
-    def allows_heartbeat(self) -> bool:
-        with self._condition:
+    def allows_heartbeat(self, *, blocking: bool = True) -> bool:
+        if not self._condition.acquire(blocking=blocking):
+            return False
+        try:
             self._reclaim_cancelled_pin_waiters_locked()
             if self._closed or self._pin_waiters:
                 return False
@@ -457,6 +471,8 @@ class LeaseBroker:
                 lease.state is LeaseState.ACTIVE and not lease.pinned
                 for lease in self._active_leases.values()
             )
+        finally:
+            self._condition.release()
 
     def wait_for_waiters(self, count: int, timeout: float = 2.0) -> bool:
         with self._condition:
@@ -476,6 +492,7 @@ class LeaseBroker:
                 continue
             lease.state = LeaseState.RELEASED
             del self._active_leases[lease_id]
+            self._active_lease_snapshot = tuple(self._active_leases.values())
             if not self._closed:
                 self._idle_slots.append(lease.slot_id)
 
@@ -484,6 +501,7 @@ class LeaseBroker:
             if cancelled is None or not cancelled.is_set():
                 continue
             del self._pin_waiter_events[completed]
+            self._pin_waiter_snapshot = tuple(self._pin_waiter_events)
             if self._pin_waiters > 0:
                 self._pin_waiters -= 1
 
@@ -503,6 +521,7 @@ class LeaseBroker:
             cancellation,
         )
         self._active_leases[lease.lease_id] = lease
+        self._active_lease_snapshot = tuple(self._active_leases.values())
         return lease
 
 
@@ -511,18 +530,31 @@ class LeaseCompletion:
         self._broker_ref = weakref.ref(broker)
         self._lease = lease
         self._deadline = deadline
+        self._settle_lock = threading.Lock()
         self._released = False
+        self._published = threading.Event()
 
-    def __call__(self, ticket: object | None) -> None:
-        if self._released:
-            return
-        self._released = True
+    def publish(self, ticket: object | None) -> None:
+        self._published.set()
+        _mark_lease_cancelled(self._lease)
+
+    publish_nonblocking = publish
+
+    def settle(self, ticket: object | None = None) -> None:
+        with self._settle_lock:
+            if self._released:
+                return
+            self._released = True
         broker = self._broker_ref()
         if broker is not None:
             try:
                 broker.release(self._lease, deadline=self._deadline)
             except BaseException:
                 _mark_lease_cancelled(self._lease)
+
+    def __call__(self, ticket: object | None) -> None:
+        self.publish(ticket)
+        self.settle(ticket)
 
 
 class HeartbeatAdmissionGuard:
@@ -532,8 +564,11 @@ class HeartbeatAdmissionGuard:
         self._broker_ref = weakref.ref(broker)
 
     def __call__(self) -> bool:
+        return self.try_allowed()
+
+    def try_allowed(self) -> bool:
         broker = self._broker_ref()
-        return broker is not None and broker.allows_heartbeat()
+        return broker is not None and broker.allows_heartbeat(blocking=False)
 
 
 class PoolRuntimeGuard:
@@ -545,9 +580,20 @@ class PoolRuntimeGuard:
         self._broker: LeaseBroker | None = None
         self._push_buffer: PushBuffer | None = None
         self._runtimes: list[ActorRuntime] = []
+        self._runtime_snapshot: tuple[ActorRuntime, ...] = ()
         self._fatal_error: BaseException | None = None
         self._epoch: int | None = None
         self._state = GuardState.INACTIVE
+        self._publication_snapshot: tuple[
+            GuardState,
+            int | None,
+            LeaseBroker | None,
+            threading.Event,
+            PushBuffer | None,
+            tuple[ActorRuntime, ...],
+        ] = (self._state, self._epoch, self._broker, self._retire_requested, self._push_buffer, ())
+        self._publish_lock = threading.Lock()
+        self._failure_publication: tuple[int, LeaseBroker, ActorRuntime, BaseException] | None = None
 
     def configure(
         self,
@@ -569,9 +615,12 @@ class PoolRuntimeGuard:
             self._broker = broker
             self._push_buffer = push_buffer
             self._runtimes = []
+            self._runtime_snapshot = ()
             self._fatal_error = None
             self._epoch = broker.pool_epoch
             self._state = GuardState.ACTIVE
+            self._failure_publication = None
+            self._refresh_publication_snapshot_locked()
         finally:
             self._lock.release()
 
@@ -632,6 +681,8 @@ class PoolRuntimeGuard:
             )
             if accepted and all(item is not runtime for item in self._runtimes):
                 self._runtimes.append(runtime)
+                self._runtime_snapshot = tuple(self._runtimes)
+                self._refresh_publication_snapshot_locked()
             if accepted and self._retire_requested.is_set():
                 accepted = False
         finally:
@@ -706,6 +757,70 @@ class PoolRuntimeGuard:
                 cleanup_errors.append(exc)
         # Pool shutdown retries any stage that missed this fatal callback's deadline.
 
+    def publish_failure(
+        self,
+        runtime: ActorRuntime,
+        error: BaseException,
+        *,
+        pool_epoch: int,
+        broker: LeaseBroker | None,
+    ) -> None:
+        state, epoch, current_broker, retire_event, push_buffer, runtimes = self._publication_snapshot
+        accepted = (
+            state in (GuardState.ACTIVE, GuardState.SEALED)
+            and epoch == pool_epoch
+            and broker is not None
+            and current_broker is broker
+        )
+        if not accepted:
+            abandon_actor(runtime)
+            return
+        if not self._publish_lock.acquire(blocking=False):
+            abandon_actor(runtime)
+            return
+        try:
+            state, epoch, current_broker, retire_event, push_buffer, runtimes = self._publication_snapshot
+            if (
+                state not in (GuardState.ACTIVE, GuardState.SEALED)
+                or epoch != pool_epoch
+                or current_broker is not broker
+            ):
+                abandon_actor(runtime)
+                return
+            if self._failure_publication is None:
+                self._failure_publication = (pool_epoch, broker, runtime, error)
+        finally:
+            self._publish_lock.release()
+        retire_event.set()
+        broker.abandon()
+        if push_buffer is not None:
+            push_buffer.abandon(error)
+        if all(item is not runtime for item in runtimes):
+            runtimes = runtimes + (runtime,)
+        for item in runtimes:
+            abandon_actor(item)
+
+    def settle_published_failure(
+        self,
+        *,
+        pool_epoch: int,
+        broker: LeaseBroker | None,
+        deadline: float | None = None,
+    ) -> None:
+        publication = self._failure_publication
+        if publication is None:
+            return
+        published_epoch, published_broker, runtime, error = publication
+        if published_epoch != pool_epoch or published_broker is not broker:
+            return
+        self.fail(
+            runtime,
+            error,
+            pool_epoch=pool_epoch,
+            broker=broker,
+            deadline=deadline,
+        )
+
     def seal(
         self,
         *,
@@ -730,6 +845,7 @@ class PoolRuntimeGuard:
                 return False
             self._retire_requested.set()
             self._state = GuardState.SEALED
+            self._refresh_publication_snapshot_locked()
             return True
         finally:
             self._lock.release()
@@ -794,6 +910,18 @@ class PoolRuntimeGuard:
                 pass
 
     def failure(self, *, deadline: float | None = None) -> BaseException | None:
+        publication = self._failure_publication
+        state, epoch, broker, _, _, _ = self._publication_snapshot
+        published = (
+            publication[3]
+            if publication is not None
+            and publication[0] == epoch
+            and publication[1] is broker
+            and state in (GuardState.ACTIVE, GuardState.SEALED)
+            else None
+        )
+        if published is not None:
+            return published
         if deadline is None:
             self._lock.acquire()
             acquired = True
@@ -802,7 +930,7 @@ class PoolRuntimeGuard:
         if not acquired:
             raise TransportCloseTimeoutError("7709 pool runtime guard inspection blocked before deadline")
         try:
-            return self._fatal_error
+            return self._fatal_error or published
         finally:
             self._lock.release()
 
@@ -826,16 +954,29 @@ class PoolRuntimeGuard:
             error = self._fatal_error
             if error is not None:
                 self._state = GuardState.SEALED
+                self._refresh_publication_snapshot_locked()
                 return error
             self._broker = None
             self._push_buffer = None
             self._runtimes = []
+            self._runtime_snapshot = ()
             self._fatal_error = None
             self._epoch = None
             self._state = GuardState.INACTIVE
+            self._refresh_publication_snapshot_locked()
             return None
         finally:
             self._lock.release()
+
+    def _refresh_publication_snapshot_locked(self) -> None:
+        self._publication_snapshot = (
+            self._state,
+            self._epoch,
+            self._broker,
+            self._retire_requested,
+            self._push_buffer,
+            self._runtime_snapshot,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -844,20 +985,47 @@ class ActorFatalHandle:
     pool_epoch: int
     broker_ref: weakref.ReferenceType[LeaseBroker]
     retire_event: threading.Event
+    _published: threading.Event = field(default_factory=threading.Event, compare=False)
+    _runtime: ActorRuntime | None = field(default=None, compare=False)
+    _error: BaseException | None = field(default=None, compare=False)
 
-    def __call__(self, runtime: ActorRuntime, error: BaseException) -> None:
+    def publish(self, runtime: ActorRuntime, error: BaseException) -> None:
         self.retire_event.set()
         guard = self.guard_ref()
         if guard is None:
-            request_actor_stop(runtime)
+            return
+        object.__setattr__(self, "_runtime", runtime)
+        if self._error is None:
+            object.__setattr__(self, "_error", error)
+        self._published.set()
+        guard.publish_failure(
+            runtime,
+            error,
+            pool_epoch=self.pool_epoch,
+            broker=self.broker_ref(),
+        )
+
+    publish_nonblocking = publish
+
+    def settle(self, runtime: ActorRuntime | None = None, *, deadline: float | None = None) -> None:
+        if not self._published.is_set():
+            return
+        runtime = runtime or self._runtime
+        error = self._error
+        guard = self.guard_ref()
+        if runtime is None or error is None or guard is None:
             return
         guard.fail(
             runtime,
             error,
             pool_epoch=self.pool_epoch,
             broker=self.broker_ref(),
-            deadline=getattr(error, "_eltdx_deadline", None),
+            deadline=deadline if deadline is not None else getattr(error, "_eltdx_deadline", None),
         )
+
+    def __call__(self, runtime: ActorRuntime, error: BaseException) -> None:
+        self.publish(runtime, error)
+        self.settle(runtime)
 
 
 @dataclass(frozen=True, slots=True)
@@ -971,23 +1139,35 @@ class PinCloseAttempt:
 
 
 class PinCompletion:
-    def __init__(self, proxy: PinnedTransportProxy, call_id: int) -> None:
+    def __init__(self, proxy: PinnedTransportProxy, call_id: int, deadline: float | None = None) -> None:
         self._proxy: PinnedTransportProxy | None = proxy
         self._call_id = call_id
-        self._lock = threading.Lock()
+        self._deadline = deadline
+        self._settle_lock = threading.Lock()
         self._done = False
 
-    def __call__(self, ticket: object | None) -> None:
-        with self._lock:
-            if self._done:
-                return
-            self._done = True
+    def publish(self, ticket: object | None) -> None:
+        if self._done:
+            return
+        self._done = True
         proxy = self._proxy
-        try:
-            if proxy is not None:
-                proxy._wire_terminal(self._call_id)
-        finally:
-            self._proxy = None
+        if proxy is not None:
+            proxy._publish_wire_terminal(self._call_id)
+
+    publish_nonblocking = publish
+
+    def settle(self, ticket: object | None = None) -> None:
+        with self._settle_lock:
+            proxy = self._proxy
+            try:
+                if proxy is not None:
+                    proxy._wire_terminal(self._call_id, deadline=self._deadline)
+            finally:
+                self._proxy = None
+
+    def __call__(self, ticket: object | None) -> None:
+        self.publish(ticket)
+        self.settle(ticket)
 
 
 class PinnedTransportProxy:
@@ -1015,6 +1195,8 @@ class PinnedTransportProxy:
         self._state = PinState.OPEN
         self._close_requested = threading.Event()
         self._close_attempt: PinCloseAttempt | None = None
+        self._published_terminal = threading.Event()
+        self._published_terminal_call: int | None = None
 
     def _acquire_condition(self, deadline: float, *, closing: bool = False) -> None:
         if self._condition.acquire(timeout=max(0.0, deadline - time.monotonic())):
@@ -1047,7 +1229,7 @@ class PinnedTransportProxy:
         deadline = time.monotonic() + self._timeout
         call_id = self._admit(deadline)
         try:
-            completion = PinCompletion(self, call_id)
+            completion = PinCompletion(self, call_id, deadline)
         except BaseException:
             self._wire_terminal(call_id)
             raise
@@ -1066,7 +1248,7 @@ class PinnedTransportProxy:
         deadline = time.monotonic() + self._timeout
         call_id = self._admit(deadline)
         try:
-            completion = PinCompletion(self, call_id)
+            completion = PinCompletion(self, call_id, deadline)
         except BaseException:
             self._wire_terminal(call_id)
             raise
@@ -1104,6 +1286,7 @@ class PinnedTransportProxy:
     def close(self) -> None:
         deadline = time.monotonic() + min(1.0, self._timeout)
         self._close_requested.set()
+        self._settle_published_terminal(deadline)
         self._acquire_condition(deadline, closing=True)
         try:
             if self._state is PinState.CLOSED:
@@ -1266,6 +1449,7 @@ class PinnedTransportProxy:
             raise ConnectionClosedError("pinned transport lease is no longer valid")
 
     def _admit(self, deadline: float) -> int:
+        self._settle_published_terminal(deadline)
         self._reap_cancelled_active(deadline)
         lease_valid = self._broker.validate(self._lease, deadline=deadline)
         self._acquire_condition(deadline)
@@ -1423,8 +1607,15 @@ class PinnedTransportProxy:
                     pass
             candidate.completed.set()
 
-    def _wire_terminal(self, call_id: int) -> None:
-        self._condition.acquire()
+    def _wire_terminal(self, call_id: int, *, deadline: float | None = None) -> None:
+        if deadline is None:
+            self._condition.acquire()
+            acquired = True
+        else:
+            acquired = self._condition.acquire(timeout=max(0.0, deadline - time.monotonic()))
+        if not acquired:
+            self._publish_wire_terminal(call_id)
+            raise ResponseTimeoutError("7709 response timed out settling pinned completion")
         wake: list[PinWaiter] = []
         release_failed_lease = False
         try:
@@ -1479,6 +1670,23 @@ class PinnedTransportProxy:
                 self._release_failed_lease(deadline=time.monotonic())
             except BaseException:
                 pass
+
+    def _publish_wire_terminal(self, call_id: int) -> None:
+        self._published_terminal_call = call_id
+        self._published_terminal.set()
+
+    def _settle_published_terminal(self, deadline: float) -> None:
+        if not self._published_terminal.is_set():
+            return
+        call_id = self._published_terminal_call
+        if call_id is None:
+            return
+        if not self._condition.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            raise ResponseTimeoutError("7709 response timed out settling pinned completion")
+        self._condition.release()
+        self._wire_terminal(call_id)
+        if self._active_call != call_id:
+            self._published_terminal.clear()
 
     def _cancel_interrupted_waiter(self, waiter: PinWaiter, deadline: float) -> None:
         waiter.cancelled.set()

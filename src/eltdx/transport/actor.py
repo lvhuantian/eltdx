@@ -53,6 +53,8 @@ class IdentityGate:
         self._state_lock = threading.RLock()
         self._owner: object | None = None
         self._waiters: deque[_IdentityWaiter] = deque()
+        self._waiter_snapshot: tuple[_IdentityWaiter, ...] = ()
+        self._published_release: object | None = None
         self._compat = threading.local()
 
     def _state_is_owned(self) -> bool:
@@ -115,6 +117,7 @@ class IdentityGate:
             if not state_acquired:
                 return False
             try:
+                self._apply_published_release_locked()
                 if self._owner is None and not self._waiters:
                     self._owner = token
                     return True
@@ -122,6 +125,7 @@ class IdentityGate:
                     return False
                 waiter = _IdentityWaiter(token, deadline)
                 self._waiters.append(waiter)
+                self._waiter_snapshot = tuple(self._waiters)
             finally:
                 self._release_state()
                 state_acquired = False
@@ -142,6 +146,7 @@ class IdentityGate:
                 if not state_acquired:
                     state_acquired = self._acquire_state(None, uninterruptible=True)
                 try:
+                    self._apply_published_release_locked()
                     if waiter.granted and self._owner is token:
                         return True
                     if waiter.terminal:
@@ -162,6 +167,7 @@ class IdentityGate:
             self._waiters.remove(waiter)
         except ValueError:
             pass
+        self._waiter_snapshot = tuple(self._waiters)
 
     def _handoff_locked(self, token: object) -> bool:
         if self._owner is not token:
@@ -188,6 +194,7 @@ class IdentityGate:
                 self._owner = None
                 continue
             break
+        self._waiter_snapshot = tuple(self._waiters)
         return True
 
     def _withdraw_waiter(self, waiter: _IdentityWaiter, *, abandon_owner: bool) -> None:
@@ -206,10 +213,31 @@ class IdentityGate:
     def release_token(self, token: object) -> bool:
         self._acquire_state(None, uninterruptible=True)
         try:
+            self._apply_published_release_locked()
             released = self._handoff_locked(token)
         finally:
             self._release_state()
         return released
+
+    def publish_release_token(self, token: object) -> None:
+        if self._state_lock.acquire(blocking=False):
+            try:
+                self._apply_published_release_locked()
+                self._handoff_locked(token)
+            finally:
+                self._state_lock.release()
+            return
+        self._published_release = token
+        for waiter in self._waiter_snapshot:
+            waiter.event.set()
+
+    def _apply_published_release_locked(self) -> None:
+        token = self._published_release
+        if token is None:
+            return
+        self._published_release = None
+        if self._owner is token:
+            self._handoff_locked(token)
 
     def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
         token = object()
@@ -288,6 +316,7 @@ class ConnectTicket:
     completed_at: float | None = None
     completion_error: BaseException | None = None
     terminal_claimed: bool = False
+    completion_settled: bool = False
     completed: threading.Event = field(default_factory=threading.Event)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -312,6 +341,7 @@ class RequestTicket:
     completed_at: float | None = None
     completion_error: BaseException | None = None
     terminal_claimed: bool = False
+    completion_settled: bool = False
     completed: threading.Event = field(default_factory=threading.Event)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -415,6 +445,7 @@ class ActorRuntime:
     request_timeout: float = 8.0
     owns_push_buffer: bool = True
     fatal_callback: Callable[[ActorRuntime, BaseException], None] | None = None
+    fatal_settled: bool = False
     successor_grace: float = 0.0
     terminal_yield: bool = False
     control_lock: IdentityGate = field(default_factory=IdentityGate)
@@ -531,6 +562,7 @@ def start_actor(
         request_actor_stop(runtime)
         raise ActorStartupError("7709 Actor failed to start", runtime)
     if runtime.fatal_error is not None:
+        _settle_fatal(runtime, deadline=time.monotonic() + max(0.0, startup_timeout))
         raise ActorStartupError("7709 Actor failed during startup", runtime) from runtime.fatal_error
     return runtime
 
@@ -646,6 +678,7 @@ def wait_ticket(ticket: ConnectTicket | RequestTicket) -> Any:
         else:
             stage = "Actor completion"
         raise ResponseTimeoutError(f"7709 response timed out during {stage}")
+    _settle_ticket_completion(ticket)
     if ticket.state is RequestState.SUCCESS and ticket.completed_at is not None and ticket.completed_at > ticket.deadline:
         raise ResponseTimeoutError("7709 response timed out during Actor completion")
     if ticket.error is not None:
@@ -692,6 +725,8 @@ def _acquire_control_lock(
 
 def close_actor(runtime: ActorRuntime, timeout: float = 1.0) -> None:
     deadline = time.monotonic() + max(0.0, timeout)
+    if runtime.stopped.is_set() and runtime.fatal_error is not None:
+        _settle_fatal(runtime, deadline=deadline)
     control_token = _acquire_control_lock(runtime, deadline, "close inspection")
     try:
         failed_before_close = runtime.fatal_error is not None or runtime.state in (
@@ -729,8 +764,11 @@ def abandon_actor(runtime: ActorRuntime) -> None:
     """Best-effort non-blocking finalizer callback for one exact runtime."""
 
     runtime.stop_requested = True
+    writer = runtime.wake_writer
+    if writer is None:
+        return
     try:
-        _notify_actor(runtime, runtime.wake_writer)
+        _notify_actor(runtime, writer)
     except BaseException:
         pass
 
@@ -754,7 +792,6 @@ def actor_snapshot(runtime: ActorRuntime) -> ActorSnapshot:
 
 
 def _run_actor(runtime: ActorRuntime) -> None:
-    fatal_callback_error: BaseException | None = None
     try:
         selector = runtime.selector_factory()
         with runtime.control_lock:
@@ -815,13 +852,9 @@ def _run_actor(runtime: ActorRuntime) -> None:
             runtime.fatal_error = exc
             runtime.last_error = exc
             runtime.state = RuntimeState.FAILED
-        if runtime.fatal_callback is not None:
-            try:
-                runtime.fatal_callback(runtime, exc)
-            except BaseException as callback_error:
-                fatal_callback_error = callback_error
+        _publish_fatal(runtime, exc)
     finally:
-        _finish_runtime(runtime, fatal_callback_error)
+        _finish_runtime(runtime)
 
 
 def _advance_wake_only_batch(runtime: ActorRuntime, *, wake_seen: bool, tcp_seen: bool) -> None:
@@ -1668,7 +1701,9 @@ def _schedule_heartbeat(runtime: ActorRuntime) -> None:
     now = time.monotonic()
     if now < generation.last_activity_at + interval:
         return
-    allowed = runtime.heartbeat_allowed is None or runtime.heartbeat_allowed()
+    heartbeat_allowed = runtime.heartbeat_allowed
+    try_allowed = getattr(heartbeat_allowed, "try_allowed", None)
+    allowed = heartbeat_allowed is None or (try_allowed is not None and try_allowed())
     with runtime.control_lock:
         if runtime.generation is not generation or runtime.heartbeat_interval != interval:
             return
@@ -1755,16 +1790,70 @@ def _complete_ticket(
             ticket.connected_host = connected_host
         else:
             ticket.result = result
-    try:
-        if ticket.completion is not None:
-            try:
-                ticket.completion(ticket)
-            except Exception as exc:
-                with ticket.lock:
-                    ticket.completion_error = exc
-    finally:
-        ticket.completed.set()
+    completion = ticket.completion
+    publish = getattr(completion, "publish_nonblocking", None)
+    if publish is not None:
+        try:
+            publish(ticket)
+        except Exception as exc:
+            with ticket.lock:
+                ticket.completion_error = exc
+    ticket.completed.set()
     return True
+
+
+def _settle_ticket_completion(ticket: ConnectTicket | RequestTicket) -> None:
+    with ticket.lock:
+        if ticket.completion_settled:
+            return
+        ticket.completion_settled = True
+        completion = ticket.completion
+    if completion is None:
+        return
+    settle = getattr(completion, "settle", None)
+    callback = settle if settle is not None else completion
+    try:
+        callback(ticket)
+    except Exception as exc:
+        with ticket.lock:
+            if ticket.completion_error is None:
+                ticket.completion_error = exc
+
+
+def _publish_fatal(runtime: ActorRuntime, error: BaseException) -> None:
+    callback = runtime.fatal_callback
+    if callback is None:
+        return
+    publish = getattr(callback, "publish_nonblocking", None)
+    if publish is None:
+        return
+    try:
+        publish(runtime, error)
+    except BaseException as exc:
+        with runtime.control_lock:
+            if runtime.cleanup_error is None:
+                runtime.cleanup_error = exc
+            elif runtime.cleanup_error is runtime.push_cleanup_error and runtime.deferred_cleanup_error is None:
+                runtime.deferred_cleanup_error = exc
+
+
+def _settle_fatal(runtime: ActorRuntime, *, deadline: float | None = None) -> None:
+    callback = runtime.fatal_callback
+    with runtime.control_lock:
+        if runtime.fatal_settled:
+            return
+        runtime.fatal_settled = True
+        error = runtime.fatal_error
+    if callback is None or error is None:
+        return
+    settle = getattr(callback, "settle", None)
+    owned = settle if settle is not None else callback
+    try:
+        owned(runtime, deadline=deadline) if settle is not None else owned(runtime, error)
+    except BaseException as exc:
+        with runtime.control_lock:
+            if runtime.cleanup_error is None:
+                runtime.cleanup_error = exc
 
 
 def _drop_generation(runtime: ActorRuntime, reason: BaseException | None) -> None:
@@ -1865,9 +1954,10 @@ def _fail_actor_startup(runtime: ActorRuntime, error: BaseException) -> None:
         except BaseException as exc:
             cleanup_errors.append(exc)
             push_cleanup_error = exc
-    if runtime.fatal_callback is not None:
+    callback = runtime.fatal_callback
+    if callback is not None:
         try:
-            runtime.fatal_callback(runtime, error)
+            callback(runtime, error)
         except BaseException as exc:
             cleanup_errors.append(exc)
     with runtime.control_lock:
@@ -1954,11 +2044,8 @@ def _finish_runtime(runtime: ActorRuntime, initial_cleanup_error: BaseException 
                     runtime.last_error = cleanup_errors[0]
                     notify_cleanup_failure = True
                 runtime.cleanup_error = cleanup_errors[0]
-        if notify_cleanup_failure and runtime.fatal_callback is not None:
-            try:
-                runtime.fatal_callback(runtime, cleanup_errors[0])
-            except BaseException as exc:
-                cleanup_errors.append(exc)
+        if notify_cleanup_failure:
+            _publish_fatal(runtime, cleanup_errors[0])
         with runtime.control_lock:
             runtime.push_cleanup_error = push_cleanup_error
             runtime.deferred_cleanup_error = _first_non_push_cleanup_error(cleanup_errors, push_cleanup_error)

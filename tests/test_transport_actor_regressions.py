@@ -1272,6 +1272,31 @@ def test_heartbeat_uses_receive_quiescence_gate() -> None:
     assert generation.active_exchange is None
 
 
+def test_actor_never_calls_untrusted_blocking_heartbeat_callable() -> None:
+    endpoint = resolve_hosts(["127.0.0.1:9"])[0]
+    generation = actor_module.TcpGeneration(1, WouldBlockSocket(), endpoint, actor_module.TcpState.READY)
+    generation.last_activity_at = 0
+    called = threading.Event()
+
+    def blocking_callable() -> bool:
+        called.set()
+        raise AssertionError("Actor called an untrusted heartbeat predicate")
+
+    runtime = actor_module.ActorRuntime(
+        1,
+        (endpoint,),
+        heartbeat_interval=1,
+        heartbeat_allowed=blocking_callable,
+        request_timeout=1,
+    )
+    runtime.generation = generation
+
+    actor_module._schedule_heartbeat(runtime)
+
+    assert not called.is_set()
+    assert runtime.active_task is None
+
+
 def test_business_submission_wins_heartbeat_admission_race(monkeypatch) -> None:
     endpoint = resolve_hosts(["127.0.0.1:9"])[0]
     generation = actor_module.TcpGeneration(1, WouldBlockSocket(), endpoint, actor_module.TcpState.READY)
@@ -1279,16 +1304,17 @@ def test_business_submission_wins_heartbeat_admission_race(monkeypatch) -> None:
     guard_entered = threading.Event()
     release_guard = threading.Event()
 
-    def heartbeat_allowed() -> bool:
-        guard_entered.set()
-        assert release_guard.wait(timeout=2)
-        return True
+    class HeartbeatGuard:
+        def try_allowed(self) -> bool:
+            guard_entered.set()
+            assert release_guard.wait(timeout=2)
+            return True
 
     runtime = actor_module.ActorRuntime(
         1,
         (endpoint,),
         heartbeat_interval=1,
-        heartbeat_allowed=heartbeat_allowed,
+        heartbeat_allowed=HeartbeatGuard(),
         request_timeout=1,
     )
     runtime.state = RuntimeState.RUNNING
@@ -1330,16 +1356,17 @@ def test_control_change_wins_heartbeat_admission_race(monkeypatch, control: str)
     guard_entered = threading.Event()
     release_guard = threading.Event()
 
-    def heartbeat_allowed() -> bool:
-        guard_entered.set()
-        assert release_guard.wait(timeout=2)
-        return True
+    class HeartbeatGuard:
+        def try_allowed(self) -> bool:
+            guard_entered.set()
+            assert release_guard.wait(timeout=2)
+            return True
 
     runtime = actor_module.ActorRuntime(
         1,
         (endpoint,),
         heartbeat_interval=1,
-        heartbeat_allowed=heartbeat_allowed,
+        heartbeat_allowed=HeartbeatGuard(),
         request_timeout=1,
     )
     runtime.state = RuntimeState.RUNNING
@@ -2883,6 +2910,84 @@ def test_terminal_completion_publishes_while_request_gate_condition_is_held() ->
         completer.join(timeout=2)
 
 
+def test_terminal_completion_defers_exact_gate_release_while_state_lock_is_held() -> None:
+    gate = socket_module._RequestGate()
+    token = object()
+    assert gate.acquire_token(token, time.monotonic() + 1)
+    completion = socket_module._TerminalCompletion(request_gate=gate, request_token=token)
+    ticket = actor_module.RequestTicket(
+        runtime_epoch=1,
+        lease_id=1,
+        command=TYPE_SECURITY_COUNT,
+        request_payload_snapshot={},
+        deadline=time.monotonic() + 1,
+        retry_safe=True,
+        completion=completion,
+    )
+    held = threading.Event()
+    release = threading.Event()
+
+    def hold_state_lock() -> None:
+        with gate._state_lock:
+            held.set()
+            release.wait()
+
+    holder = threading.Thread(target=hold_state_lock)
+    holder.start()
+    assert held.wait(timeout=2)
+    completer = threading.Thread(
+        target=actor_module._complete_ticket,
+        args=(ticket, actor_module.RequestState.SUCCESS),
+    )
+    completer.start()
+    try:
+        assert ticket.completed.wait(timeout=0.2)
+        assert gate._published_release is token
+    finally:
+        release.set()
+        holder.join(timeout=2)
+        completer.join(timeout=2)
+    assert gate.acquire(blocking=False)
+    gate.release()
+
+
+def test_unmatched_frame_drops_with_gap_instead_of_waiting_for_push_lock() -> None:
+    push = PushBuffer(1)
+    runtime = actor_module.ActorRuntime(1, (), push_buffer=push)
+    response = decode_response(response_bytes(7, TYPE_SECURITY_COUNT, b"push"))
+    generation = actor_module.TcpGeneration(
+        1,
+        object(),
+        resolve_hosts(["127.0.0.1:9"])[0],
+        actor_module.TcpState.READY,
+    )
+    received = actor_module.ReceivedFrame(1, response)
+    held = threading.Event()
+    release = threading.Event()
+
+    def hold_push_lock() -> None:
+        with push._condition:
+            held.set()
+            release.wait()
+
+    holder = threading.Thread(target=hold_push_lock)
+    holder.start()
+    assert held.wait(timeout=2)
+    done = threading.Event()
+    router = threading.Thread(
+        target=lambda: (actor_module._route_frame(runtime, generation, received), done.set())
+    )
+    router.start()
+    try:
+        assert done.wait(timeout=0.2)
+    finally:
+        release.set()
+        holder.join(timeout=2)
+        router.join(timeout=2)
+    snapshot = push.snapshot()
+    assert snapshot.dropped_total == 1 and snapshot.gap_pending
+
+
 def test_pending_cancel_claims_terminal_before_completion_submits_next_ticket() -> None:
     endpoint = resolve_hosts(["127.0.0.1:9"])[0]
     runtime = actor_module.ActorRuntime(1, (endpoint,))
@@ -2913,6 +3018,7 @@ def test_pending_cancel_claims_terminal_before_completion_submits_next_ticket() 
     )
     runtime.pending_task = pending
     actor_module._apply_cancel(runtime, actor_module.CancelToken(1, 1, 0))
+    actor_module._settle_ticket_completion(pending)
 
     assert pending.state is actor_module.RequestState.CANCELLED
     assert pending.completion_error is None

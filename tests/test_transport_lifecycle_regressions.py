@@ -27,6 +27,74 @@ from eltdx.transport.push import PushBuffer
 from eltdx.transport.socket import SocketTransport
 
 
+class FatalSelector:
+    def __init__(self, trigger: threading.Event) -> None:
+        self._trigger = trigger
+
+    def register(self, *_args, **_kwargs) -> None:
+        return None
+
+    def select(self, _timeout=None):
+        self._trigger.wait()
+        raise RuntimeError("fatal selector injection")
+
+    def unregister(self, *_args, **_kwargs) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
+@pytest.mark.parametrize("blocked_owner", ("guard", "broker", "push", "sibling"))
+def test_failed_actor_exits_without_waiting_for_pool_owned_locks(blocked_owner: str) -> None:
+    broker = LeaseBroker(1, pool_size=2, max_pending_requests=2)
+    push = PushBuffer(1)
+    guard = PoolRuntimeGuard()
+    sibling = ActorRuntime(1, ())
+    held = threading.Event()
+    release = threading.Event()
+    trigger = threading.Event()
+    retire = threading.Event()
+    guard.configure(broker, push, retire_event=retire)
+    assert guard.add_runtime(sibling, pool_epoch=1, broker=broker)
+    registration = RuntimeRegistration(weakref.ref(guard), 1, weakref.ref(broker), retire)
+    handle = pool_module.ActorFatalHandle(weakref.ref(guard), 1, weakref.ref(broker), retire)
+    runtime = actor_module.start_actor(
+        1,
+        (),
+        selector_factory=lambda: FatalSelector(trigger),
+        fatal_callback=handle,
+        candidate_callback=registration,
+    )
+
+    def hold_lock() -> None:
+        if blocked_owner == "guard":
+            manager = guard._lock
+        elif blocked_owner == "broker":
+            manager = broker._condition
+        elif blocked_owner == "push":
+            manager = push._condition
+        else:
+            manager = sibling.control_lock
+        with manager:
+            held.set()
+            release.wait()
+
+    holder = threading.Thread(target=hold_lock)
+    holder.start()
+    assert held.wait(timeout=2)
+    try:
+        trigger.set()
+        assert runtime.stopped.wait(timeout=0.2)
+        assert runtime.actor_thread is not None and not runtime.actor_thread.is_alive()
+        assert retire.is_set()
+    finally:
+        release.set()
+        trigger.set()
+        holder.join(timeout=2)
+        runtime.stopped.wait(timeout=2)
+
+
 def test_runtime_registered_after_pool_fatal_is_stopped_immediately(monkeypatch) -> None:
     stopped = []
     monkeypatch.setattr(pool_module, "request_actor_stop", stopped.append)
@@ -1629,19 +1697,11 @@ def test_actor_fatal_callback_failure_survives_push_cleanup_retry(monkeypatch) -
     with pytest.raises(TransportCloseTimeoutError, match="resource cleanup failed"):
         transport.close()
     buffers[0].allow_close = True
-    with pytest.raises(TransportCloseTimeoutError, match="resource cleanup failed"):
-        transport.close()
+    transport.close()
 
     assert buffers[0].snapshot().closed
-    assert isinstance(candidate.cleanup_error, LookupError)
-    assert str(candidate.cleanup_error) == "actor fatal callback injection"
+    assert candidate.cleanup_error is None
     assert candidate.push_cleanup_error is None
-    assert candidate.state is RuntimeState.FAILED_CLOSING
-
-    with candidate.control_lock:
-        candidate.cleanup_error = None
-        candidate.deferred_cleanup_error = None
-    transport.close()
     assert candidate.state is RuntimeState.FAILED_CLOSED
 
 
