@@ -6,7 +6,8 @@
 - Branch: `actor-transport-refactor`.
 - Reopened parent HEAD: `7f8e120dbddf37197f7718f8712589184cc20df8`.
 - Draft PR: https://github.com/electkismet/eltdx/pull/12 (OPEN, draft, unmerged).
-- Status: checkpoint implementation and local verification complete; FINAL evidence is still in progress.
+- Status: second checkpoint implementation and local verification complete;
+  FINAL evidence is still in progress.
 - The old `9a60e76` completion conclusion remains overturned. The green checks on
   `7f8e120` are historical and cannot validate the upcoming checkpoint.
 
@@ -45,6 +46,49 @@
 - Test evidence independent review: CLEAN after inspecting the latest
   regressions and the frozen-worktree full result.
 
+## Performance-Gate Correction After `8b685420`
+
+The first quick A/B attempt is invalid and retained only as an audit failure:
+the baseline ran workload hash `4ddd761f...` while current ran `b09ab713...`.
+Those files were renamed with an `invalid-` prefix and are not used for ratios.
+
+A corrected same-workload A/B used the current frozen benchmark script
+(`b09ab713...`) with only `ELTDX_SOURCE_ROOT` changed. Both roots were clean and
+exact (`9a60e769` baseline, `8b685420` current), all 90,000 responses were
+unique, and all error/cross-request/cross-generation counters were zero. It
+found a real admission performance blocker:
+
+- concurrency 1 throughput ratio: about `0.990` for pool size 1;
+- concurrency 100 ratios: `0.611`, `0.537`, and `0.365` for pool sizes 1, 2,
+  and 4;
+- root cause: every successful request published the same Lease completion
+  more than once, and every publication set every queued waiter Event.
+
+The retained raw diagnostic files are
+`pre-fix-performance-fail-baseline-a-9a60e769.json` and
+`pre-fix-performance-fail-current-a-8b685420.json`. They motivate the fix but
+are not FINAL performance evidence.
+
+The current dirty checkpoint adds a durable lease-release pulse, condition-
+owned clear/reclaim/assign/recheck, first-live FIFO baton handoff, cancelled/
+expired waiter skipping, and successful Lease publication idempotency. Actor
+publication remains lock-free with respect to Broker/Pool/Proxy ownership.
+
+Current correction evidence:
+
+- Six controlled pulse/live-head/idempotency regressions: 20 independent
+  processes, each `6 passed`.
+- Pool files: `90 passed in 1.99s`.
+- Nine-file transport matrix: `382 passed in 16.09s`.
+- Frozen complete suite: `592 passed in 271.35s`.
+- Dirty-tree performance probe: pool 1/concurrency 1 `159.585 rps`; pool
+  4/concurrency 100 `607.188 rps`; all 6,000 responses unique and both cross
+  counters zero.
+- Independent Actor nonblocking review: CLEAN.
+- Independent Pool/FIFO review and its separate adversarial child review:
+  CLEAN, including batch FIFO, duplicate/late completion, 16 concurrent
+  publishers, and publish/close/abandon probes.
+
 One earlier full-suite run (`585 passed, 1 failed`) is explicitly invalid: it
 started while `_fail_actor_startup` was being edited and observed a transient
 `settle=None` call that was removed before the frozen run. It is not evidence
@@ -52,7 +96,7 @@ for either correctness or a current failure.
 
 ## Remaining Before FINAL
 
-- Create and push the non-interactive reopened-review checkpoint commit.
+- Create and push the non-interactive performance-correction checkpoint commit.
 - Confirm local, remote branch, and PR HEAD identities and inspect exact-head CI/Pages.
 - Run the fresh exact-checkpoint performance campaign against baseline
   `9a60e769`, plus 10,000 generations, 100,000 unique requests, two-server

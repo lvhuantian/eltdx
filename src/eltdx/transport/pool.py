@@ -142,6 +142,7 @@ class LeaseBroker:
         self._active_leases: dict[int, SlotLease] = {}
         self._active_lease_snapshot: tuple[SlotLease, ...] = ()
         self._waiter_snapshot: tuple[AdmissionWaiter, ...] = ()
+        self._lease_release_published = _INTERNAL_EVENT()
         self._waiter_counter = 0
         self._lease_counter = 0
         self._pin_waiters = 0
@@ -217,6 +218,7 @@ class LeaseBroker:
                         self._condition.release()
                 for assigned in wake:
                     assigned.completed.set()
+                self._wake_next_live_waiter()
                 raise
             if not woke:
                 break
@@ -224,6 +226,7 @@ class LeaseBroker:
             acquired = self._condition.acquire(timeout=max(0.0, deadline - time.monotonic()))
             if not acquired:
                 waiter.cancelled.set()
+                self._wake_next_live_waiter()
                 raise ResponseTimeoutError("7709 response timed out during queue")
             try:
                 self._assign_waiters_locked(recheck_wake)
@@ -260,6 +263,7 @@ class LeaseBroker:
         acquired = self._condition.acquire(timeout=max(0.0, deadline - time.monotonic()))
         if not acquired:
             waiter.cancelled.set()
+            self._wake_next_live_waiter()
             raise ResponseTimeoutError("7709 response timed out during queue")
         try:
             self._assign_waiters_locked(final_wake)
@@ -323,6 +327,13 @@ class LeaseBroker:
         return True
 
     def _assign_waiters_locked(self, wake: list[AdmissionWaiter]) -> None:
+        while True:
+            self._lease_release_published.clear()
+            self._assign_waiters_pass_locked(wake)
+            if not self._lease_release_published.is_set():
+                return
+
+    def _assign_waiters_pass_locked(self, wake: list[AdmissionWaiter]) -> None:
         self._reclaim_cancelled_leases_locked()
         self._reclaim_cancelled_pin_waiters_locked()
         while self._waiters:
@@ -447,6 +458,7 @@ class LeaseBroker:
                     wake.append(waiter)
             self._waiters.clear()
             self._waiter_snapshot = ()
+            self._lease_release_published.clear()
             for lease in self._active_leases.values():
                 lease.state = LeaseState.RELEASED
             self._active_leases.clear()
@@ -474,8 +486,22 @@ class LeaseBroker:
 
     def publish_lease_release(self, lease: SlotLease) -> None:
         _mark_lease_cancelled(lease)
+        self._lease_release_published.set()
+        self._wake_next_live_waiter()
+
+    def _wake_next_live_waiter(self) -> None:
+        if self._closed:
+            return
+        now = time.monotonic()
         for waiter in self._waiter_snapshot:
-            waiter.completed.set()
+            if (
+                waiter.state is AdmissionState.WAITING
+                and waiter.pool_epoch == self.pool_epoch
+                and not waiter.cancelled.is_set()
+                and now < waiter.deadline
+            ):
+                waiter.completed.set()
+                return
 
     def snapshot(self) -> BrokerSnapshot:
         wake: list[AdmissionWaiter] = []
@@ -569,16 +595,24 @@ class LeaseCompletion:
         self._lease = lease
         self._deadline = deadline
         self._settle_lock = threading.Lock()
+        self._publish_lock = threading.Lock()
         self._released = False
         self._published = threading.Event()
 
     def publish(self, ticket: object | None) -> None:
-        self._published.set()
-        broker = self._broker_ref()
-        if broker is None:
-            _mark_lease_cancelled(self._lease)
-        else:
-            broker.publish_lease_release(self._lease)
+        if self._published.is_set() or not self._publish_lock.acquire(blocking=False):
+            return
+        try:
+            if self._published.is_set():
+                return
+            broker = self._broker_ref()
+            if broker is None:
+                _mark_lease_cancelled(self._lease)
+            else:
+                broker.publish_lease_release(self._lease)
+            self._published.set()
+        finally:
+            self._publish_lock.release()
 
     publish_nonblocking = publish
 

@@ -51,6 +51,247 @@ def test_lease_completion_returns_without_waiting_for_broker_condition() -> None
     assert broker.snapshot().active_leases == 0
 
 
+def test_lease_release_publication_wakes_only_first_live_fifo_waiter() -> None:
+    class CountingEvent(threading.Event):
+        def __init__(self) -> None:
+            super().__init__()
+            self.set_calls = 0
+
+        def set(self) -> None:
+            self.set_calls += 1
+            super().set()
+
+    broker = LeaseBroker(1, pool_size=1, max_pending_requests=128)
+    lease = broker.acquire(time.monotonic() + 1)
+    deadline = time.monotonic() + 1
+    cancelled = pool_module.AdmissionWaiter(1, 1, deadline, False, completed=CountingEvent())
+    cancelled.cancelled.set()
+    expired = pool_module.AdmissionWaiter(
+        1,
+        2,
+        time.monotonic() - 1,
+        False,
+        completed=CountingEvent(),
+    )
+    rejected = pool_module.AdmissionWaiter(1, 3, deadline, False, completed=CountingEvent())
+    rejected.state = pool_module.AdmissionState.REJECTED
+    live = [
+        pool_module.AdmissionWaiter(
+            1,
+            index + 4,
+            deadline,
+            False,
+            completed=CountingEvent(),
+        )
+        for index in range(100)
+    ]
+    broker._waiter_snapshot = (cancelled, expired, rejected, *live)
+
+    broker.publish_lease_release(lease)
+
+    events = [waiter.completed for waiter in (cancelled, expired, rejected, *live)]
+    assert [event.set_calls for event in events] == [0, 0, 0, 1, *([0] * 99)]
+    assert broker.snapshot().idle_slots == 1
+    broker.close()
+
+
+def test_terminal_lease_publication_is_exactly_once(monkeypatch) -> None:
+    broker = LeaseBroker(1, pool_size=1, max_pending_requests=1)
+    lease = broker.acquire(time.monotonic() + 1)
+    lease_completion = pool_module.LeaseCompletion(broker, lease)
+    terminal = socket_module._TerminalCompletion(lease_completion)
+    real_publish = broker.publish_lease_release
+    published: list[pool_module.SlotLease] = []
+
+    def record_publish(item) -> None:
+        published.append(item)
+        real_publish(item)
+
+    monkeypatch.setattr(broker, "publish_lease_release", record_publish)
+
+    terminal.publish(None)
+    terminal.settle(None)
+
+    assert published == [lease]
+    assert broker.snapshot().idle_slots == 1
+    broker.close()
+
+
+def test_lease_release_publication_skips_cancelled_stale_head() -> None:
+    broker = LeaseBroker(1, pool_size=1, max_pending_requests=2)
+    lease = broker.acquire(time.monotonic() + 1)
+    deadline = time.monotonic() + 1
+    acquired: list[pool_module.SlotLease] = []
+    live_thread = threading.Thread(target=lambda: acquired.append(broker.acquire(deadline)))
+    live_thread.start()
+    assert broker.wait_for_waiters(1)
+
+    with broker._condition:
+        stale = pool_module.AdmissionWaiter(1, 999, deadline, False)
+        stale.cancelled.set()
+        broker._waiters.appendleft(stale)
+        broker._waiter_snapshot = tuple(broker._waiters)
+        live = broker._waiters[1]
+
+        broker.publish_lease_release(lease)
+
+        assert not stale.completed.is_set()
+        assert live.completed.is_set()
+
+    live_thread.join(timeout=0.2)
+    assert not live_thread.is_alive()
+    assert len(acquired) == 1
+    assert broker.release(acquired[0])
+    broker.close()
+
+
+def test_lease_release_pulse_survives_stale_snapshot_during_assignment(monkeypatch) -> None:
+    broker = LeaseBroker(1, pool_size=2, max_pending_requests=2)
+    first_lease, second_lease = broker.acquire_many(2, time.monotonic() + 1)
+    deadline = time.monotonic() + 1
+    orphan = pool_module.AdmissionWaiter(1, 999, deadline, False)
+    with broker._condition:
+        broker._waiters.append(orphan)
+        broker._waiter_snapshot = tuple(broker._waiters)
+
+    acquired: list[pool_module.SlotLease] = []
+    live_thread = threading.Thread(target=lambda: acquired.append(broker.acquire(deadline)))
+    live_thread.start()
+    assert broker.wait_for_waiters(2)
+
+    real_new_lease = broker._new_lease_locked
+    assignment_paused = threading.Event()
+    allow_assignment = threading.Event()
+    pause_once = True
+
+    def gated_new_lease(*args, **kwargs):
+        nonlocal pause_once
+        if pause_once:
+            pause_once = False
+            assignment_paused.set()
+            assert allow_assignment.wait(timeout=2)
+        return real_new_lease(*args, **kwargs)
+
+    monkeypatch.setattr(broker, "_new_lease_locked", gated_new_lease)
+    release_result: list[bool] = []
+    releaser = threading.Thread(target=lambda: release_result.append(broker.release(first_lease)))
+    releaser.start()
+    assert assignment_paused.wait(timeout=2)
+
+    broker.publish_lease_release(second_lease)
+    allow_assignment.set()
+    releaser.join(timeout=0.5)
+    live_thread.join(timeout=0.5)
+
+    assert not releaser.is_alive() and not live_thread.is_alive()
+    assert release_result == [True]
+    assert len(acquired) == 1
+    assert orphan.assigned_lease is not None
+    assert broker.release(orphan.assigned_lease)
+    assert broker.release(acquired[0])
+    broker.close()
+
+
+def test_failed_lease_publication_can_retry_before_becoming_idempotent(monkeypatch) -> None:
+    broker = LeaseBroker(1, pool_size=1, max_pending_requests=1)
+    lease = broker.acquire(time.monotonic() + 1)
+    completion = pool_module.LeaseCompletion(broker, lease)
+    real_publish = broker.publish_lease_release
+    calls = 0
+
+    def fail_once(item) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("publication failed")
+        real_publish(item)
+
+    monkeypatch.setattr(broker, "publish_lease_release", fail_once)
+
+    with pytest.raises(RuntimeError, match="publication failed"):
+        completion.publish(None)
+    completion.publish(None)
+    completion.settle(None)
+
+    assert calls == 2
+    assert broker.snapshot().idle_slots == 1
+    broker.close()
+
+
+def test_interrupted_head_hands_publication_baton_to_live_successor(monkeypatch) -> None:
+    broker = LeaseBroker(1, pool_size=1, max_pending_requests=2)
+    lease = broker.acquire(time.monotonic() + 1)
+    real_waiter = pool_module.AdmissionWaiter
+    created = 0
+    interrupted = threading.Event()
+
+    class InterruptEvent(threading.Event):
+        def wait(self, timeout=None) -> bool:
+            super().wait(timeout)
+            interrupted.set()
+            raise KeyboardInterrupt
+
+    def waiter_factory(*args, **kwargs):
+        nonlocal created
+        created += 1
+        if created == 1:
+            kwargs["completed"] = InterruptEvent()
+        return real_waiter(*args, **kwargs)
+
+    monkeypatch.setattr(pool_module, "AdmissionWaiter", waiter_factory)
+    results: list[tuple[str, object]] = []
+    first_done = threading.Event()
+
+    def acquire(label: str, deadline: float) -> None:
+        try:
+            results.append((label, broker.acquire(deadline)))
+        except BaseException as exc:
+            results.append((label, exc))
+        finally:
+            if label == "first":
+                first_done.set()
+
+    first = threading.Thread(target=acquire, args=("first", time.monotonic() + 0.15))
+    second = threading.Thread(target=acquire, args=("second", time.monotonic() + 1))
+    first.start()
+    assert broker.wait_for_waiters(1)
+    second.start()
+    assert broker.wait_for_waiters(2)
+    with broker._condition:
+        second_waiter = broker._waiters[1]
+
+    condition_held = threading.Event()
+    release_condition = threading.Event()
+
+    def hold_condition() -> None:
+        with broker._condition:
+            condition_held.set()
+            release_condition.wait(timeout=2)
+
+    holder = threading.Thread(target=hold_condition)
+    holder.start()
+    assert condition_held.wait(timeout=2)
+    try:
+        broker.publish_lease_release(lease)
+        assert interrupted.wait(timeout=0.2)
+        assert first_done.wait(timeout=0.4)
+        assert second_waiter.completed.is_set()
+    finally:
+        release_condition.set()
+        holder.join(timeout=2)
+
+    first.join(timeout=0.2)
+    second.join(timeout=0.5)
+    assert not first.is_alive() and not second.is_alive()
+    assert len(results) == 2
+    first_result = next(item for label, item in results if label == "first")
+    second_result = next(item for label, item in results if label == "second")
+    assert isinstance(first_result, KeyboardInterrupt)
+    assert isinstance(second_result, pool_module.SlotLease)
+    assert broker.release(second_result)
+    broker.close()
+
+
 def test_deferred_lease_completion_wakes_existing_capacity_waiter() -> None:
     broker = LeaseBroker(1, pool_size=1, max_pending_requests=1)
     lease = broker.acquire(time.monotonic() + 1)
