@@ -44,7 +44,14 @@ class PushDropPublication:
 
 
 class PushBuffer:
-    def __init__(self, owner_epoch: int, *, max_frames: int = 1024, max_bytes: int = 8 * 1024 * 1024) -> None:
+    def __init__(
+        self,
+        owner_epoch: int,
+        *,
+        max_frames: int = 1024,
+        max_bytes: int = 8 * 1024 * 1024,
+        retire_event: threading.Event | None = None,
+    ) -> None:
         if max_frames <= 0:
             raise ValueError("max_frames must be > 0")
         if max_bytes <= 0:
@@ -63,12 +70,34 @@ class PushBuffer:
         self._drop_publications: tuple[PushDropPublication, ...] = (
             self._fallback_drop_publication,
         )
+        self._retire_event = retire_event or threading.Event()
+        self._close_requested = threading.Event()
         self._closed = False
+        self._drained = False
         self._error: BaseException | None = None
         self._close_published = False
         self._published_error: BaseException | None = None
         self._waiters: set[threading.Event] = set()
         self._waiter_snapshot: tuple[threading.Event, ...] = ()
+
+    def bind_retire_event(self, retire_event: threading.Event) -> None:
+        previous = self._retire_event
+        self._retire_event = retire_event
+        if previous is not retire_event and previous.is_set():
+            retire_event.set()
+
+    def _termination_requested(self) -> bool:
+        return self._retire_event.is_set() or self._close_requested.is_set()
+
+    def _drain_closed_locked(self, error: BaseException | None = None) -> None:
+        self._sync_drop_publications_locked()
+        if self._error is None:
+            self._error = error or self._published_error
+        self._frames.clear()
+        self._bytes = 0
+        self._closed = True
+        self._drained = True
+        self._condition.notify_all()
 
     @property
     def pending_count(self) -> int:
@@ -89,8 +118,15 @@ class PushBuffer:
         if not acquired:
             return False
         try:
+            if self._termination_requested():
+                return False
             if all(item is not publication for item in self._drop_publications):
                 self._drop_publications = self._drop_publications + (publication,)
+            if self._termination_requested():
+                self._drop_publications = tuple(
+                    item for item in self._drop_publications if item is not publication
+                )
+                return False
             return True
         finally:
             self._condition.release()
@@ -101,18 +137,21 @@ class PushBuffer:
         *,
         drop_publication: PushDropPublication | None = None,
     ) -> bool:
-        if frame.runtime_epoch != self.owner_epoch:
+        if frame.runtime_epoch != self.owner_epoch or self._termination_requested():
             return False
         size = frame.wire_size
         if not self._condition.acquire(blocking=False):
+            if self._termination_requested():
+                return False
             publication = drop_publication or self._fallback_drop_publication
             publication.total += 1
             for waiter in self._waiter_snapshot:
                 waiter.set()
             return False
+        wake: tuple[threading.Event, ...] = ()
         try:
             self._sync_drop_publications_locked()
-            if self._closed:
+            if self._termination_requested() or self._closed:
                 return False
             dropped = 0
             while self._frames and (len(self._frames) >= self.max_frames or self._bytes + size > self.max_bytes):
@@ -126,60 +165,80 @@ class PushBuffer:
                 self._frames.append(frame)
                 self._bytes += size
                 accepted = True
+            if self._termination_requested():
+                if accepted:
+                    try:
+                        self._frames.remove(frame)
+                    except ValueError:
+                        pass
+                    else:
+                        self._bytes -= size
+                return False
             if dropped:
                 self._dropped_total += dropped
             self._max_frames_observed = max(self._max_frames_observed, len(self._frames))
             self._max_bytes_observed = max(self._max_bytes_observed, self._bytes)
             self._condition.notify()
-            return accepted
+            wake = self._waiter_snapshot
         finally:
             self._condition.release()
+        for waiter in wake:
+            waiter.set()
+        return accepted
 
     def poll(self, timeout: float | None = 0.0) -> PushFrame | None:
         deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
         waiter: threading.Event | None = None
-        while True:
-            with self._condition:
-                self._raise_gap_locked()
-                if self._frames:
-                    frame = self._frames.popleft()
-                    self._bytes -= frame.wire_size
-                    return frame
-                if self._close_published:
+        try:
+            while True:
+                with self._condition:
+                    self._sync_drop_publications_locked()
                     if self._published_error is not None:
                         raise self._published_error
-                    return None
-                if self._closed:
                     if self._error is not None:
                         raise self._error
-                    return None
-                if timeout is not None and timeout <= 0:
-                    return None
-                remaining = None if deadline is None else deadline - time.monotonic()
-                if remaining is not None and remaining <= 0:
-                    return None
-                if waiter is None:
-                    waiter = threading.Event()
-                    self._waiters.add(waiter)
-                    self._waiter_snapshot = tuple(self._waiters)
+                    if self._retire_event.is_set():
+                        return None
+                    self._raise_gap_locked()
+                    if self._frames:
+                        frame = self._frames.popleft()
+                        self._bytes -= frame.wire_size
+                        return frame
+                    if self._close_published or self._closed or self._close_requested.is_set():
+                        return None
+                    if timeout is not None and timeout <= 0:
+                        return None
+                    remaining = None if deadline is None else deadline - time.monotonic()
+                    if remaining is not None and remaining <= 0:
+                        return None
+                    if waiter is None:
+                        waiter = threading.Event()
+                        self._waiters.add(waiter)
+                        self._waiter_snapshot = tuple(self._waiters)
+                    waiter.clear()
                     self._sync_drop_publications_locked()
                     if (
                         self._dropped_total > self._reported_dropped_total
+                        or self._termination_requested()
                         or self._close_published
                         or self._closed
+                        or bool(self._frames)
                     ):
                         waiter.set()
-                else:
-                    waiter.clear()
-            waiter.wait(remaining)
-            with self._condition:
-                if waiter in self._waiters:
-                    self._waiters.remove(waiter)
+                waiter.wait(remaining)
+        finally:
+            if waiter is not None:
+                with self._condition:
+                    self._waiters.discard(waiter)
                     self._waiter_snapshot = tuple(self._waiters)
-                waiter = None
 
     def drain(self) -> list[PushFrame]:
         with self._condition:
+            if self._published_error is not None:
+                raise self._published_error
+            if self._retire_event.is_set():
+                self._drain_closed_locked()
+                return []
             self._raise_gap_locked()
             frames = list(self._frames)
             self._frames.clear()
@@ -187,27 +246,22 @@ class PushBuffer:
             return frames
 
     def close(self, error: BaseException | None = None) -> None:
-        wake: tuple[threading.Event, ...] = ()
+        self.publish_close(error)
         with self._condition:
-            self._sync_drop_publications_locked()
-            self._closed = True
-            if self._error is None:
-                self._error = error or self._published_error
-            self._frames.clear()
-            self._bytes = 0
-            wake = self._waiter_snapshot
-            self._condition.notify_all()
-        for waiter in wake:
+            self._drain_closed_locked(error)
+        for waiter in self._waiter_snapshot:
             waiter.set()
 
     def publish_close(self, error: BaseException | None = None) -> None:
         if self._published_error is None:
             self._published_error = error
         self._close_published = True
+        self._close_requested.set()
         for waiter in self._waiter_snapshot:
             waiter.set()
 
     def close_before_deadline(self, deadline: float, error: BaseException | None = None) -> None:
+        self.publish_close(error)
         acquired = self._condition.acquire(timeout=max(0.0, deadline - time.monotonic()))
         if not acquired:
             raise TransportCloseTimeoutError("7709 push buffer close blocked before deadline")
@@ -217,18 +271,12 @@ class PushBuffer:
             self._condition.release()
 
     def abandon(self, error: BaseException | None = None) -> None:
-        self._error = error
-        self._closed = True
-        for waiter in self._waiter_snapshot:
-            waiter.set()
+        self.publish_close(error)
         acquired = self._condition.acquire(blocking=False)
         if not acquired:
             return
         try:
-            self._sync_drop_publications_locked()
-            self._frames.clear()
-            self._bytes = 0
-            self._condition.notify_all()
+            self._drain_closed_locked(error)
         finally:
             self._condition.release()
 
