@@ -5,14 +5,16 @@ transport refactor. It explicitly supersedes the invalid COMPLETE claim at
 `994c49b` and all earlier 183-test acceptance evidence. The later `9a60e769`
 completion claim was itself reopened on 2026-07-17 after deterministic tests
 proved that the Actor thread could still block on Pool, Broker, Proxy and
-sibling-Actor locks. This document is again in progress; COMPLETE requires a
-new exact FINAL HEAD, reviews, CI and Pages gates.
+sibling-Actor locks. The external-lock correction is now frozen at exact source
+`abd58c3`, with retained evidence and exact-source CI/Pages. Delivery becomes
+COMPLETE only after this manifest-only `SELF` commit passes its own exact
+CI and Pages gates; the source-evidence checks cannot be substituted for them.
 
 ## Delivery Identity
 
 | Field | Value |
 | --- | --- |
-| Status | REOPENED at `9a60e769`; external-lock correction in progress |
+| Status | FINAL manifest; valid only after exact `SELF` CI/Pages and identity checks succeed |
 | Authoritative spec | `ACTOR_REFACTOR_PLAN.md`, revision 1.3 |
 | Spec SHA256 | `C38A3791C4C0B44677325797110BD283AB0D0580E103952C2F2DEAD6839618B2` |
 | Performance authorization spec commit | `5ff6447d2acaa04ab8c406970c2a6b81e8ccd94f` (revision 1.2) |
@@ -21,17 +23,16 @@ new exact FINAL HEAD, reviews, CI and Pages gates.
 | Overturned acceptance | `994c49b51f47255bdcd9cdc3308a5a554f37588b` |
 | Previous implementation checkpoint | `3287b6a775e6c9fe7a0bcecfe134fc94b6d6634d` |
 | Reopened baseline | `9a60e769160c8e146525e7d53fd5fa40dac012b9` |
-| Current external-lock correction | Uncommitted; see external checkpoint ledger |
-| Final manifest commit | PENDING; previous `SELF=9a60e769...` is overturned |
+| Current external-lock correction | `abd58c39aef6f905075788d4482eac43e673ba63` |
+| Evidence ledger checkpoint | `eac784b` (`Fix-Checkpoint: L04E2`) |
+| Final manifest commit | `SELF`, resolved by the first-parent FINAL trailer below |
 | Branch | `actor-transport-refactor` |
 | Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), OPEN, draft, unmerged |
-| Latest evidence CI | [run 29552971634](https://github.com/electkismet/eltdx/actions/runs/29552971634), SUCCESS |
-| Latest evidence Pages | [run 29552971677](https://github.com/electkismet/eltdx/actions/runs/29552971677), strict build SUCCESS |
+| Exact-source CI | [run 29577023570](https://github.com/electkismet/eltdx/actions/runs/29577023570), SUCCESS |
+| Exact-source Pages | [run 29577023585](https://github.com/electkismet/eltdx/actions/runs/29577023585), strict build SUCCESS |
 
-The previous `SELF` rule remains historical protocol only and currently
-resolves to the overturned `9a60e769`. A later external-lock FINAL must
-re-establish it. `SELF` is the newest first-parent commit containing this
-manifest, with no
+The previous `SELF=9a60e769...` is overturned. `SELF` is the newest
+first-parent commit containing this manifest, with no
 `ACTOR_REFACTOR_FIX_PROGRESS.md`, and with trailer `Fix-Checkpoint: FINAL`:
 
 ```powershell
@@ -63,10 +64,11 @@ after they finish.
 | Rejected successor candidates | `29b250e`, `f0a329a`, `89d6439`, `792b3db`, `e9d2c8c`, `2a4e396` | Wake, pre-send, snapshot, diagnostic and Broker candidates rejected without favorable resampling |
 | Exception/control/final evidence | `eacbfc0`, `e455234`, `5ff6447`, `3287b6a`, `e94f9cd`, `e924d4d` | Exact heavy evidence, blocker audit, revision 1.2 authorization, control priority, exact final-source evidence and revision 1.3 manifest candidate |
 | Overturned FINAL | `9a60e76` | Reopened: Actor external-lock blocking remained |
-| External-lock correction | PENDING | Nonblocking publish/owner-settle implementation and fresh evidence |
+| External-lock correction | `7f8e120`, `8b68542`, `f5ad8a3`, `48b32d6`, `166ae61`, `abd58c3`, `eac784b` | Nonblocking Actor handoff, deferred settlement, bounded FIFO lease pulses, two pin publication corrections, per-call identity cell and exact evidence ledger |
+| FINAL manifest | `SELF` | Permanent result plus temporary progress-ledger deletion; exact-SHA CI/Pages resolved after push |
 
 This table covers every commit from the original A00-A09 implementation and
-every correction-cycle commit from `994c49b` through `e924d4d`. All were
+every correction-cycle commit from `994c49b` through `eac784b`. All were
 appended and pushed normally; no published commit was amended, rebased or
 force-pushed.
 
@@ -141,6 +143,16 @@ force-pushed.
 - Concurrent close and FIRST_EXCEPTION rollback share one identity-bound
   `ShutdownAttempt`. Old attempts cannot stop a reopened epoch, failure states
   are monotonic, and all closers observe the same result.
+- Actor completion and fatal callbacks now only publish immutable identity
+  state with nonblocking try-lock/Event operations. Heartbeat contention skips
+  the interval, and Push offer/drop uses Actor-owned publication; all Broker,
+  Pool, Proxy and sibling settlement runs on a caller/start/close owner under
+  the original absolute deadline.
+- Lease release uses one durable pulse and wakes only the first live FIFO
+  waiter. Each active pin call is one immutable `_PinActiveCall` containing the
+  exact call ID and its terminal Event. Active transition replaces that single
+  state reference; stale success, timeout fallback, publish and clear paths can
+  only touch their detached old Event and cannot overwrite the new call.
 
 ## Compatibility and Scope
 
@@ -173,8 +185,8 @@ Intentional compatible extensions remain bounded defaults:
 | Actor business mailbox | 1 active wire ticket | 1 | deterministic control-priority and submission-gate regressions reject a second active exchange |
 | Pool admission | 3 FIFO waiters | 4 in the deterministic test; 256 by default and in heavy stress | `test_lease_broker_assigns_waiters_fifo_and_releases_exactly_once` observes waiter depths 1, 2 and 3 in order, then zero |
 | Active normal leases | 4 | `pool_size=4` | 100,000-request heavy workload records server maximum active exactly 4 and zero leases after close |
-| Push frames | 1,024 | 1,024 | deleted historical heavy JSON reported `max_frames_observed=1024`; fresh evidence pending |
-| Push wire bytes | 28,612 | 8,388,608 | deleted historical heavy JSON reported `max_bytes_observed=28612`; fresh evidence pending |
+| Push frames | 1,024 | 1,024 | retained exact-`abd58c3` stress records `max_frames_observed=1024` and zero after close |
+| Push wire bytes | 28,612 | 8,388,608 | retained exact-`abd58c3` stress records `max_bytes_observed=28612` and zero after close |
 | Incremental RX bytes | at most 32 | 32 in the bounded regression; 65,551 in production | 1,000-byte garbage feed asserts `max_buffer_observed <= 32` |
 | Resynchronization discard | exactly 1,000 | 1,000 in the bounded regression; 65,536 in production | the same feed reaches the configured discard boundary without retaining unbounded input |
 | Decoded-frame queue | 910 appended; 846 retained after the immediate 64-frame fairness slice | 1,024 | the 1,101-frame legal burst uses 18-byte frames and a 16,384-byte capped recv; an exact-source tracking probe observed 910/846 and the regression drains through the matching response without loss |
@@ -202,6 +214,17 @@ handshake-phase advance after cancel/STOP, ConnectTicket success after
 cancel/STOP, deadline/build/final failure after the winning control and stale
 cancel after terminal claim.
 
+The 2026-07-17 external-lock correction was first red at exact `9a60e769`:
+the focused selection produced 6 failures/1 pass while guard, Broker, Push and
+sibling locks kept failed Actors alive and Lease/Pin completion blocked. Final
+review then found the pin publication clear race at exact `f5ad8a3`; its four
+controlled scenarios produced 2 failures/2 passes before `48b32d6`.
+The next exact-source review found that an old settler's second condition
+acquisition timeout could republish call 1 over already-published call 2 at
+`166ae61`. Two behavior-only tests applied to that source failed because the
+next owner left `_active_call == 2`; `_PinActiveCall` in `abd58c3` closes both
+the timeout-fallback and direct stale-publish paths.
+
 Three parameters are retained as intermediate-fix regressions rather than
 misrepresented as old-HEAD failures: malformed heartbeat, request-retry plus
 cancel, and request-final plus cancel already passed at `5ff6447`. They protect
@@ -217,8 +240,9 @@ Permanent reproduction-to-fix mapping (all nodes are deterministic):
 | D: Broker, pin, capacity | `tests/test_transport_pool_regressions.py::test_admission_waiter_late_set_cannot_wake_next_acquire`; `::test_pinned_close_timeout_can_finish_cleanup_and_restore_capacity`; `::test_concurrent_pin_close_shares_control_lock_timeout`; `::test_pinned_connect_is_an_active_operation_for_close`; `::test_pin_close_before_first_wire_submission_rejects_operation`; `tests/test_transport_pool.py::test_lease_broker_assigns_waiters_fifo_and_releases_exactly_once` |
 | E: Actor/pool lifecycle | `tests/test_transport_lifecycle_regressions.py::test_runtime_registered_after_pool_fatal_is_stopped_immediately`; `::test_close_cannot_return_while_unpublished_candidate_is_alive`; `::test_concurrent_pool_close_cannot_overwrite_failed_closing`; `::test_pool_connect_stops_real_candidate_blocked_during_startup`; `::test_fatal_during_pool_join_cannot_be_published_as_stopped`; `::test_guard_abandon_cannot_miss_runtime_appended_after_snapshot` |
 | Post-authorization control/terminal ownership | `tests/test_transport_actor_regressions.py::test_business_submission_wins_heartbeat_admission_race`; `::test_control_change_wins_heartbeat_admission_race`; `::test_control_winner_prevents_new_generation_connect`; `::test_control_winner_prevents_decoded_response_success`; `::test_control_winner_prevents_handshake_phase_advance`; `::test_control_winner_prevents_connect_ticket_success`; `::test_control_winner_prevents_terminal_failure`; `::test_late_cancel_after_terminal_claim_is_noop_without_token` |
+| External-lock and deferred publication | `tests/test_transport_lifecycle_regressions.py::test_failed_actor_exits_without_waiting_for_pool_owned_locks`; `tests/test_transport_pool_regressions.py::test_lease_completion_returns_without_waiting_for_broker_condition`; `::test_pin_completion_returns_before_proxy_condition_and_lazily_advances_fifo`; `::test_heartbeat_skips_broker_contention_and_actor_still_processes_stop`; `tests/test_transport_actor_regressions.py::test_terminal_completion_publishes_while_request_gate_condition_is_held`; `tests/test_transport_lifecycle_regressions.py::test_actor_stop_does_not_wait_for_owned_push_condition`; `tests/test_transport_pool_regressions.py::test_pin_old_terminal_settler_preserves_new_publication_before_return`; `::test_pin_old_terminal_clear_rechecks_concurrent_new_publication`; `::test_pin_exact_old_terminal_publication_clears_without_replay`; `::test_pin_stale_terminal_timeout_cannot_overwrite_newer_publication`; `::test_pin_stale_terminal_publish_cannot_replace_newer_publication` |
 
-Final local commands on production source `3287b6a`:
+Historical local commands on production source `3287b6a`:
 
 | Command | Result |
 | --- | --- |
@@ -236,7 +260,81 @@ for the sdist and
 `0709D124B9055BC2AEBDFFB8F067DA16C522C03666F5F0866460AD19FED960A6`
 for the wheel.
 
-## Historical Stress, Ownership, and Resources
+Current frozen local evidence on clean source `abd58c3`:
+
+| Command | Result |
+| --- | --- |
+| Eight pin publication/deadline tests, 20 independent processes | each 8 passed |
+| `tests/test_transport_pool_regressions.py` | 85 passed in 1.92s |
+| `tests/test_transport_lifecycle_regressions.py` | 92 passed in 7.82s |
+| Actor/Pool core selection | 156 passed in 4.13s |
+| `python -m pytest -q` | 598 passed in 268.96s; source/test hashes unchanged |
+| `python -m build` plus `twine check` | wheel and sdist PASS |
+| `python -m mkdocs build --strict` | PASS in 2.70s |
+
+The frozen SHA256 values for `src/eltdx/transport/pool.py` and
+`tests/test_transport_pool_regressions.py` are respectively
+`4AE60312C9BD979E9D1B4204398BDCDF761E1E1A09D857804061D73A76DD2C96`
+and `A456103653C11A40104559792DA956929A1807A552091A0A860A67B84D776AAD`.
+The exact package artifacts are retained outside the worktree under
+`artifacts/dist-abd58c3`: wheel 307,784 bytes, SHA256
+`B7C332788F3AAC8767A936C627E79173C108141AC12C68C7ACEAC1D5B2A4E61B`;
+sdist 365,290 bytes, SHA256
+`03A67D00280E690CB7D19E3561C72DAC62FC8A5E7882EE3EA5195ED42BE19FB4`.
+
+## Current Stress, Ownership, and Resources
+
+The retained raw artifact is
+`C:\Users\ax\Desktop\eltdx\artifacts\actor-lock-l03rr2-stress-abd58c3.json`,
+736,900 bytes, SHA256
+`CB82B74C2C69A674144DE9B8D120690E830475E6A144EAAA219FB255337C2FF2`.
+It records exact clean source `abd58c3`, workload SHA256
+`f7e187e3960002fbf0194c686182c3676152eba7c6fd68ab4bc46ede8262e5b1`,
+Windows 11 and Python 3.12.6.
+
+Workload hashes cover raw checkout bytes. The detached Windows evidence
+worktree used CRLF, producing `f7e187e...` for stress and `4ddd761f...` for the
+benchmark; the LF Git blobs/primary checkout produce `487b3131...` and
+`b09ab713...`. No comparison mixes those byte variants.
+
+| Workload | Raw result |
+| --- | --- |
+| 10,000 generations | 26.620140s, 375.655 rps, one Runtime/Actor/thread identity, two real loopback servers, accepts 5,000/5,000 |
+| Generation ownership | 15,000 attempts, 5,000 cross-endpoint retries, 10,000 unique; duplicate/missing/unexpected/stale/cross-request/cross-generation all 0 |
+| 100,000 mixed, pool 4/concurrency 100 | 113.677247s, 879.684 rps, 100,035 attempts, 35 real cross-endpoint retries, server maximum active exactly 4 |
+| Mixed ownership | Two servers carried 17,630/82,405 requests; 100,000 unique; duplicate/missing/unexpected/cross-request/cross-generation all 0 |
+| Push pressure | 2,043 sent, 1,019 bounded oldest drops, explicit gap, maximum 1,024 frames/28,612 bytes |
+| Idle CPU | process CPU ratio 0 |
+
+After both workloads every retained runtime reports Actor dead, STOPPED state,
+generation/selector/wakeup/tickets absent, saved TCP/wakeup resources closed,
+and cancel map empty. Broker admission waiters, pin waiters and leases are zero
+and closed; PushBuffer frames/bytes are zero and closed. Actor threads after
+both workloads are zero.
+
+Close latency over 100 samples per condition:
+
+| Condition | p50 ms | p95 ms | p99 ms | Max ms |
+| --- | ---: | ---: | ---: | ---: |
+| Idle | 3.0437 | 3.5406 | 3.7547 | 3.8377 |
+| Loaded | 2.6444 | 3.4256 | 3.8377 | 3.9590 |
+
+All 400 loaded futures terminalized with the expected
+`ConnectionClosedError`; every ticket and retained Actor resource was terminal
+or closed. Maximum caller-side settlement was 0.5661ms.
+
+Windows resources used three warmup rounds followed by eight measured
+50-generation rounds. The measured process-handle values were exactly:
+
+```text
+202, 202, 202, 202, 202, 202, 202, 202
+```
+
+Every warmup and measured sample also had zero Actor threads, exact owned-
+resource cleanup and zero cross-request/cross-generation completions. There is
+no tolerance, no monotonic growth and no unexplained allowance.
+
+## Superseded Historical Stress Evidence
 
 Historical exact-`3287b6a` command:
 
@@ -299,7 +397,25 @@ closed. Broker waiters, pin waiters and leases were zero; PushBuffer frames and
 bytes were zero and closed. The raw file is no longer retained, so that earlier
 audit cannot be replayed from the current workspace.
 
-## Historical Heartbeat Evidence
+## Current Heartbeat Evidence
+
+The exact-`abd58c3` retained stress artifact contains the balanced heartbeat
+campaign. It ran 4 blocks/32 phases, 260 all-slot configuration barriers, four
+idle-connection heartbeat probes and 32 paced heartbeat requests. No heartbeat
+entered a business interval.
+
+| Metric | Result |
+| --- | ---: |
+| Without heartbeat | 586.260 rps |
+| With heartbeat | 582.241 rps |
+| Aggregate ratio | 0.995261 |
+| Absolute impact | 0.4739%, below 1% |
+| Block ratios | 1.003429 / 0.987833 / 0.983311 / 1.006579 |
+| Median block ratio | 0.995631 |
+| Business responses | 35,232 unique |
+| Duplicate/missing/unexpected/cross-request/cross-generation | 0 |
+
+## Superseded Historical Heartbeat Evidence
 
 The revision-7 heartbeat JSON is no longer present in Git or the external
 artifact store. Its previously reported SHA256 is withdrawn as retained
@@ -321,8 +437,8 @@ connection heartbeats and 32 paced heartbeats, with
 One earlier local full-suite sample measured `0.989062` and failed the strict
 `>0.99` node; it is retained as a failed sample, not reclassified. The node was
 rerun in isolation and passed in 209.30s, then the stable final local suite and
-exact CI matrix passed. Neither deleted JSON is a current acceptance artifact;
-the external-lock correction must produce fresh retained evidence.
+exact CI matrix passed. Neither deleted JSON is current evidence; the retained
+exact-`abd58c3` artifact above supersedes both.
 
 ## Performance Evidence
 
@@ -341,11 +457,13 @@ No result was discarded, replaced or resampled.
 | Stored report | `954192977dee7699dfd1c8991e0dcf2694fa8a3047ab0174fb93849083ead4d1` |
 | Independent replay | `15339fd279e6330672553a7aa53d18498de6666213ddbd0dfa2549505d328b7f` |
 
-The immutable raw campaign store is intentionally retained outside the Git
-worktree at `C:\Users\ax\Desktop\eltdx\artifacts`: 55 files totaling
-408,825,518 bytes. Its canonical declaration, bundle, report and replay hashes
-match the table above. It is acceptance evidence, not an in-repository build
-output or unnoticed temporary directory.
+The immutable canonical campaign directory is intentionally retained outside
+the Git worktree at
+`C:\Users\ax\Desktop\eltdx\artifacts\fifo-v2-7923287-a`: 11 files totaling
+100,391,782 bytes. Its declaration, eight ordered raw trials, bundle and report
+hashes match the table above; the independent replay is retained alongside the
+directory and matches its listed hash. This is deliberate evidence, not an
+in-repository build output.
 
 Across 32 cases, all 1,000,000 requests, successes, server requests, wire
 attempts, unique responses, completion rows and raw latency rows matched
@@ -383,21 +501,75 @@ This campaign will not be rerun or reclassified. Future performance-sensitive
 changes use the FINAL Actor source as a prospective baseline under a rule frozen
 before sampling; this exception cannot hide a future regression.
 
+### External-lock correction supplemental A/B
+
+The correction used exact clean `9a60e769` as its prospective baseline and
+exact clean `abd58c3` as current, with fixed order
+baseline/current/current/baseline and identical benchmark workload SHA256
+`4ddd761fa94e4bb21fd32720dc2afd454a982ebcf69ae4e7579fc93c401e6dac`.
+
+These four files use schema 2, not the frozen schema-4 campaign format. The
+formal verifier rejects them for different bundle keys/schema-kind and missing
+declaration. They are supplemental correction-regression evidence only and do
+not replace, override or reclassify the retained formal FAIL above.
+
+| Artifact | SHA256 |
+| --- | --- |
+| `actor-lock-l03rr2-baseline-a-9a60e769.json` | `2FDA8EF86ED6AD5E7D453F309EC7876B5BF353CA0922D6743CE851AD80D65FBA` |
+| `actor-lock-l03rr2-current-a-abd58c3.json` | `D0241896090436737E86CF95911BFD92602BA398EFD01FB8A7E289E8E21E60E9` |
+| `actor-lock-l03rr2-current-b-abd58c3.json` | `3981CDC5EB139BC36EF0998334A9D91BFC6B3460AA6CBABB6E6245E7009CB855` |
+| `actor-lock-l03rr2-baseline-b-9a60e769.json` | `B23BE4236BC7737A0BA46EDA45C96D2E9BA2B883FE9122171B8D39A6971FE030` |
+
+All 180,000 requests, successes, server requests, attempts, unique responses
+and completion rows reconcile. Error, duplicate, missing, unexpected,
+cross-request and cross-generation counters are zero.
+
+Two-run aggregate throughput ratios for pool sizes 1/2/4 at concurrency
+1/10/100 are respectively:
+
+```text
+pool 1: 0.991165 / 0.983273 / 0.985794
+pool 2: 0.992611 / 0.986221 / 0.977728
+pool 4: 0.997512 / 0.986695 / 0.995357
+```
+
+The pooled range is 0.977728-0.997512; every paired single-run ratio is at least
+0.975810. All are above 95%. Schema 2 has no raw latency arrays, so quantiles
+are not pooled or averaged: all 18 A-to-A/B-to-B p50 and p99 comparisons pass
+`max(10%, 0.2ms)` individually.
+
+| Required case | Baseline | Current | Result |
+| --- | ---: | ---: | ---: |
+| Pool 1/concurrency 1 pooled throughput | 157.566395 rps | 156.174306 rps | ratio 0.991165 |
+| Sequential A p50/p99 | 6.2506/7.3206ms | 6.3587/7.4485ms | PASS |
+| Sequential B p50/p99 | 6.3095/7.4481ms | 6.3426/7.4400ms | PASS |
+| Pool 4/concurrency 100 pooled throughput | 606.633761 rps | 603.816859 rps | ratio 0.995357 |
+| Saturated A p50/p99 | 160.5746/174.8197ms | 163.5688/180.4784ms | PASS |
+| Saturated B p50/p99 | 163.6486/175.8370ms | 162.8599/174.8672ms | PASS |
+
+The earlier quick A/B pair is retained with `invalid-` prefixes because its
+baseline/current workload hashes differed. A later `l03rr` attempt is also
+retained with `invalid-concurrent-` prefixes because an unauthorized review
+stress process overlapped sampling; the entire uncontaminated `l03rr2` schedule
+above was rerun from trial zero. The valid pre-fix diagnostic
+`9a60e769` versus `8b685420` found concurrency-100 ratios 0.611/0.537/0.365;
+it led to the durable first-live lease pulse and publication-idempotency fix,
+but is not FINAL performance evidence.
+
 ## Cross-Platform CI and Builds
 
-Exact revision-1.3 manifest candidate
-`e924d4d4e1d500bafa55ea314ecd23cfc042eea4` passed
-[CI run 29552971634](https://github.com/electkismet/eltdx/actions/runs/29552971634):
+Exact correction source `abd58c39aef6f905075788d4482eac43e673ba63`
+passed [CI run 29577023570](https://github.com/electkismet/eltdx/actions/runs/29577023570):
 
 | Platform | Python | Result |
 | --- | --- | --- |
-| Ubuntu | 3.10 | 546 passed, 1 Windows-only skip, SUCCESS |
-| Ubuntu | 3.11 | 546 passed, 1 Windows-only skip, SUCCESS |
-| Ubuntu | 3.12 | 546 passed, 1 Windows-only skip, SUCCESS |
-| Ubuntu | 3.13 | 546 passed, 1 Windows-only skip, wheel/sdist build SUCCESS |
-| Windows | 3.11 | Full suite, 547 passed, SUCCESS |
-| Windows | 3.13 | Full suite, 547 passed, SUCCESS |
-| Pages | [run 29552971677](https://github.com/electkismet/eltdx/actions/runs/29552971677) | strict build and artifact upload SUCCESS |
+| Ubuntu | 3.10 | 597 passed, 1 Windows-only skip in 290.38s, SUCCESS |
+| Ubuntu | 3.11 | 597 passed, 1 Windows-only skip in 278.27s, SUCCESS |
+| Ubuntu | 3.12 | 597 passed, 1 Windows-only skip in 286.35s, SUCCESS |
+| Ubuntu | 3.13 | 597 passed, 1 Windows-only skip in 283.02s, wheel/sdist build SUCCESS |
+| Windows | 3.11 | Full suite, 598 passed in 251.36s, SUCCESS |
+| Windows | 3.13 | Full suite, 598 passed in 244.21s, SUCCESS |
+| Pages | [run 29577023585](https://github.com/electkismet/eltdx/actions/runs/29577023585) | strict build and artifact upload SUCCESS |
 
 The Windows jobs run the full suite, including all correction regression files
 and the real Windows refused-first `connect_ex` test. Pages deployment remains
@@ -410,7 +582,10 @@ both Windows jobs. Windows has zero skipped tests. There are no xfail or flaky
 markers, plugins, rerun rules, or intermittent-failure allowlists masking a
 failure.
 
-The `71089c0..e924d4d` scope review covers all 39 changed files. Project runtime
+The `71089c0..e924d4d` scope review covers the original 39 changed files. The
+later `e924d4d..abd58c3` correction is limited to two result/progress records,
+four 7709 transport modules and five transport regression files.
+Project runtime
 dependencies remain exactly `dependencies = []`; no 7615 implementation or
 business-command facade was changed. The `client.py`, host and registry edits
 are bounded 7709 transport integration/validation changes, while the two MCP
@@ -437,11 +612,30 @@ added. An independent scope/CI reviewer reached the same conclusion.
   earlier first-parent checkpoints were accounted for, CI/Pages and marker
   audits reconciled, PR/scope/dependency constraints held, all detached
   worktrees were clean and no task-owned process was running.
-- FINAL cleanup removed all ten detached evidence worktrees and all in-repository
-  artifacts, build/site outputs, pytest caches and `__pycache__` directories.
-  Only the primary worktree remains; `git clean -nd` and `git clean -ndX` are
-  empty, and no task-owned Python, pytest, stress or MkDocs process is alive.
-  The separate immutable raw campaign store described above remains deliberate.
+- Final review at `f5ad8a3` reproduced an old-settler/new-publication clear
+  race; the next Actor review at `166ae61` reproduced the stale timeout
+  fallback overwriting a newer call. Both blockers became behavior-only red
+  tests and were fixed before `abd58c3`; neither older exact-head green run is
+  used as FINAL source evidence.
+- The final Actor/nonblocking reviewer returned CLEAN for exact `eac784b`
+  (production source exact `abd58c3`) and ran 20 external-lock/pin/FIFO nodes
+  with cache/bytecode writes disabled. It found no Pool/Broker/Proxy/Push or
+  sibling-lock wait on Actor paths and no stale cell ownership.
+- The independent Pool/pin/lifecycle reviewer returned CLEAN for the same
+  source after auditing Broker FIFO, lease publication, fatal epochs, pin
+  settler/close/cancel/capacity, startup rollback, shutdown monotonicity and
+  lock order; independent reruns were 85 Pool and 92 lifecycle passes.
+- The independent evidence rereview reconciled the uncontaminated `l03rr2`
+  files, CB82 stress, package hashes, exact CI/Pages logs, formal schema-4 FAIL
+  and architecture exception. Its findings on schema-2 quantile aggregation,
+  scope count, line-ending hashes and stale result identity were corrected;
+  after actual cleanup, the final line-by-line rereview returned CLEAN.
+- Current FINAL cleanup removed the detached `9a60e769` baseline and
+  `abd58c3` evidence worktrees, repository pytest/bytecode caches and draft
+  result-site builds. Only the primary worktree remains; `git clean -nd` and
+  `git clean -ndX` are empty, and no task-owned Python, pytest, benchmark,
+  stress or MkDocs process is alive. The retained raw JSON/campaign and final
+  dist/site evidence under the external artifact directory are deliberate.
 - The FINAL commit must have no progress ledger, no untracked non-ignored file,
   no task-owned process, and two or more clean independent review conclusions.
 - Local HEAD, remote branch, PR head, FINAL CI, and FINAL Pages must all resolve
