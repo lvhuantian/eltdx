@@ -6,9 +6,9 @@
 - Branch: `actor-transport-refactor`.
 - Reopened parent HEAD: `7f8e120dbddf37197f7718f8712589184cc20df8`.
 - Draft PR: https://github.com/electkismet/eltdx/pull/12 (OPEN, draft, unmerged).
-- Status: exact `48b32d6` evidence is superseded for FINAL after a later
-  deterministic stale-timeout publication blocker; the per-call correction
-  and new evidence are in progress.
+- Status: exact `abd58c3` per-call correction evidence is complete; permanent
+  result correction, final post-evidence reviews and FINAL identity gates are
+  in progress.
 - The old `9a60e76` completion conclusion remains overturned. The green checks on
   `7f8e120` are historical and cannot validate the upcoming checkpoint.
 
@@ -97,8 +97,7 @@ for either correctness or a current failure.
 
 ## Remaining Before FINAL
 
-- Freeze and push the per-call pin publication correction, then rerun exact
-  full/stress/resource/build/CI evidence and final independent reviews.
+- Complete final independent code/evidence reviews against exact `abd58c3`.
 - Replace the overturned conclusion in `ACTOR_REFACTOR_RESULT.md`, move all
   evidence there, then delete this temporary file in the FINAL commit.
 - Wait for exact FINAL HEAD CI and Pages success. Do not merge the PR.
@@ -261,5 +260,74 @@ Current dirty-tree evidence after the behavior-only assertion correction:
   rerun after that correction.
 
 The exact `48b32d6` CI, stress and supplemental A/B remain valid historical
-checkpoint evidence but cannot validate the new source. Full, stress/resource,
-build, CI and review evidence must be regenerated after the next clean commit.
+checkpoint evidence but cannot validate the new source. The replacement full,
+stress/resource, build and CI evidence is recorded below; final reviews remain.
+
+## Exact `abd58c3` Evidence Checkpoint
+
+`abd58c39aef6f905075788d4482eac43e673ba63` (`Fix-Checkpoint: L03RR`)
+contains the per-call pin terminal publication cell and both behavior-only
+stale regressions. Local, remote branch and Draft PR #12 head were exact; the
+PR remained OPEN, draft, unmerged, base `main`.
+
+- Frozen local full suite: **598 passed in 268.96s**, with source/test hashes
+  unchanged across the run.
+- CI [run 29577023570](https://github.com/electkismet/eltdx/actions/runs/29577023570):
+  SUCCESS. Ubuntu Python 3.10-3.13 each ran 597 passed/1 Windows-only skip;
+  Windows 3.11/3.13 ran 598 passed; the Python 3.13 package build passed.
+- Pages [run 29577023585](https://github.com/electkismet/eltdx/actions/runs/29577023585):
+  strict build/upload SUCCESS; PR deployment skipped as expected.
+- Local exact-worktree build/twine: PASS. Wheel 307,784 bytes, SHA256
+  `B7C332788F3AAC8767A936C627E79173C108141AC12C68C7ACEAC1D5B2A4E61B`;
+  sdist 365,290 bytes, SHA256
+  `03A67D00280E690CB7D19E3561C72DAC62FC8A5E7882EE3EA5195ED42BE19FB4`.
+- Local exact-worktree MkDocs strict build: PASS in 2.70s.
+
+The first `l03rr` evidence attempt was invalidated because a review Agent
+violated the read-only instruction and launched a concurrent heartbeat/full
+stress job during benchmark sampling. Its second stress run also overwrote the
+first raw path. The surviving contaminated files were renamed with
+`invalid-concurrent-` prefixes; neither is used below. All task-owned processes
+were stopped before the complete `l03rr2` rerun.
+
+Retained uncontaminated stress artifact:
+`actor-lock-l03rr2-stress-abd58c3.json`, 736,900 bytes, SHA256
+`CB82B74C2C69A674144DE9B8D120690E830475E6A144EAAA219FB255337C2FF2`.
+It records exact clean `abd58c3` on Windows 11 / Python 3.12.6:
+
+- 10,000 generations: 26.620140s/375.655 rps, one Runtime/Actor/thread
+  identity, two servers, 15,000 attempts/5,000 cross-endpoint retries, 10,000
+  unique and every bad/stale/cross counter zero;
+- 100,000 pool-4/concurrency-100 requests: 113.677247s/879.684 rps, 100,035
+  attempts, 35 real cross-endpoint retries, maximum active exactly 4, 100,000
+  unique and every duplicate/missing/unexpected/cross counter zero;
+- Actor threads, TCP, selectors, wakeups, tickets, cancels, Broker waiters/pin
+  waiters/leases and Push frames/bytes are all cleared or closed after close;
+- idle close p50/p99 3.0437/3.7547ms; loaded 2.6444/3.8377ms; maximum caller
+  settlement 0.5661ms;
+- heartbeat ratio 0.995261, absolute impact 0.4739% <1%, 35,232 unique and
+  cross counters zero;
+- three warmups then eight measured Windows resource rounds are exactly
+  `202,202,202,202,202,202,202,202`, with no growth; idle CPU is 0.
+
+The uncontaminated supplemental A/B used fixed order
+baseline/current/current/baseline, clean roots `9a60e769`/`abd58c3`, and
+identical workload SHA256
+`4ddd761fa94e4bb21fd32720dc2afd454a982ebcf69ae4e7579fc93c401e6dac`.
+All 180,000 requests/attempts/completion rows reconciled, with zero error,
+duplicate, missing, unexpected and cross counters.
+
+| Artifact | SHA256 |
+| --- | --- |
+| `actor-lock-l03rr2-baseline-a-9a60e769.json` | `2FDA8EF86ED6AD5E7D453F309EC7876B5BF353CA0922D6743CE851AD80D65FBA` |
+| `actor-lock-l03rr2-current-a-abd58c3.json` | `D0241896090436737E86CF95911BFD92602BA398EFD01FB8A7E289E8E21E60E9` |
+| `actor-lock-l03rr2-current-b-abd58c3.json` | `3981CDC5EB139BC36EF0998334A9D91BFC6B3460AA6CBABB6E6245E7009CB855` |
+| `actor-lock-l03rr2-baseline-b-9a60e769.json` | `B23BE4236BC7737A0BA46EDA45C96D2E9BA2B883FE9122171B8D39A6971FE030` |
+
+Pooled throughput ratios span 0.977728-0.997512; every paired single-run ratio
+is at least 0.975810. Pool 1/concurrency 1 is
+157.566395->156.174306 rps (0.991165); pool 4/concurrency 100 is
+606.633761->603.816859 rps (0.995357). All 18 paired-run p50 and p99 checks
+pass `max(10%, 0.2ms)`. These schema-2 files remain supplemental only and do
+not replace the retained formal schema-4 FAIL plus authorized architecture
+exception.
