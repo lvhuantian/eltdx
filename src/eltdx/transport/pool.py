@@ -120,6 +120,15 @@ class BrokerSnapshot:
     closed: bool
 
 
+@dataclass(slots=True, eq=False)
+class _GuardFailurePublication:
+    pool_epoch: int | None
+    broker: LeaseBroker | None
+    failure: tuple[ActorRuntime, BaseException] | None = None
+    cleanup_error: BaseException | None = None
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+
 class LeaseBroker:
     """Pool scheduling core with no references to facades or Actor runtimes."""
 
@@ -179,34 +188,56 @@ class LeaseBroker:
             )
             self._waiters.append(waiter)
             self._waiter_snapshot = tuple(self._waiters)
+            self._assign_waiters_locked(initial_wake)
             self._condition.notify_all()
         finally:
             self._condition.release()
             for assigned in initial_wake:
                 assigned.completed.set()
-        remaining = max(0.0, deadline - time.monotonic())
-        try:
-            woke = waiter.completed.wait(remaining)
-        except BaseException:
-            waiter.cancelled.set()
-            wake: list[AdmissionWaiter] = []
+        while True:
+            remaining = max(0.0, deadline - time.monotonic())
+            try:
+                woke = waiter.completed.wait(remaining)
+            except BaseException:
+                waiter.cancelled.set()
+                wake: list[AdmissionWaiter] = []
+                acquired = self._condition.acquire(timeout=max(0.0, deadline - time.monotonic()))
+                if acquired:
+                    try:
+                        if waiter.state is AdmissionState.WAITING:
+                            try:
+                                self._waiters.remove(waiter)
+                            except ValueError:
+                                pass
+                            waiter.state = AdmissionState.REJECTED
+                        elif waiter.state is AdmissionState.ASSIGNED:
+                            waiter.state = AdmissionState.REJECTED
+                        self._assign_waiters_locked(wake)
+                    finally:
+                        self._condition.release()
+                for assigned in wake:
+                    assigned.completed.set()
+                raise
+            if not woke:
+                break
+            recheck_wake: list[AdmissionWaiter] = []
             acquired = self._condition.acquire(timeout=max(0.0, deadline - time.monotonic()))
-            if acquired:
-                try:
-                    if waiter.state is AdmissionState.WAITING:
-                        try:
-                            self._waiters.remove(waiter)
-                        except ValueError:
-                            pass
-                        waiter.state = AdmissionState.REJECTED
-                    elif waiter.state is AdmissionState.ASSIGNED:
-                        waiter.state = AdmissionState.REJECTED
-                    self._assign_waiters_locked(wake)
-                finally:
-                    self._condition.release()
-            for assigned in wake:
+            if not acquired:
+                waiter.cancelled.set()
+                raise ResponseTimeoutError("7709 response timed out during queue")
+            try:
+                self._assign_waiters_locked(recheck_wake)
+                terminal = waiter.state is not AdmissionState.WAITING
+                if not terminal:
+                    waiter.completed.clear()
+                    self._assign_waiters_locked(recheck_wake)
+                    terminal = waiter.state is not AdmissionState.WAITING
+            finally:
+                self._condition.release()
+            for assigned in recheck_wake:
                 assigned.completed.set()
-            raise
+            if terminal:
+                break
         if not woke:
             wake: list[AdmissionWaiter] = []
             acquired = self._condition.acquire(timeout=max(0.0, deadline - time.monotonic()))
@@ -441,6 +472,11 @@ class LeaseBroker:
         for completed in self._pin_waiter_snapshot:
             completed.set()
 
+    def publish_lease_release(self, lease: SlotLease) -> None:
+        _mark_lease_cancelled(lease)
+        for waiter in self._waiter_snapshot:
+            waiter.completed.set()
+
     def snapshot(self) -> BrokerSnapshot:
         wake: list[AdmissionWaiter] = []
         with self._condition:
@@ -526,6 +562,8 @@ class LeaseBroker:
 
 
 class LeaseCompletion:
+    propagate_settlement_error = True
+
     def __init__(self, broker: LeaseBroker, lease: SlotLease, deadline: float | None = None) -> None:
         self._broker_ref = weakref.ref(broker)
         self._lease = lease
@@ -536,7 +574,11 @@ class LeaseCompletion:
 
     def publish(self, ticket: object | None) -> None:
         self._published.set()
-        _mark_lease_cancelled(self._lease)
+        broker = self._broker_ref()
+        if broker is None:
+            _mark_lease_cancelled(self._lease)
+        else:
+            broker.publish_lease_release(self._lease)
 
     publish_nonblocking = publish
 
@@ -549,8 +591,10 @@ class LeaseCompletion:
         if broker is not None:
             try:
                 broker.release(self._lease, deadline=self._deadline)
-            except BaseException:
+            except BaseException as exc:
                 _mark_lease_cancelled(self._lease)
+                if not isinstance(exc, TransportCloseTimeoutError):
+                    raise
 
     def __call__(self, ticket: object | None) -> None:
         self.publish(ticket)
@@ -584,6 +628,7 @@ class PoolRuntimeGuard:
         self._fatal_error: BaseException | None = None
         self._epoch: int | None = None
         self._state = GuardState.INACTIVE
+        self._failure_cell = _GuardFailurePublication(None, None)
         self._publication_snapshot: tuple[
             GuardState,
             int | None,
@@ -591,9 +636,16 @@ class PoolRuntimeGuard:
             threading.Event,
             PushBuffer | None,
             tuple[ActorRuntime, ...],
-        ] = (self._state, self._epoch, self._broker, self._retire_requested, self._push_buffer, ())
-        self._publish_lock = threading.Lock()
-        self._failure_publication: tuple[int, LeaseBroker, ActorRuntime, BaseException] | None = None
+            _GuardFailurePublication,
+        ] = (
+            self._state,
+            self._epoch,
+            self._broker,
+            self._retire_requested,
+            self._push_buffer,
+            (),
+            self._failure_cell,
+        )
 
     def configure(
         self,
@@ -619,7 +671,7 @@ class PoolRuntimeGuard:
             self._fatal_error = None
             self._epoch = broker.pool_epoch
             self._state = GuardState.ACTIVE
-            self._failure_publication = None
+            self._failure_cell = _GuardFailurePublication(broker.pool_epoch, broker)
             self._refresh_publication_snapshot_locked()
         finally:
             self._lock.release()
@@ -720,6 +772,7 @@ class PoolRuntimeGuard:
                 and broker is self._broker
             )
             if accepted:
+                cleanup_cell = self._failure_cell
                 if self._fatal_error is None:
                     self._fatal_error = error
                 if all(item is not runtime for item in self._runtimes):
@@ -728,6 +781,7 @@ class PoolRuntimeGuard:
                 push_buffer = self._push_buffer
                 runtimes = tuple(self._runtimes)
             else:
+                cleanup_cell = None
                 current_broker = None
                 push_buffer = None
                 runtimes = (runtime,)
@@ -755,7 +809,39 @@ class PoolRuntimeGuard:
                     request_actor_stop(item, deadline=deadline)
             except BaseException as exc:
                 cleanup_errors.append(exc)
-        # Pool shutdown retries any stage that missed this fatal callback's deadline.
+        if cleanup_cell is not None:
+            if deadline is None:
+                cleanup_cell.lock.acquire()
+                cleanup_acquired = True
+            else:
+                cleanup_acquired = cleanup_cell.lock.acquire(
+                    timeout=max(0.0, deadline - time.monotonic())
+                )
+            if not cleanup_acquired:
+                raise TransportCloseTimeoutError(
+                    "7709 pool fatal cleanup publication blocked before deadline"
+                )
+            try:
+                if (
+                    cleanup_cell.pool_epoch == pool_epoch
+                    and cleanup_cell.broker is broker
+                ):
+                    if cleanup_errors and cleanup_cell.cleanup_error is None:
+                        cleanup_cell.cleanup_error = cleanup_errors[0]
+                    elif not cleanup_errors:
+                        cleanup_cell.cleanup_error = None
+            finally:
+                cleanup_cell.lock.release()
+        unexpected_cleanup = next(
+            (
+                item
+                for item in cleanup_errors
+                if not isinstance(item, (TransportCloseTimeoutError, ResponseTimeoutError))
+            ),
+            None,
+        )
+        if unexpected_cleanup is not None:
+            raise unexpected_cleanup
 
     def publish_failure(
         self,
@@ -765,7 +851,9 @@ class PoolRuntimeGuard:
         pool_epoch: int,
         broker: LeaseBroker | None,
     ) -> None:
-        state, epoch, current_broker, retire_event, push_buffer, runtimes = self._publication_snapshot
+        state, epoch, current_broker, retire_event, push_buffer, runtimes, failure_cell = (
+            self._publication_snapshot
+        )
         accepted = (
             state in (GuardState.ACTIVE, GuardState.SEALED)
             and epoch == pool_epoch
@@ -775,22 +863,26 @@ class PoolRuntimeGuard:
         if not accepted:
             abandon_actor(runtime)
             return
-        if not self._publish_lock.acquire(blocking=False):
+        if not failure_cell.lock.acquire(blocking=False):
             abandon_actor(runtime)
             return
+        publication_cell = failure_cell
         try:
-            state, epoch, current_broker, retire_event, push_buffer, runtimes = self._publication_snapshot
+            state, epoch, current_broker, retire_event, push_buffer, runtimes, current_cell = (
+                self._publication_snapshot
+            )
             if (
                 state not in (GuardState.ACTIVE, GuardState.SEALED)
                 or epoch != pool_epoch
                 or current_broker is not broker
+                or current_cell is not publication_cell
             ):
                 abandon_actor(runtime)
                 return
-            if self._failure_publication is None:
-                self._failure_publication = (pool_epoch, broker, runtime, error)
+            if publication_cell.failure is None:
+                publication_cell.failure = (runtime, error)
         finally:
-            self._publish_lock.release()
+            publication_cell.lock.release()
         retire_event.set()
         broker.abandon()
         if push_buffer is not None:
@@ -807,12 +899,18 @@ class PoolRuntimeGuard:
         broker: LeaseBroker | None,
         deadline: float | None = None,
     ) -> None:
-        publication = self._failure_publication
-        if publication is None:
+        state, epoch, current_broker, _, _, _, failure_cell = self._publication_snapshot
+        publication = failure_cell.failure
+        if (
+            publication is None
+            or state not in (GuardState.ACTIVE, GuardState.SEALED)
+            or epoch != pool_epoch
+            or current_broker is not broker
+            or failure_cell.pool_epoch != pool_epoch
+            or failure_cell.broker is not broker
+        ):
             return
-        published_epoch, published_broker, runtime, error = publication
-        if published_epoch != pool_epoch or published_broker is not broker:
-            return
+        runtime, error = publication
         self.fail(
             runtime,
             error,
@@ -910,13 +1008,13 @@ class PoolRuntimeGuard:
                 pass
 
     def failure(self, *, deadline: float | None = None) -> BaseException | None:
-        publication = self._failure_publication
-        state, epoch, broker, _, _, _ = self._publication_snapshot
+        state, epoch, broker, _, _, _, failure_cell = self._publication_snapshot
+        publication = failure_cell.failure
         published = (
-            publication[3]
+            publication[1]
             if publication is not None
-            and publication[0] == epoch
-            and publication[1] is broker
+            and failure_cell.pool_epoch == epoch
+            and failure_cell.broker is broker
             and state in (GuardState.ACTIVE, GuardState.SEALED)
             else None
         )
@@ -963,10 +1061,60 @@ class PoolRuntimeGuard:
             self._fatal_error = None
             self._epoch = None
             self._state = GuardState.INACTIVE
+            self._failure_cell = _GuardFailurePublication(None, None)
             self._refresh_publication_snapshot_locked()
             return None
         finally:
             self._lock.release()
+
+    def cleanup_failure(self, *, deadline: float | None = None) -> BaseException | None:
+        state, epoch, broker, _, _, _, failure_cell = self._publication_snapshot
+        if (
+            state not in (GuardState.ACTIVE, GuardState.SEALED)
+            or failure_cell.pool_epoch != epoch
+            or failure_cell.broker is not broker
+        ):
+            return None
+        if deadline is None:
+            failure_cell.lock.acquire()
+            acquired = True
+        else:
+            acquired = failure_cell.lock.acquire(timeout=max(0.0, deadline - time.monotonic()))
+        if not acquired:
+            raise TransportCloseTimeoutError("7709 pool cleanup inspection blocked before deadline")
+        try:
+            return failure_cell.cleanup_error
+        finally:
+            failure_cell.lock.release()
+
+    def clear_cleanup_failure(
+        self,
+        *,
+        pool_epoch: int,
+        broker: LeaseBroker,
+        deadline: float | None = None,
+    ) -> bool:
+        state, epoch, current_broker, _, _, _, failure_cell = self._publication_snapshot
+        if (
+            state not in (GuardState.ACTIVE, GuardState.SEALED)
+            or epoch != pool_epoch
+            or current_broker is not broker
+            or failure_cell.pool_epoch != pool_epoch
+            or failure_cell.broker is not broker
+        ):
+            return False
+        if deadline is None:
+            failure_cell.lock.acquire()
+            acquired = True
+        else:
+            acquired = failure_cell.lock.acquire(timeout=max(0.0, deadline - time.monotonic()))
+        if not acquired:
+            raise TransportCloseTimeoutError("7709 pool cleanup clear blocked before deadline")
+        try:
+            failure_cell.cleanup_error = None
+            return True
+        finally:
+            failure_cell.lock.release()
 
     def _refresh_publication_snapshot_locked(self) -> None:
         self._publication_snapshot = (
@@ -976,6 +1124,7 @@ class PoolRuntimeGuard:
             self._retire_requested,
             self._push_buffer,
             self._runtime_snapshot,
+            self._failure_cell,
         )
 
 
@@ -1139,6 +1288,8 @@ class PinCloseAttempt:
 
 
 class PinCompletion:
+    propagate_settlement_error = True
+
     def __init__(self, proxy: PinnedTransportProxy, call_id: int, deadline: float | None = None) -> None:
         self._proxy: PinnedTransportProxy | None = proxy
         self._call_id = call_id
@@ -1473,13 +1624,41 @@ class PinnedTransportProxy:
             waiter.reserved = True
             self._waiters.append(waiter)
             self._refresh_waiter_snapshot_locked()
+            if self._published_terminal.is_set():
+                waiter.completed.set()
         finally:
             self._condition.release()
-        try:
-            woke = waiter.completed.wait(max(0.0, deadline - time.monotonic()))
-        except BaseException:
-            self._cancel_interrupted_waiter(waiter, deadline)
-            raise
+        while True:
+            try:
+                woke = waiter.completed.wait(max(0.0, deadline - time.monotonic()))
+            except BaseException:
+                self._cancel_interrupted_waiter(waiter, deadline)
+                raise
+            if not woke:
+                break
+            published_wake = self._published_terminal.is_set()
+            if published_wake:
+                self._settle_published_terminal(deadline)
+            self._acquire_condition(deadline)
+            try:
+                if waiter.assigned or waiter.error is not None:
+                    break
+                lease_terminal = (
+                    self._state is not PinState.OPEN
+                    or self._close_requested.is_set()
+                    or self._lease.state is not LeaseState.ACTIVE
+                    or (
+                        self._lease.cancellation is not None
+                        and self._lease.cancellation.is_set()
+                    )
+                )
+                if lease_terminal:
+                    break
+                waiter.completed.clear()
+                if self._published_terminal.is_set():
+                    waiter.completed.set()
+            finally:
+                self._condition.release()
         if not woke:
             waiter.cancelled.set()
             self._acquire_condition(deadline)
@@ -1674,6 +1853,8 @@ class PinnedTransportProxy:
     def _publish_wire_terminal(self, call_id: int) -> None:
         self._published_terminal_call = call_id
         self._published_terminal.set()
+        for waiter in self._waiter_snapshot:
+            waiter.completed.set()
 
     def _settle_published_terminal(self, deadline: float) -> None:
         if not self._published_terminal.is_set():
@@ -1684,7 +1865,7 @@ class PinnedTransportProxy:
         if not self._condition.acquire(timeout=max(0.0, deadline - time.monotonic())):
             raise ResponseTimeoutError("7709 response timed out settling pinned completion")
         self._condition.release()
-        self._wire_terminal(call_id)
+        self._wire_terminal(call_id, deadline=deadline)
         if self._active_call != call_id:
             self._published_terminal.clear()
 
@@ -2853,6 +3034,11 @@ class PooledSocketTransport:
             except BaseException as exc:
                 errors.append(exc)
                 guard_failure = exc
+            try:
+                guard_cleanup_failure = self._runtime_guard.cleanup_failure(deadline=deadline)
+            except BaseException as exc:
+                errors.append(exc)
+                guard_cleanup_failure = exc
             acquired = self._condition.acquire(timeout=max(0.0, deadline - time.monotonic()))
             if not acquired:
                 raise TransportCloseTimeoutError("7709 pool condition blocked shutdown before deadline")
@@ -2900,6 +3086,7 @@ class PooledSocketTransport:
             finally:
                 self._condition.release()
 
+            cleanup_error_count = len(errors)
             if broker is not None:
                 try:
                     self._runtime_guard.seal(
@@ -2954,11 +3141,32 @@ class PooledSocketTransport:
                 except BaseException as exc:
                     errors.append(exc)
 
+            if (
+                guard_cleanup_failure is not None
+                and broker is not None
+                and len(errors) == cleanup_error_count
+            ):
+                try:
+                    self._runtime_guard.clear_cleanup_failure(
+                        pool_epoch=broker.pool_epoch,
+                        broker=broker,
+                        deadline=deadline,
+                    )
+                except BaseException as exc:
+                    errors.append(exc)
+
             try:
                 late_failure = self._runtime_guard.failure(deadline=deadline)
             except BaseException as exc:
                 errors.append(exc)
                 late_failure = exc
+            try:
+                late_cleanup_failure = self._runtime_guard.cleanup_failure(deadline=deadline)
+            except BaseException as exc:
+                errors.append(exc)
+                late_cleanup_failure = exc
+            if late_cleanup_failure is not None:
+                errors.append(late_cleanup_failure)
             failed_closed = failed_before_close or late_failure is not None
             if not errors:
                 cleared = True

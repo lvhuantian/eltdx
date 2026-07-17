@@ -27,7 +27,7 @@ from eltdx.protocol.commands import build_command_frame, parse_command_response
 from eltdx.protocol.constants import TYPE_HANDSHAKE, TYPE_HEARTBEAT
 from eltdx.protocol.frame import RESPONSE_HEADER_SIZE, ResponseFrame, ResponseFrameDecoder
 
-from .push import PushBuffer, PushFrame
+from .push import PushBuffer, PushDropPublication, PushFrame
 
 
 SelectorFactory = Callable[[], selectors.BaseSelector]
@@ -45,6 +45,12 @@ class _IdentityWaiter:
     terminal: bool = False
 
 
+@dataclass(slots=True, eq=False)
+class _IdentityOwnerPublication:
+    token: object
+    released: bool = False
+
+
 class IdentityGate:
     """Cross-thread gate whose owner is released by exact token identity."""
 
@@ -52,9 +58,9 @@ class IdentityGate:
         self._condition = threading.Condition()
         self._state_lock = threading.RLock()
         self._owner: object | None = None
+        self._owner_publication: _IdentityOwnerPublication | None = None
         self._waiters: deque[_IdentityWaiter] = deque()
         self._waiter_snapshot: tuple[_IdentityWaiter, ...] = ()
-        self._published_release: object | None = None
         self._compat = threading.local()
 
     def _state_is_owned(self) -> bool:
@@ -119,7 +125,7 @@ class IdentityGate:
             try:
                 self._apply_published_release_locked()
                 if self._owner is None and not self._waiters:
-                    self._owner = token
+                    self._set_owner_locked(token)
                     return True
                 if deadline is not None and deadline <= time.monotonic():
                     return False
@@ -173,6 +179,7 @@ class IdentityGate:
         if self._owner is not token:
             return False
         self._owner = None
+        self._owner_publication = None
         while self._waiters:
             waiter = self._waiters.popleft()
             if waiter.terminal:
@@ -184,7 +191,7 @@ class IdentityGate:
                 except BaseException:
                     pass
                 continue
-            self._owner = waiter.token
+            self._set_owner_locked(waiter.token)
             waiter.granted = True
             try:
                 waiter.event.set()
@@ -227,17 +234,23 @@ class IdentityGate:
             finally:
                 self._state_lock.release()
             return
-        self._published_release = token
+        publication = self._owner_publication
+        if publication is None or publication.token is not token:
+            return
+        publication.released = True
         for waiter in self._waiter_snapshot:
             waiter.event.set()
 
     def _apply_published_release_locked(self) -> None:
-        token = self._published_release
-        if token is None:
+        publication = self._owner_publication
+        if publication is None or not publication.released:
             return
-        self._published_release = None
-        if self._owner is token:
-            self._handoff_locked(token)
+        if self._owner is publication.token:
+            self._handoff_locked(publication.token)
+
+    def _set_owner_locked(self, token: object) -> None:
+        self._owner = token
+        self._owner_publication = _IdentityOwnerPublication(token)
 
     def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
         token = object()
@@ -444,8 +457,12 @@ class ActorRuntime:
     heartbeat_allowed: Callable[[], bool] | None = None
     request_timeout: float = 8.0
     owns_push_buffer: bool = True
+    owner_settles_push: bool = False
     fatal_callback: Callable[[ActorRuntime, BaseException], None] | None = None
     fatal_settled: bool = False
+    fatal_settlement_lock: threading.Lock = field(default_factory=threading.Lock)
+    fatal_settlement_error: BaseException | None = None
+    unreported_fatal_settlement_error: BaseException | None = None
     successor_grace: float = 0.0
     terminal_yield: bool = False
     control_lock: IdentityGate = field(default_factory=IdentityGate)
@@ -479,6 +496,14 @@ class ActorRuntime:
     stale_event_count: int = 0
     last_handshake: object | None = None
     last_heartbeat: object | None = None
+    push_drop_publication: PushDropPublication = field(default_factory=PushDropPublication)
+
+    def __post_init__(self) -> None:
+        if self.push_buffer is not None:
+            self.push_buffer.register_drop_publication(
+                self.push_drop_publication,
+                deadline=time.monotonic(),
+            )
 
 
 _SUCCESS_CONNECT_CODES = frozenset(
@@ -524,12 +549,14 @@ def start_actor(
     heartbeat_allowed: Callable[[], bool] | None = None,
     request_timeout: float = 8.0,
     owns_push_buffer: bool = True,
+    owner_settles_push: bool = False,
     fatal_callback: Callable[[ActorRuntime, BaseException], None] | None = None,
     successor_grace: float = 0.0,
     terminal_yield: bool = False,
     candidate_callback: CandidateCallback | None = None,
     startup_timeout: float = 1.0,
 ) -> ActorRuntime:
+    startup_deadline = time.monotonic() + max(0.0, startup_timeout)
     runtime = ActorRuntime(
         runtime_epoch=runtime_epoch,
         endpoints=tuple(endpoints),
@@ -540,11 +567,17 @@ def start_actor(
         heartbeat_allowed=heartbeat_allowed,
         request_timeout=request_timeout,
         owns_push_buffer=owns_push_buffer,
+        owner_settles_push=owner_settles_push,
         fatal_callback=fatal_callback,
         successor_grace=max(0.0, successor_grace),
         terminal_yield=terminal_yield,
     )
     try:
+        if push_buffer is not None and not push_buffer.register_drop_publication(
+            runtime.push_drop_publication,
+            deadline=startup_deadline,
+        ):
+            raise TransportCloseTimeoutError("7709 push publication registration timed out")
         thread = threading.Thread(
             target=_run_actor,
             args=(runtime,),
@@ -556,13 +589,13 @@ def start_actor(
             candidate_callback(runtime)
         thread.start()
     except BaseException as exc:
-        _fail_actor_startup(runtime, exc)
+        _fail_actor_startup(runtime, exc, deadline=startup_deadline)
         raise ActorStartupError("7709 Actor failed before thread startup", runtime) from exc
-    if not runtime.started.wait(startup_timeout):
+    if not runtime.started.wait(max(0.0, startup_deadline - time.monotonic())):
         request_actor_stop(runtime)
         raise ActorStartupError("7709 Actor failed to start", runtime)
     if runtime.fatal_error is not None:
-        _settle_fatal(runtime, deadline=time.monotonic() + max(0.0, startup_timeout))
+        _settle_fatal(runtime, deadline=startup_deadline)
         raise ActorStartupError("7709 Actor failed during startup", runtime) from runtime.fatal_error
     return runtime
 
@@ -679,10 +712,23 @@ def wait_ticket(ticket: ConnectTicket | RequestTicket) -> Any:
             stage = "Actor completion"
         raise ResponseTimeoutError(f"7709 response timed out during {stage}")
     _settle_ticket_completion(ticket)
+    completion_error = ticket.completion_error
+    propagate_completion_error = completion_error is not None and getattr(
+        ticket.completion,
+        "propagate_settlement_error",
+        False,
+    )
+    terminal_error: BaseException | None = None
     if ticket.state is RequestState.SUCCESS and ticket.completed_at is not None and ticket.completed_at > ticket.deadline:
-        raise ResponseTimeoutError("7709 response timed out during Actor completion")
-    if ticket.error is not None:
-        raise ticket.error
+        terminal_error = ResponseTimeoutError("7709 response timed out during Actor completion")
+    elif ticket.error is not None:
+        terminal_error = ticket.error
+    if terminal_error is not None:
+        if propagate_completion_error:
+            raise terminal_error from completion_error
+        raise terminal_error
+    if propagate_completion_error:
+        raise completion_error
     if isinstance(ticket, ConnectTicket):
         return ticket.connected_host
     return ticket.result
@@ -723,6 +769,14 @@ def _acquire_control_lock(
     raise TransportCloseTimeoutError(f"7709 Actor control lock blocked {operation} before deadline")
 
 
+def _remove_cleanup_error_locked(runtime: ActorRuntime, error: BaseException) -> None:
+    deferred = runtime.deferred_cleanup_error
+    if runtime.cleanup_error is error:
+        runtime.cleanup_error = None if deferred is error else deferred
+    if deferred is error or runtime.cleanup_error is deferred:
+        runtime.deferred_cleanup_error = None
+
+
 def close_actor(runtime: ActorRuntime, timeout: float = 1.0) -> None:
     deadline = time.monotonic() + max(0.0, timeout)
     if runtime.stopped.is_set() and runtime.fatal_error is not None:
@@ -747,9 +801,29 @@ def close_actor(runtime: ActorRuntime, timeout: float = 1.0) -> None:
         finally:
             runtime.control_lock.release_token(control_token)
         raise TransportCloseTimeoutError("7709 Actor did not stop within 1 second")
+    if runtime.owns_push_buffer and not runtime.owner_settles_push and runtime.push_buffer is not None:
+        previous_push_error = runtime.push_cleanup_error
+        try:
+            runtime.push_buffer.close_before_deadline(deadline, runtime.fatal_error)
+        except BaseException as exc:
+            runtime.push_cleanup_error = exc
+            if runtime.cleanup_error is None or runtime.cleanup_error is previous_push_error:
+                runtime.cleanup_error = exc
+        else:
+            control_token = _acquire_control_lock(runtime, deadline, "push cleanup completion")
+            try:
+                if previous_push_error is not None and runtime.cleanup_error is previous_push_error:
+                    runtime.cleanup_error = runtime.deferred_cleanup_error
+                runtime.push_cleanup_error = None
+            finally:
+                runtime.control_lock.release_token(control_token)
     control_token = _acquire_control_lock(runtime, deadline, "close completion")
     try:
-        cleanup_error = runtime.cleanup_error
+        unreported_fatal_error = runtime.unreported_fatal_settlement_error
+        cleanup_error = unreported_fatal_error or runtime.cleanup_error
+        if unreported_fatal_error is not None:
+            runtime.unreported_fatal_settlement_error = None
+            _remove_cleanup_error_locked(runtime, unreported_fatal_error)
         if cleanup_error is not None:
             runtime.state = RuntimeState.FAILED_CLOSING
         elif failed_before_close or runtime.state is RuntimeState.FAILED_CLOSING:
@@ -1453,7 +1527,8 @@ def _route_frame(runtime: ActorRuntime, generation: TcpGeneration, received: Rec
             runtime.stale_event_count += 1
         else:
             push_buffer.offer_nowait(
-                PushFrame(runtime.runtime_epoch, generation.generation_id, generation.endpoint.host, response)
+                PushFrame(runtime.runtime_epoch, generation.generation_id, generation.endpoint.host, response),
+                drop_publication=runtime.push_drop_publication,
             )
         return
 
@@ -1838,13 +1913,29 @@ def _publish_fatal(runtime: ActorRuntime, error: BaseException) -> None:
 
 
 def _settle_fatal(runtime: ActorRuntime, *, deadline: float | None = None) -> None:
+    timeout = None if deadline is None else max(0.0, deadline - time.monotonic())
+    acquired = (
+        runtime.fatal_settlement_lock.acquire()
+        if timeout is None
+        else runtime.fatal_settlement_lock.acquire(timeout=timeout)
+    )
+    if not acquired:
+        raise TransportCloseTimeoutError("7709 fatal settlement blocked before deadline")
+    try:
+        _settle_fatal_owned(runtime, deadline=deadline)
+    finally:
+        runtime.fatal_settlement_lock.release()
+
+
+def _settle_fatal_owned(runtime: ActorRuntime, *, deadline: float | None = None) -> None:
     callback = runtime.fatal_callback
     with runtime.control_lock:
         if runtime.fatal_settled:
             return
-        runtime.fatal_settled = True
         error = runtime.fatal_error
     if callback is None or error is None:
+        with runtime.control_lock:
+            runtime.fatal_settled = True
         return
     settle = getattr(callback, "settle", None)
     owned = settle if settle is not None else callback
@@ -1852,8 +1943,32 @@ def _settle_fatal(runtime: ActorRuntime, *, deadline: float | None = None) -> No
         owned(runtime, deadline=deadline) if settle is not None else owned(runtime, error)
     except BaseException as exc:
         with runtime.control_lock:
-            if runtime.cleanup_error is None:
+            previous = runtime.fatal_settlement_error
+            legacy_owner_cleanup = settle is None and runtime.owner_settles_push
+            if not legacy_owner_cleanup and (
+                runtime.cleanup_error is None or runtime.cleanup_error is previous
+            ):
                 runtime.cleanup_error = exc
+            if not legacy_owner_cleanup:
+                runtime.fatal_settlement_error = exc
+            if (
+                not legacy_owner_cleanup
+                and not isinstance(exc, (TransportCloseTimeoutError, ResponseTimeoutError))
+                and runtime.unreported_fatal_settlement_error is None
+            ):
+                runtime.unreported_fatal_settlement_error = exc
+            if settle is None:
+                runtime.fatal_settled = True
+        return
+    with runtime.control_lock:
+        previous = runtime.fatal_settlement_error
+        runtime.fatal_settlement_error = None
+        runtime.fatal_settled = True
+        if (
+            previous is not None
+            and runtime.unreported_fatal_settlement_error is not previous
+        ):
+            _remove_cleanup_error_locked(runtime, previous)
 
 
 def _drop_generation(runtime: ActorRuntime, reason: BaseException | None) -> None:
@@ -1941,7 +2056,12 @@ def _notify_submitted_ticket(
             _complete_ticket(ticket, RequestState.FAILED, error=exc, terminal_claimed=True)
 
 
-def _fail_actor_startup(runtime: ActorRuntime, error: BaseException) -> None:
+def _fail_actor_startup(
+    runtime: ActorRuntime,
+    error: BaseException,
+    *,
+    deadline: float | None = None,
+) -> None:
     cleanup_errors: list[BaseException] = []
     push_cleanup_error: BaseException | None = None
     with runtime.control_lock:
@@ -1950,16 +2070,46 @@ def _fail_actor_startup(runtime: ActorRuntime, error: BaseException) -> None:
         runtime.state = RuntimeState.FAILED
     if runtime.push_buffer is not None and runtime.owns_push_buffer:
         try:
-            runtime.push_buffer.close(error)
+            if deadline is None:
+                runtime.push_buffer.close(error)
+            else:
+                runtime.push_buffer.close_before_deadline(deadline, error)
         except BaseException as exc:
             cleanup_errors.append(exc)
             push_cleanup_error = exc
     callback = runtime.fatal_callback
     if callback is not None:
-        try:
-            callback(runtime, error)
-        except BaseException as exc:
-            cleanup_errors.append(exc)
+        callback_succeeded = False
+        publish = getattr(callback, "publish_nonblocking", None)
+        settle = getattr(callback, "settle", None)
+        if publish is not None and settle is not None:
+            try:
+                publish(runtime, error)
+            except BaseException as exc:
+                cleanup_errors.append(exc)
+            else:
+                try:
+                    settle(runtime, deadline=deadline)
+                except BaseException as exc:
+                    cleanup_errors.append(exc)
+                    with runtime.control_lock:
+                        runtime.fatal_settlement_error = exc
+                        if (
+                            not isinstance(exc, (TransportCloseTimeoutError, ResponseTimeoutError))
+                            and runtime.unreported_fatal_settlement_error is None
+                        ):
+                            runtime.unreported_fatal_settlement_error = exc
+                else:
+                    callback_succeeded = True
+        else:
+            try:
+                callback(runtime, error)
+            except BaseException as exc:
+                cleanup_errors.append(exc)
+            else:
+                callback_succeeded = True
+        if callback_succeeded or settle is None:
+            runtime.fatal_settled = True
     with runtime.control_lock:
         if cleanup_errors:
             runtime.cleanup_error = cleanup_errors[0]
@@ -1972,7 +2122,6 @@ def _fail_actor_startup(runtime: ActorRuntime, error: BaseException) -> None:
 def _finish_runtime(runtime: ActorRuntime, initial_cleanup_error: BaseException | None = None) -> None:
     error = runtime.fatal_error or ConnectionClosedError("7709 Actor stopped")
     cleanup_errors: list[BaseException] = [] if initial_cleanup_error is None else [initial_cleanup_error]
-    push_cleanup_error: BaseException | None = None
     selector = runtime.selector
     reader = runtime.wake_reader
     writer = runtime.wake_writer
@@ -2002,11 +2151,7 @@ def _finish_runtime(runtime: ActorRuntime, initial_cleanup_error: BaseException 
         except BaseException as exc:
             cleanup_errors.append(exc)
         if runtime.push_buffer is not None and runtime.owns_push_buffer:
-            try:
-                runtime.push_buffer.close(runtime.fatal_error)
-            except BaseException as exc:
-                cleanup_errors.append(exc)
-                push_cleanup_error = exc
+            runtime.push_buffer.publish_close(runtime.fatal_error)
 
         if selector is not None and reader is not None:
             try:
@@ -2039,16 +2184,21 @@ def _finish_runtime(runtime: ActorRuntime, initial_cleanup_error: BaseException 
         notify_cleanup_failure = False
         if cleanup_errors:
             with runtime.control_lock:
+                cleanup_error = cleanup_errors[0]
                 if runtime.fatal_error is None:
-                    runtime.fatal_error = cleanup_errors[0]
-                    runtime.last_error = cleanup_errors[0]
+                    runtime.fatal_error = cleanup_error
+                    runtime.last_error = cleanup_error
                     notify_cleanup_failure = True
-                runtime.cleanup_error = cleanup_errors[0]
+                if runtime.cleanup_error is None:
+                    runtime.cleanup_error = cleanup_error
+                elif (
+                    runtime.cleanup_error is runtime.push_cleanup_error
+                    and runtime.deferred_cleanup_error is None
+                ):
+                    runtime.deferred_cleanup_error = cleanup_error
         if notify_cleanup_failure:
             _publish_fatal(runtime, cleanup_errors[0])
         with runtime.control_lock:
-            runtime.push_cleanup_error = push_cleanup_error
-            runtime.deferred_cleanup_error = _first_non_push_cleanup_error(cleanup_errors, push_cleanup_error)
             runtime.selector = selector if selector_close_failed else None
             runtime.wake_reader = reader if reader_close_failed else None
             runtime.wake_writer = writer if writer_close_failed else None

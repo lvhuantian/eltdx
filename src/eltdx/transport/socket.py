@@ -64,7 +64,7 @@ class _TerminalCompletion:
         self._request_gate = request_gate
         self._request_token = request_token
         self._guard = threading.Lock()
-        self._done = False
+        self._settled = False
 
     def publish(self, ticket: object | None) -> None:
         callback_publish = getattr(self._callback, "publish_nonblocking", None)
@@ -75,11 +75,16 @@ class _TerminalCompletion:
 
     publish_nonblocking = publish
 
+    @property
+    def propagate_settlement_error(self) -> bool:
+        return bool(getattr(self._callback, "propagate_settlement_error", False))
+
     def settle(self, ticket: object | None = None) -> None:
+        self.publish(ticket)
         with self._guard:
-            if self._done:
+            if self._settled:
                 return
-            self._done = True
+            self._settled = True
         try:
             if self._callback is not None:
                 self._callback(ticket)
@@ -88,7 +93,6 @@ class _TerminalCompletion:
                 self._request_gate.release_token(self._request_token)
 
     def __call__(self, ticket: object | None) -> None:
-        self.publish(ticket)
         self.settle(ticket)
 
 
@@ -572,6 +576,17 @@ class SocketTransport:
                 owned_push_buffer.close_before_deadline(deadline)
             except BaseException as exc:
                 push_close_errors.append((owned_push_buffer, exc))
+                for item in items:
+                    if item.push_buffer is owned_push_buffer and item.owns_push_buffer:
+                        try:
+                            _record_push_cleanup_error(
+                                item,
+                                owned_push_buffer,
+                                exc,
+                                deadline=deadline,
+                            )
+                        except BaseException as record_error:
+                            close_errors.append(record_error)
             try:
                 push_closed = owned_push_buffer.snapshot_before_deadline(deadline).closed
             except BaseException as exc:
@@ -1014,6 +1029,7 @@ class SocketTransport:
                 heartbeat_allowed=self._heartbeat_allowed,
                 request_timeout=self._timeout,
                 owns_push_buffer=self._owns_push_buffer,
+                owner_settles_push=True,
                 fatal_callback=self._actor_fatal_callback,
                 successor_grace=self._successor_grace,
                 terminal_yield=self._terminal_yield,
@@ -1573,6 +1589,27 @@ def _clear_resolved_push_cleanup(
         if runtime.cleanup_error is runtime.push_cleanup_error:
             runtime.cleanup_error = runtime.deferred_cleanup_error
         runtime.push_cleanup_error = None
+    finally:
+        runtime.control_lock.release_token(control_token)
+
+
+def _record_push_cleanup_error(
+    runtime: ActorRuntime,
+    push_buffer: PushBuffer,
+    error: BaseException,
+    *,
+    deadline: float | None = None,
+) -> None:
+    control_token = _acquire_control_lock(runtime, deadline, "push cleanup failure")
+    try:
+        if runtime.push_buffer is not push_buffer:
+            return
+        previous_push_error = runtime.push_cleanup_error
+        existing = runtime.cleanup_error
+        if existing is not None and existing is not previous_push_error:
+            runtime.deferred_cleanup_error = existing
+        runtime.push_cleanup_error = error
+        runtime.cleanup_error = error
     finally:
         runtime.control_lock.release_token(control_token)
 

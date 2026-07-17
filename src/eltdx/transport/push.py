@@ -35,6 +35,14 @@ class PushBufferSnapshot:
     closed: bool
 
 
+@dataclass(slots=True, eq=False)
+class PushDropPublication:
+    """Monotonic drop count written by one Actor and read by the owner."""
+
+    total: int = 0
+    observed: int = 0
+
+
 class PushBuffer:
     def __init__(self, owner_epoch: int, *, max_frames: int = 1024, max_bytes: int = 8 * 1024 * 1024) -> None:
         if max_frames <= 0:
@@ -50,9 +58,15 @@ class PushBuffer:
         self._max_frames_observed = 0
         self._max_bytes_observed = 0
         self._dropped_total = 0
-        self._gap_pending = False
+        self._reported_dropped_total = 0
+        self._fallback_drop_publication = PushDropPublication()
+        self._drop_publications: tuple[PushDropPublication, ...] = (
+            self._fallback_drop_publication,
+        )
         self._closed = False
         self._error: BaseException | None = None
+        self._close_published = False
+        self._published_error: BaseException | None = None
         self._waiters: set[threading.Event] = set()
         self._waiter_snapshot: tuple[threading.Event, ...] = ()
 
@@ -61,15 +75,43 @@ class PushBuffer:
         with self._condition:
             return len(self._frames)
 
-    def offer_nowait(self, frame: PushFrame) -> bool:
+    def register_drop_publication(
+        self,
+        publication: PushDropPublication,
+        *,
+        deadline: float | None = None,
+    ) -> bool:
+        if deadline is None:
+            self._condition.acquire()
+            acquired = True
+        else:
+            acquired = self._condition.acquire(timeout=max(0.0, deadline - time.monotonic()))
+        if not acquired:
+            return False
+        try:
+            if all(item is not publication for item in self._drop_publications):
+                self._drop_publications = self._drop_publications + (publication,)
+            return True
+        finally:
+            self._condition.release()
+
+    def offer_nowait(
+        self,
+        frame: PushFrame,
+        *,
+        drop_publication: PushDropPublication | None = None,
+    ) -> bool:
         if frame.runtime_epoch != self.owner_epoch:
             return False
         size = frame.wire_size
         if not self._condition.acquire(blocking=False):
-            self._dropped_total += 1
-            self._gap_pending = True
+            publication = drop_publication or self._fallback_drop_publication
+            publication.total += 1
+            for waiter in self._waiter_snapshot:
+                waiter.set()
             return False
         try:
+            self._sync_drop_publications_locked()
             if self._closed:
                 return False
             dropped = 0
@@ -86,7 +128,6 @@ class PushBuffer:
                 accepted = True
             if dropped:
                 self._dropped_total += dropped
-                self._gap_pending = True
             self._max_frames_observed = max(self._max_frames_observed, len(self._frames))
             self._max_bytes_observed = max(self._max_bytes_observed, self._bytes)
             self._condition.notify()
@@ -104,6 +145,10 @@ class PushBuffer:
                     frame = self._frames.popleft()
                     self._bytes -= frame.wire_size
                     return frame
+                if self._close_published:
+                    if self._published_error is not None:
+                        raise self._published_error
+                    return None
                 if self._closed:
                     if self._error is not None:
                         raise self._error
@@ -117,6 +162,13 @@ class PushBuffer:
                     waiter = threading.Event()
                     self._waiters.add(waiter)
                     self._waiter_snapshot = tuple(self._waiters)
+                    self._sync_drop_publications_locked()
+                    if (
+                        self._dropped_total > self._reported_dropped_total
+                        or self._close_published
+                        or self._closed
+                    ):
+                        waiter.set()
                 else:
                     waiter.clear()
             waiter.wait(remaining)
@@ -137,15 +189,22 @@ class PushBuffer:
     def close(self, error: BaseException | None = None) -> None:
         wake: tuple[threading.Event, ...] = ()
         with self._condition:
-            if self._closed:
-                return
+            self._sync_drop_publications_locked()
             self._closed = True
-            self._error = error
+            if self._error is None:
+                self._error = error or self._published_error
             self._frames.clear()
             self._bytes = 0
             wake = self._waiter_snapshot
             self._condition.notify_all()
         for waiter in wake:
+            waiter.set()
+
+    def publish_close(self, error: BaseException | None = None) -> None:
+        if self._published_error is None:
+            self._published_error = error
+        self._close_published = True
+        for waiter in self._waiter_snapshot:
             waiter.set()
 
     def close_before_deadline(self, deadline: float, error: BaseException | None = None) -> None:
@@ -158,14 +217,15 @@ class PushBuffer:
             self._condition.release()
 
     def abandon(self, error: BaseException | None = None) -> None:
-        self._closed = True
         self._error = error
+        self._closed = True
         for waiter in self._waiter_snapshot:
             waiter.set()
         acquired = self._condition.acquire(blocking=False)
         if not acquired:
             return
         try:
+            self._sync_drop_publications_locked()
             self._frames.clear()
             self._bytes = 0
             self._condition.notify_all()
@@ -174,6 +234,7 @@ class PushBuffer:
 
     def snapshot(self) -> PushBufferSnapshot:
         with self._condition:
+            self._sync_drop_publications_locked()
             return PushBufferSnapshot(
                 owner_epoch=self.owner_epoch,
                 frame_count=len(self._frames),
@@ -181,7 +242,7 @@ class PushBuffer:
                 max_frames_observed=self._max_frames_observed,
                 max_bytes_observed=self._max_bytes_observed,
                 dropped_total=self._dropped_total,
-                gap_pending=self._gap_pending,
+                gap_pending=self._dropped_total > self._reported_dropped_total,
                 closed=self._closed,
             )
 
@@ -195,7 +256,16 @@ class PushBuffer:
             self._condition.release()
 
     def _raise_gap_locked(self) -> None:
-        if not self._gap_pending:
+        self._sync_drop_publications_locked()
+        if self._dropped_total <= self._reported_dropped_total:
             return
-        self._gap_pending = False
+        self._reported_dropped_total = self._dropped_total
         raise PushOverflowError(f"7709 push gap detected; dropped_total={self._dropped_total}")
+
+    def _sync_drop_publications_locked(self) -> None:
+        for publication in self._drop_publications:
+            total = publication.total
+            if total <= publication.observed:
+                continue
+            self._dropped_total += total - publication.observed
+            publication.observed = total

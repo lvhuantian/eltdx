@@ -2942,13 +2942,49 @@ def test_terminal_completion_defers_exact_gate_release_while_state_lock_is_held(
     completer.start()
     try:
         assert ticket.completed.wait(timeout=0.2)
-        assert gate._published_release is token
+        assert gate._owner_publication is not None
+        assert gate._owner_publication.token is token
+        assert gate._owner_publication.released
     finally:
         release.set()
         holder.join(timeout=2)
         completer.join(timeout=2)
     assert gate.acquire(blocking=False)
     gate.release()
+
+
+def test_stale_deferred_gate_release_cannot_overwrite_current_owner_release() -> None:
+    gate = socket_module._RequestGate()
+    old_token = object()
+    current_token = object()
+    assert gate.acquire_token(old_token, time.monotonic() + 1)
+    assert gate.release_token(old_token)
+    assert gate.acquire_token(current_token, time.monotonic() + 1)
+
+    held = threading.Event()
+    release = threading.Event()
+
+    def hold_state_lock() -> None:
+        with gate._state_lock:
+            held.set()
+            release.wait()
+
+    holder = threading.Thread(target=hold_state_lock)
+    holder.start()
+    assert held.wait(timeout=2)
+    try:
+        gate.publish_release_token(current_token)
+        gate.publish_release_token(old_token)
+        assert gate._owner_publication is not None
+        assert gate._owner_publication.token is current_token
+        assert gate._owner_publication.released
+    finally:
+        release.set()
+        holder.join(timeout=2)
+
+    replacement = object()
+    assert gate.acquire_token(replacement, time.monotonic() + 0.1)
+    assert gate.release_token(replacement)
 
 
 def test_unmatched_frame_drops_with_gap_instead_of_waiting_for_push_lock() -> None:

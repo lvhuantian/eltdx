@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import gc
+import inspect
 import selectors
 import socket
+import sys
 import threading
 import time
 import weakref
@@ -12,6 +14,7 @@ import pytest
 from actor_support import Scripted7709Server, handshake_payload, read_request, response_bytes
 from eltdx.exceptions import ConnectionClosedError, ResponseTimeoutError, TransportCloseTimeoutError
 from eltdx.protocol.constants import TYPE_SECURITY_COUNT
+from eltdx.protocol.frame import ResponseFrame
 from eltdx.transport import actor as actor_module
 from eltdx.transport import pool as pool_module
 from eltdx.transport import socket as socket_module
@@ -23,7 +26,7 @@ from eltdx.transport.pool import (
     PooledSocketTransport,
     RuntimeRegistration,
 )
-from eltdx.transport.push import PushBuffer
+from eltdx.transport.push import PushBuffer, PushFrame
 from eltdx.transport.socket import SocketTransport
 
 
@@ -1702,6 +1705,8 @@ def test_actor_fatal_callback_failure_survives_push_cleanup_retry(monkeypatch) -
     assert buffers[0].snapshot().closed
     assert candidate.cleanup_error is None
     assert candidate.push_cleanup_error is None
+    assert candidate.fatal_settlement_error is None
+    assert candidate.unreported_fatal_settlement_error is None
     assert candidate.state is RuntimeState.FAILED_CLOSED
 
 
@@ -3207,6 +3212,56 @@ def test_pool_runtime_fatal_cleanup_is_best_effort_after_broker_deadline() -> No
 
     assert push.snapshot().closed
     assert failed.stop_requested and sibling.stop_requested
+    assert isinstance(guard.cleanup_failure(), TransportCloseTimeoutError)
+
+
+def test_pool_runtime_fatal_retains_and_surfaces_unexpected_cleanup_error(monkeypatch) -> None:
+    broker = LeaseBroker(1, pool_size=1, max_pending_requests=1)
+    guard = PoolRuntimeGuard()
+    guard.configure(broker, PushBuffer(1))
+    runtime = ActorRuntime(1, ())
+    assert guard.add_runtime(runtime, pool_epoch=1, broker=broker)
+    cleanup_error = RuntimeError("broker cleanup failed")
+    monkeypatch.setattr(broker, "close", lambda **_kwargs: (_ for _ in ()).throw(cleanup_error))
+
+    with pytest.raises(RuntimeError, match="broker cleanup failed") as raised:
+        guard.fail(runtime, RuntimeError("fatal"), pool_epoch=1, broker=broker)
+
+    assert raised.value is cleanup_error
+    assert guard.cleanup_failure() is cleanup_error
+
+
+def test_pool_runtime_fatal_cleanup_cell_obeys_deadline() -> None:
+    broker = LeaseBroker(1, pool_size=1, max_pending_requests=1)
+    guard = PoolRuntimeGuard()
+    guard.configure(broker, PushBuffer(1))
+    runtime = ActorRuntime(1, ())
+    assert guard.add_runtime(runtime, pool_epoch=1, broker=broker)
+    held = threading.Event()
+    release = threading.Event()
+
+    def hold_cell() -> None:
+        with guard._failure_cell.lock:
+            held.set()
+            release.wait()
+
+    holder = threading.Thread(target=hold_cell)
+    holder.start()
+    assert held.wait(timeout=2)
+    started = time.monotonic()
+    try:
+        with pytest.raises(TransportCloseTimeoutError, match="publication blocked"):
+            guard.fail(
+                runtime,
+                RuntimeError("fatal"),
+                pool_epoch=1,
+                broker=broker,
+                deadline=started + 0.03,
+            )
+        assert time.monotonic() - started < 0.15
+    finally:
+        release.set()
+        holder.join(timeout=2)
 
 
 def test_pool_runtime_abandon_attempts_every_cleanup_stage(monkeypatch) -> None:
@@ -3306,6 +3361,434 @@ def test_pool_fatal_deadline_error_does_not_poison_actor_cleanup() -> None:
     assert push.snapshot().closed
     actor_module.close_actor(runtime)
     assert runtime.state is RuntimeState.FAILED_CLOSED
+
+
+def test_fatal_settlement_timeout_can_be_retried_by_close() -> None:
+    class RetryableFatal:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def publish_nonblocking(self, runtime, error) -> None:
+            return None
+
+        def settle(self, runtime, *, deadline=None) -> None:
+            self.calls += 1
+            if self.calls == 1:
+                raise TransportCloseTimeoutError("first cleanup attempt")
+
+    callback = RetryableFatal()
+    runtime = ActorRuntime(1, (), fatal_callback=callback)
+    runtime.fatal_error = RuntimeError("fatal")
+    runtime.state = RuntimeState.FAILED
+    runtime.stopped.set()
+
+    with pytest.raises(TransportCloseTimeoutError):
+        actor_module.close_actor(runtime, timeout=0.1)
+    actor_module.close_actor(runtime, timeout=0.1)
+
+    assert callback.calls == 2
+    assert runtime.fatal_settled
+    assert runtime.cleanup_error is None
+
+
+def test_pre_thread_fatal_settlement_timeout_clears_after_successful_close_retry() -> None:
+    class RetryableFatal:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def publish_nonblocking(self, runtime, error) -> None:
+            return None
+
+        def settle(self, runtime, *, deadline=None) -> None:
+            self.calls += 1
+            if self.calls == 1:
+                raise TransportCloseTimeoutError("startup fatal cleanup timed out")
+
+    callback = RetryableFatal()
+
+    def reject_candidate(_runtime: ActorRuntime) -> None:
+        raise RuntimeError("candidate publication failed")
+
+    with pytest.raises(ActorStartupError, match="before thread startup") as raised:
+        actor_module.start_actor(
+            1,
+            (),
+            fatal_callback=callback,
+            candidate_callback=reject_candidate,
+        )
+
+    runtime = raised.value.runtime
+    assert callback.calls == 1
+    assert isinstance(runtime.cleanup_error, TransportCloseTimeoutError)
+    assert runtime.fatal_settlement_error is runtime.cleanup_error
+    assert not runtime.fatal_settled
+
+    actor_module.close_actor(runtime, timeout=0.1)
+
+    assert callback.calls == 2
+    assert runtime.fatal_settled
+    assert runtime.fatal_settlement_error is None
+    assert runtime.cleanup_error is None
+    assert runtime.state is RuntimeState.FAILED_CLOSED
+
+
+def test_internal_unexpected_fatal_settlement_error_is_reported_by_public_close() -> None:
+    cleanup_error = RuntimeError("unexpected fatal cleanup")
+
+    class RetryableFatal:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def publish_nonblocking(self, runtime, error) -> None:
+            return None
+
+        def settle(self, runtime, *, deadline=None) -> None:
+            self.calls += 1
+            if self.calls == 1:
+                raise cleanup_error
+
+    callback = RetryableFatal()
+    runtime = ActorRuntime(1, (), fatal_callback=callback)
+    runtime.fatal_error = RuntimeError("fatal")
+    runtime.state = RuntimeState.FAILED
+    runtime.stopped.set()
+
+    actor_module._settle_fatal(runtime, deadline=time.monotonic() + 0.1)
+
+    assert callback.calls == 1
+    assert runtime.cleanup_error is cleanup_error
+    assert runtime.fatal_settlement_error is cleanup_error
+    assert not runtime.fatal_settled
+
+    with pytest.raises(TransportCloseTimeoutError) as raised:
+        actor_module.close_actor(runtime, timeout=0.1)
+
+    assert raised.value.__cause__ is cleanup_error
+    assert callback.calls == 2
+    assert runtime.fatal_settled
+    assert runtime.cleanup_error is None
+    actor_module.close_actor(runtime, timeout=0.1)
+
+
+def test_unexpected_fatal_settlement_survives_later_timeout_and_success() -> None:
+    cleanup_error = RuntimeError("unexpected fatal cleanup")
+
+    class LayeredFatal:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def publish_nonblocking(self, runtime, error) -> None:
+            return None
+
+        def settle(self, runtime, *, deadline=None) -> None:
+            self.calls += 1
+            if self.calls == 1:
+                raise cleanup_error
+            if self.calls == 2:
+                raise TransportCloseTimeoutError("retry timed out")
+
+    callback = LayeredFatal()
+    runtime = ActorRuntime(1, (), fatal_callback=callback)
+    runtime.fatal_error = RuntimeError("fatal")
+    runtime.state = RuntimeState.FAILED
+    runtime.stopped.set()
+
+    actor_module._settle_fatal(runtime, deadline=time.monotonic() + 0.1)
+    actor_module._settle_fatal(runtime, deadline=time.monotonic() + 0.1)
+
+    assert runtime.unreported_fatal_settlement_error is cleanup_error
+    assert isinstance(runtime.cleanup_error, TransportCloseTimeoutError)
+    assert not runtime.fatal_settled
+
+    with pytest.raises(TransportCloseTimeoutError) as raised:
+        actor_module.close_actor(runtime, timeout=0.1)
+
+    assert raised.value.__cause__ is cleanup_error
+    assert callback.calls == 3
+    assert runtime.fatal_settled
+    assert runtime.cleanup_error is None
+    assert runtime.unreported_fatal_settlement_error is None
+    actor_module.close_actor(runtime, timeout=0.1)
+
+
+def test_pool_close_surfaces_actor_fatal_cleanup_then_retries_cleanly(monkeypatch) -> None:
+    pool = PooledSocketTransport(
+        ["127.0.0.1:9"],
+        pool_size=1,
+        timeout=0.5,
+        heartbeat_interval=None,
+    )
+    broker, push = pool._ensure_started()
+    slot = pool._transports[0]
+    fatal_handle = slot._actor_fatal_callback
+    runtime = ActorRuntime(
+        broker.pool_epoch,
+        (),
+        push_buffer=push,
+        owns_push_buffer=False,
+        owner_settles_push=True,
+        fatal_callback=fatal_handle,
+    )
+    runtime.state = RuntimeState.FAILED
+    runtime.fatal_error = RuntimeError("actor fatal")
+    runtime.stopped.set()
+    assert pool._runtime_guard.add_runtime(
+        runtime,
+        pool_epoch=broker.pool_epoch,
+        broker=broker,
+    )
+    with slot._lifecycle:
+        slot._runtime = runtime
+        slot._push_buffer = push
+
+    cleanup_error = RuntimeError("unexpected broker cleanup")
+    real_close = broker.close
+    close_calls = 0
+
+    def fail_once(*, deadline=None) -> None:
+        nonlocal close_calls
+        close_calls += 1
+        if close_calls == 1:
+            raise cleanup_error
+        real_close(deadline=deadline)
+
+    monkeypatch.setattr(broker, "close", fail_once)
+    fatal_handle.publish(runtime, runtime.fatal_error)
+    actor_module._settle_fatal(runtime, deadline=time.monotonic() + 0.3)
+
+    assert runtime.cleanup_error is cleanup_error
+    assert runtime.unreported_fatal_settlement_error is cleanup_error
+    assert pool._runtime_guard.cleanup_failure() is cleanup_error
+    assert not runtime.fatal_settled
+
+    with pytest.raises(TransportCloseTimeoutError) as raised:
+        pool.close()
+
+    assert raised.value.__cause__ is cleanup_error
+    assert pool._state is PoolState.FAILED_CLOSING
+    assert runtime.state is RuntimeState.FAILED_CLOSING
+    assert runtime.cleanup_error is None
+    assert runtime.unreported_fatal_settlement_error is None
+    assert pool._runtime_guard.cleanup_failure() is None
+    assert runtime.fatal_settled
+    assert runtime.stopped.is_set()
+    assert runtime.actor_thread is None
+    assert runtime.generation is None
+    assert runtime.selector is None
+    assert runtime.wake_reader is None and runtime.wake_writer is None
+    assert runtime.pending_task is None and runtime.active_task is None
+    assert not runtime.cancel_requests
+    assert broker.snapshot().closed
+    assert push.snapshot().closed
+
+    pool.close()
+
+    broker_snapshot = broker.snapshot()
+    push_snapshot = push.snapshot()
+    assert pool._state is PoolState.FAILED_CLOSED
+    assert runtime.state is RuntimeState.FAILED_CLOSED
+    assert broker_snapshot.waiter_count == 0
+    assert broker_snapshot.pin_waiter_count == 0
+    assert broker_snapshot.active_leases == 0
+    assert push_snapshot.frame_count == 0
+    assert push_snapshot.byte_count == 0
+
+
+def test_successful_fatal_settlement_preserves_unrelated_cleanup_error() -> None:
+    class SuccessfulFatal:
+        def settle(self, runtime, *, deadline=None) -> None:
+            return None
+
+    resource_error = RuntimeError("selector cleanup failed")
+    runtime = ActorRuntime(1, (), fatal_callback=SuccessfulFatal())
+    runtime.fatal_error = RuntimeError("fatal")
+    runtime.cleanup_error = resource_error
+    runtime.state = RuntimeState.FAILED
+    runtime.stopped.set()
+
+    with pytest.raises(TransportCloseTimeoutError) as raised:
+        actor_module.close_actor(runtime, timeout=0.1)
+
+    assert raised.value.__cause__ is resource_error
+    assert runtime.cleanup_error is resource_error
+
+
+def test_actor_stop_does_not_wait_for_owned_push_condition() -> None:
+    push = PushBuffer(1)
+    runtime = actor_module.start_actor(1, (), push_buffer=push)
+    with push._condition:
+        actor_module.request_actor_stop(runtime)
+        assert runtime.stopped.wait(timeout=0.2)
+    push.close()
+    actor_module.close_actor(runtime)
+
+    assert runtime.actor_thread is not None and not runtime.actor_thread.is_alive()
+    assert push.snapshot().closed
+
+
+def test_close_actor_retries_deferred_owned_push_cleanup() -> None:
+    push = PushBuffer(1)
+    runtime = actor_module.start_actor(1, (), push_buffer=push)
+    response = ResponseFrame(0, 1, 1, 1, 1, b"x", b"x" * 17)
+    assert push.offer_nowait(PushFrame(1, 1, "127.0.0.1:9", response))
+    held = threading.Event()
+    release = threading.Event()
+
+    def hold_push() -> None:
+        with push._condition:
+            held.set()
+            release.wait()
+
+    holder = threading.Thread(target=hold_push)
+    holder.start()
+    assert held.wait(timeout=2)
+    try:
+        with pytest.raises(TransportCloseTimeoutError):
+            actor_module.close_actor(runtime, timeout=0.05)
+    finally:
+        release.set()
+        holder.join(timeout=2)
+
+    actor_module.close_actor(runtime, timeout=0.2)
+    snapshot = push.snapshot()
+    assert snapshot.closed and snapshot.frame_count == 0 and snapshot.byte_count == 0
+
+
+def test_old_epoch_failure_cell_cannot_block_or_mask_new_epoch_fatal() -> None:
+    guard = PoolRuntimeGuard()
+    old_broker = LeaseBroker(1, pool_size=1, max_pending_requests=1)
+    old_retire = threading.Event()
+    guard.configure(old_broker, PushBuffer(1), retire_event=old_retire)
+    old_runtime = ActorRuntime(1, ())
+    old_error = RuntimeError("old fatal")
+    source, first_line = inspect.getsourcelines(guard.publish_failure)
+    snapshot_lines = [
+        first_line + index
+        for index, line in enumerate(source)
+        if "self._publication_snapshot" in line
+    ]
+    pause_line = snapshot_lines[1]
+    paused = threading.Event()
+    resume = threading.Event()
+
+    def trace(frame, event, _arg):
+        if (
+            event == "line"
+            and frame.f_code is guard.publish_failure.__func__.__code__
+            and frame.f_lineno == pause_line
+        ):
+            paused.set()
+            assert resume.wait(timeout=2)
+        return trace
+
+    def publish_old() -> None:
+        sys.settrace(trace)
+        try:
+            guard.publish_failure(old_runtime, old_error, pool_epoch=1, broker=old_broker)
+        finally:
+            sys.settrace(None)
+
+    old_publisher = threading.Thread(target=publish_old)
+    old_publisher.start()
+    assert paused.wait(timeout=2)
+
+    new_broker = LeaseBroker(2, pool_size=1, max_pending_requests=1)
+    new_retire = threading.Event()
+    guard.configure(new_broker, PushBuffer(2), retire_event=new_retire)
+    new_runtime = ActorRuntime(2, ())
+    new_error = RuntimeError("new fatal")
+    guard.publish_failure(new_runtime, new_error, pool_epoch=2, broker=new_broker)
+    resume.set()
+    old_publisher.join(timeout=2)
+
+    assert not old_publisher.is_alive()
+    assert guard.failure() is new_error
+    assert new_retire.is_set() and new_broker.snapshot().closed
+
+
+def test_push_publication_registration_and_fatal_cleanup_share_startup_deadline() -> None:
+    broker = LeaseBroker(1, pool_size=1, max_pending_requests=1)
+    push = PushBuffer(1)
+    retire = threading.Event()
+    guard = PoolRuntimeGuard()
+    guard.configure(broker, push, retire_event=retire)
+    fatal = pool_module.ActorFatalHandle(weakref.ref(guard), 1, weakref.ref(broker), retire)
+    push_held = threading.Event()
+    broker_held = threading.Event()
+    release = threading.Event()
+
+    def hold_push() -> None:
+        with push._condition:
+            push_held.set()
+            release.wait()
+
+    def hold_broker() -> None:
+        with broker._condition:
+            broker_held.set()
+            release.wait()
+
+    holders = [threading.Thread(target=hold_push), threading.Thread(target=hold_broker)]
+    for holder in holders:
+        holder.start()
+    assert push_held.wait(timeout=2) and broker_held.wait(timeout=2)
+    results: list[BaseException] = []
+
+    def start() -> None:
+        try:
+            actor_module.start_actor(
+                1,
+                (),
+                push_buffer=push,
+                fatal_callback=fatal,
+                startup_timeout=0.05,
+            )
+        except BaseException as exc:
+            results.append(exc)
+
+    starter = threading.Thread(target=start)
+    starter.start()
+    starter.join(timeout=0.2)
+    try:
+        assert not starter.is_alive()
+        assert len(results) == 1 and isinstance(results[0], ActorStartupError)
+    finally:
+        release.set()
+        for holder in holders:
+            holder.join(timeout=2)
+        starter.join(timeout=2)
+
+
+def test_delayed_actor_startup_fatal_keeps_original_absolute_deadline() -> None:
+    class DeadlineFatal:
+        def __init__(self) -> None:
+            self.deadline: float | None = None
+
+        def publish_nonblocking(self, runtime, error) -> None:
+            return None
+
+        def settle(self, runtime, *, deadline=None) -> None:
+            self.deadline = deadline
+
+    fatal = DeadlineFatal()
+    delay = threading.Event()
+
+    def delayed_selector():
+        delay.wait(timeout=0.08)
+        raise RuntimeError("delayed selector failure")
+
+    started = time.monotonic()
+    with pytest.raises(ActorStartupError) as raised:
+        actor_module.start_actor(
+            1,
+            (),
+            selector_factory=delayed_selector,
+            fatal_callback=fatal,
+            startup_timeout=0.2,
+        )
+
+    assert fatal.deadline is not None
+    assert fatal.deadline <= started + 0.23
+    actor_module.close_actor(raised.value.runtime)
 
 
 def test_standalone_close_interrupt_releases_submission_gate_owner() -> None:

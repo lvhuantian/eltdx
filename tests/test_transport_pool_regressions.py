@@ -51,6 +51,77 @@ def test_lease_completion_returns_without_waiting_for_broker_condition() -> None
     assert broker.snapshot().active_leases == 0
 
 
+def test_deferred_lease_completion_wakes_existing_capacity_waiter() -> None:
+    broker = LeaseBroker(1, pool_size=1, max_pending_requests=1)
+    lease = broker.acquire(time.monotonic() + 1)
+    completion = pool_module.LeaseCompletion(
+        broker,
+        lease,
+        deadline=time.monotonic() + 0.05,
+    )
+    waiter_deadline = time.monotonic() + 0.6
+    acquired: list[object] = []
+    waiter = threading.Thread(target=lambda: acquired.append(broker.acquire(waiter_deadline)))
+    waiter.start()
+    assert broker.wait_for_waiters(1)
+    condition_held = threading.Event()
+    release_condition = threading.Event()
+
+    def hold_condition() -> None:
+        with broker._condition:
+            condition_held.set()
+            release_condition.wait()
+
+    holder = threading.Thread(target=hold_condition)
+    holder.start()
+    assert condition_held.wait(timeout=2)
+    try:
+        completion(None)
+    finally:
+        release_condition.set()
+        holder.join(timeout=2)
+    waiter.join(timeout=0.2)
+
+    assert not waiter.is_alive()
+    assert len(acquired) == 1
+    assert broker.release(acquired[0])
+
+
+def test_deferred_lease_publication_preserves_non_head_fifo_waiter() -> None:
+    broker = LeaseBroker(1, pool_size=1, max_pending_requests=2)
+    lease = broker.acquire(time.monotonic() + 1)
+    acquired: list[tuple[str, object]] = []
+
+    def acquire(label: str) -> None:
+        try:
+            acquired.append((label, broker.acquire(time.monotonic() + 1)))
+        except BaseException as exc:
+            acquired.append((label, exc))
+
+    first = threading.Thread(target=acquire, args=("first",))
+    second = threading.Thread(target=acquire, args=("second",))
+    first.start()
+    assert broker.wait_for_waiters(1)
+    second.start()
+    assert broker.wait_for_waiters(2)
+
+    pool_module.LeaseCompletion(broker, lease).publish(None)
+    first.join(timeout=0.2)
+    assert not first.is_alive()
+    assert second.is_alive()
+    assert len(acquired) == 1 and acquired[0][0] == "first"
+    first_lease = acquired[0][1]
+    assert not isinstance(first_lease, BaseException)
+
+    assert broker.release(first_lease)
+    second.join(timeout=0.2)
+    assert not second.is_alive()
+    assert len(acquired) == 2 and acquired[1][0] == "second"
+    second_lease = acquired[1][1]
+    assert not isinstance(second_lease, BaseException)
+    assert broker.release(second_lease)
+
+
 def test_duplicate_lease_publish_and_settle_reclaims_exactly_once(monkeypatch) -> None:
     broker = LeaseBroker(1, pool_size=1, max_pending_requests=1)
     lease = broker.acquire(time.monotonic() + 1)
@@ -75,6 +146,134 @@ def test_duplicate_lease_publish_and_settle_reclaims_exactly_once(monkeypatch) -
     snapshot = broker.snapshot()
     assert release_calls == 1
     assert (snapshot.idle_slots, snapshot.active_leases) == (1, 0)
+
+
+def test_lease_completion_retains_unexpected_release_error(monkeypatch) -> None:
+    broker = LeaseBroker(1, pool_size=1, max_pending_requests=1)
+    lease = broker.acquire(time.monotonic() + 1)
+    completion = pool_module.LeaseCompletion(broker, lease)
+    monkeypatch.setattr(
+        broker,
+        "release",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("release failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="release failed"):
+        completion.settle()
+    assert lease.cancellation is not None and lease.cancellation.is_set()
+
+
+def test_wait_ticket_surfaces_internal_lease_settlement_error(monkeypatch) -> None:
+    broker = LeaseBroker(1, pool_size=1, max_pending_requests=1)
+    lease = broker.acquire(time.monotonic() + 1)
+    lease_completion = pool_module.LeaseCompletion(broker, lease)
+    completion = socket_module._TerminalCompletion(lease_completion)
+    ticket = actor_module.RequestTicket(
+        runtime_epoch=1,
+        lease_id=lease.lease_id,
+        command=TYPE_SECURITY_COUNT,
+        request_payload_snapshot={"market": "sz"},
+        deadline=time.monotonic() + 1,
+        retry_safe=False,
+        completion=completion,
+    )
+    release_error = RuntimeError("lease release failed")
+    monkeypatch.setattr(
+        broker,
+        "release",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(release_error),
+    )
+    actor_module._complete_ticket(
+        ticket,
+        actor_module.RequestState.SUCCESS,
+        result=object(),
+    )
+
+    with pytest.raises(RuntimeError, match="lease release failed") as raised:
+        actor_module.wait_ticket(ticket)
+
+    assert raised.value is release_error
+    assert ticket.completion_error is release_error
+
+
+@pytest.mark.parametrize("terminal_kind", ("wire_error", "late_success"))
+def test_wait_ticket_chains_internal_settlement_error_to_terminal_error(
+    monkeypatch,
+    terminal_kind: str,
+) -> None:
+    broker = LeaseBroker(1, pool_size=1, max_pending_requests=1)
+    lease = broker.acquire(time.monotonic() + 1)
+    lease_completion = pool_module.LeaseCompletion(broker, lease)
+    completion = socket_module._TerminalCompletion(lease_completion)
+    deadline = time.monotonic() - 0.01 if terminal_kind == "late_success" else time.monotonic() + 1
+    ticket = actor_module.RequestTicket(
+        runtime_epoch=1,
+        lease_id=lease.lease_id,
+        command=TYPE_SECURITY_COUNT,
+        request_payload_snapshot={"market": "sz"},
+        deadline=deadline,
+        retry_safe=False,
+        completion=completion,
+    )
+    cleanup_error = RuntimeError("lease cleanup failed")
+    monkeypatch.setattr(
+        broker,
+        "release",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(cleanup_error),
+    )
+    wire_error = ResponseTimeoutError("wire failed")
+    actor_module._complete_ticket(
+        ticket,
+        actor_module.RequestState.SUCCESS if terminal_kind == "late_success" else actor_module.RequestState.FAILED,
+        result=object() if terminal_kind == "late_success" else None,
+        error=None if terminal_kind == "late_success" else wire_error,
+    )
+
+    with pytest.raises(ResponseTimeoutError) as raised:
+        actor_module.wait_ticket(ticket)
+
+    assert raised.value is not cleanup_error
+    if terminal_kind == "wire_error":
+        assert raised.value is wire_error
+    assert raised.value.__cause__ is cleanup_error
+
+
+def test_wait_ticket_surfaces_internal_pin_settlement_error(monkeypatch) -> None:
+    broker, lease, _, proxy = _new_fake_proxy(timeout=1)
+    proxy._active_call = 1
+    proxy._wire_call = 1
+    pin_completion = PinCompletion(proxy, 1, time.monotonic() + 1)
+    completion = socket_module._TerminalCompletion(pin_completion)
+    ticket = actor_module.RequestTicket(
+        runtime_epoch=2,
+        lease_id=lease.lease_id,
+        command=TYPE_SECURITY_COUNT,
+        request_payload_snapshot={"market": "sz"},
+        deadline=time.monotonic() + 1,
+        retry_safe=False,
+        completion=completion,
+    )
+    settlement_error = RuntimeError("pin settlement failed")
+    real_terminal = proxy._wire_terminal
+    monkeypatch.setattr(
+        proxy,
+        "_wire_terminal",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(settlement_error),
+    )
+    actor_module._complete_ticket(
+        ticket,
+        actor_module.RequestState.SUCCESS,
+        result=object(),
+    )
+
+    with pytest.raises(RuntimeError, match="pin settlement failed") as raised:
+        actor_module.wait_ticket(ticket)
+
+    assert raised.value is settlement_error
+    assert ticket.completion_error is settlement_error
+    monkeypatch.setattr(proxy, "_wire_terminal", real_terminal)
+    proxy._wire_terminal(1)
+    proxy.close()
 
 
 def test_pin_completion_returns_before_proxy_condition_and_lazily_advances_fifo() -> None:
@@ -123,6 +322,152 @@ def test_pin_completion_returns_before_proxy_condition_and_lazily_advances_fifo(
     assert admitted == [2]
     assert proxy._active_call == 2
     proxy._wire_terminal(2)
+    proxy.close()
+
+
+def test_pin_publication_wakes_existing_fifo_waiter_for_owner_settlement() -> None:
+    broker = LeaseBroker(1, pool_size=1, max_pending_requests=4)
+    lease = broker.acquire(time.monotonic() + 1, pinned=True)
+    proxy = PinnedTransportProxy(
+        broker,
+        lease,
+        socket_module.SocketTransport(["127.0.0.1:9"], timeout=1, heartbeat_interval=None),
+        PushBuffer(1),
+        timeout=1,
+    )
+    proxy._call_counter = 1
+    proxy._active_call = 1
+    proxy._wire_call = 1
+    admitted: list[int] = []
+    waiter = threading.Thread(target=lambda: admitted.append(proxy._admit(time.monotonic() + 1)))
+    waiter.start()
+    assert broker.wait_for_pin_waiters(1)
+
+    PinCompletion(proxy, 1).publish(None)
+    waiter.join(timeout=0.2)
+
+    assert not waiter.is_alive()
+    assert admitted == [2]
+    assert proxy._active_call == 2
+    proxy._wire_terminal(2)
+    proxy.close()
+
+
+def test_pin_publication_wakes_waiters_without_rejecting_non_head_fifo() -> None:
+    broker, _, _, proxy = _new_fake_proxy(timeout=1, max_pending_requests=4)
+    proxy._call_counter = 1
+    proxy._active_call = 1
+    proxy._wire_call = 1
+    results: list[tuple[str, object]] = []
+
+    def admit(label: str) -> None:
+        try:
+            results.append((label, proxy._admit(time.monotonic() + 1)))
+        except BaseException as exc:
+            results.append((label, exc))
+
+    first = threading.Thread(target=admit, args=("first",))
+    second = threading.Thread(target=admit, args=("second",))
+    first.start()
+    assert broker.wait_for_pin_waiters(1)
+    second.start()
+    assert broker.wait_for_pin_waiters(2)
+    with proxy._condition:
+        assert proxy._condition.wait_for(lambda: len(proxy._waiter_snapshot) == 2, timeout=2)
+
+    PinCompletion(proxy, 1).publish(None)
+    first.join(timeout=0.2)
+    assert not first.is_alive()
+    assert second.is_alive()
+    assert results == [("first", 2)]
+
+    proxy._wire_call = 2
+    PinCompletion(proxy, 2).publish(None)
+    second.join(timeout=0.2)
+    assert not second.is_alive()
+    assert results == [("first", 2), ("second", 3)]
+    proxy._wire_terminal(3)
+    proxy.close()
+
+
+def test_pin_non_head_rechecks_publication_after_clearing_wake(monkeypatch) -> None:
+    broker, _, _, proxy = _new_fake_proxy(timeout=1, max_pending_requests=4)
+    proxy._call_counter = 1
+    proxy._active_call = 1
+    proxy._wire_call = 1
+    real_waiter = pool_module.PinWaiter
+    created = 0
+
+    class PublishOnClearEvent(threading.Event):
+        armed = False
+
+        def clear(self) -> None:
+            if self.armed:
+                self.armed = False
+                about_to_clear.set()
+                assert allow_clear.wait(timeout=2)
+            super().clear()
+
+    about_to_clear = threading.Event()
+    allow_clear = threading.Event()
+    controlled_event = PublishOnClearEvent()
+
+    def waiter_factory(*args, **kwargs):
+        nonlocal created
+        created += 1
+        if created == 2:
+            kwargs["completed"] = controlled_event
+        return real_waiter(*args, **kwargs)
+
+    monkeypatch.setattr(pool_module, "PinWaiter", waiter_factory)
+    results: list[int] = []
+    first = threading.Thread(target=lambda: results.append(proxy._admit(time.monotonic() + 1)))
+    second = threading.Thread(target=lambda: results.append(proxy._admit(time.monotonic() + 1)))
+    first.start()
+    assert broker.wait_for_pin_waiters(1)
+    second.start()
+    assert broker.wait_for_pin_waiters(2)
+    with proxy._condition:
+        assert proxy._condition.wait_for(lambda: len(proxy._waiter_snapshot) == 2, timeout=2)
+    proxy._publish_wire_terminal(1)
+    first.join(timeout=0.2)
+    assert not first.is_alive()
+    assert results == [2]
+    assert second.is_alive()
+    controlled_event.armed = True
+    controlled_event.set()
+    assert about_to_clear.wait(timeout=2)
+    proxy._wire_call = 2
+    proxy._publish_wire_terminal(2)
+    allow_clear.set()
+    second.join(timeout=0.2)
+
+    assert not first.is_alive() and not second.is_alive()
+    assert sorted(results) == [2, 3]
+    proxy._wire_terminal(3)
+    proxy.close()
+
+
+def test_pin_published_terminal_settlement_forwards_absolute_deadline(monkeypatch) -> None:
+    broker, _, _, proxy = _new_fake_proxy(timeout=1)
+    proxy._active_call = 1
+    proxy._wire_call = 1
+    proxy._publish_wire_terminal(1)
+    observed: list[tuple[int, float | None]] = []
+    real_terminal = proxy._wire_terminal
+    monkeypatch.setattr(
+        proxy,
+        "_wire_terminal",
+        lambda call_id, *, deadline=None: observed.append((call_id, deadline)),
+    )
+    deadline = time.monotonic() + 0.2
+
+    proxy._settle_published_terminal(deadline)
+
+    assert observed == [(1, deadline)]
+    monkeypatch.setattr(proxy, "_wire_terminal", real_terminal)
+    proxy._wire_terminal(1)
+    proxy._published_terminal.clear()
     proxy.close()
 
 
