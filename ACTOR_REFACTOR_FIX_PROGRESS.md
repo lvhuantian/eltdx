@@ -23,18 +23,18 @@
 | Checkpoint | Status | Evidence |
 | --- | --- | --- |
 | FATAL-R00 baseline and RED | complete | Baseline 30 passed; unchanged production with final new regressions: 9 failed, 31 passed in 0.85s |
-| FATAL-R01 production correction | in progress | epoch resolver plus Push lazy drain implemented; focused matrix green |
-| FATAL-R02 focused and 20-process verification | pending | not run |
+| FATAL-R01 production correction | complete | production `a987c16`, resolver/lazy drain and docs pushed |
+| FATAL-R02 focused and 20-process verification | complete | 20 independent processes, 40 passed each; log SHA256 recorded below |
 | FATAL-R03 full correctness/stress/performance/build/docs | pending | not run |
 | FINAL | pending | permanent manifest, ledger deletion, exact-head CI/Pages, three CLEAN reviews |
 
 ## Current state
 
-- Current unique `in_progress`: freeze the production correction checkpoint after focused matrix and diff review, then push it.
-- Last completed: RED checkpoint `d4d6c97` was pushed; resolver/lazy-drain implementation passes all new regressions, PushBuffer tests, and the full 428-case transport matrix.
-- Next exact action: review/stage `pool.py`, `push.py`, architecture/debug wording, and this ledger; commit with `Fix-Checkpoint: F07`; push and then run 20 independent RED processes.
-- Modified task paths: `src/eltdx/transport/pool.py`, `src/eltdx/transport/push.py`, `docs/ARCHITECTURE.md`, `docs/DEBUG_GUIDE.md`, `ACTOR_REFACTOR_FIX_PROGRESS.md`.
-- Push status: RED `d4d6c97` is remote; production correction is local and uncommitted.
+- Current unique `in_progress`: run the full pytest suite and then freeze stress/performance/build/docs evidence.
+- Last completed: production checkpoint `a987c16` is pushed; 20 independent retirement processes all passed 40 tests.
+- Next exact action: run `python -m pytest -q`, inspect skip/xfail counts, then run the exact 10k/100k stress command from a clean source and save its SHA256.
+- Modified task paths: `ACTOR_REFACTOR_FIX_PROGRESS.md` only; generated 20-process log is outside the worktree.
+- Push status: remote branch is `a987c16`; this evidence update is local and will be committed as `F07E`.
 - PR status: OPEN, Draft, unmerged.
 
 ## Commands and results
@@ -48,6 +48,7 @@
 | 2026-07-18 19:03 +08:00 | `python -m pytest -q tests\\test_push_buffer.py tests\\test_transport_retirement_regressions.py` | PASS, 48 passed in 0.41s |
 | 2026-07-18 19:05 +08:00 | full transport matrix (retirement, push, socket, actor, pool, lifecycle, failover) | PASS, 428 passed in 16.17s |
 | 2026-07-18 19:05 +08:00 | `python -m compileall -q src tests` | PASS |
+| 2026-07-18 19:09 +08:00 | 20 independent `python -m pytest -q tests\\test_transport_retirement_regressions.py --tb=short` processes | PASS, 20 x 40 passed; log `C:\\Users\\ax\\Desktop\\eltdx\\artifacts\\actor-retirement-20proc-a987c16.log`, SHA256 `D8AE349AE3D71A9A3EA5481FECB0D8C72F2B71C0C831560AE9490A010AEB3282` |
 
 ## Open risks and failures
 
