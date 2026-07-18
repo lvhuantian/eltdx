@@ -8,7 +8,7 @@ proved that the Actor thread could still block on Pool, Broker, Proxy and
 sibling-Actor locks. The resulting external-lock correction reached
 `f5b63bb`, but was reopened again on 2026-07-17 after deterministic tests found
 fatal/admission and fatal/push publication windows. The reviewed epoch-retirement
-correction is frozen at production source `721cbe8`; delivery becomes COMPLETE
+correction is frozen at production source `a987c16`; delivery becomes COMPLETE
 only after the final `SELF` documentation commit passes its own exact CI and
 Pages gates. Source-evidence checks cannot be substituted for those gates.
 
@@ -27,14 +27,16 @@ Pages gates. Source-evidence checks cannot be substituted for those gates.
 | Reopened baseline | `9a60e769160c8e146525e7d53fd5fa40dac012b9` |
 | Current external-lock correction | `abd58c39aef6f905075788d4482eac43e673ba63` |
 | Evidence ledger checkpoint | `eac784b` (`Fix-Checkpoint: L04E2`) |
-| Epoch-retirement baseline | `f5b63bb01d5317b9e637ede55c3c1003b0f0138d` |
-| Epoch-retirement red tests | `d6b9296be7ffbd50b743243cc556dc52d5232565` |
-| Current epoch-retirement production | `721cbe8885876364a0e1d42f9802ccf7de51029c` |
+| Epoch-retirement baseline | `45d8bc80f65eb57ee4ff5fab9a420d80aa705c6a` |
+| Epoch-retirement red tests | `d4d6c97` (`Fix-Checkpoint: F07-RED`) |
+| Epoch-retirement production checkpoint | `a987c16` (`Fix-Checkpoint: F07`) |
+| Epoch-retirement verification checkpoint | `da8854e` (`Fix-Checkpoint: F07E`, push retry recorded) |
+| Current epoch-retirement production | `a987c163015ed297066817a937d4f4ed046ec874` |
 | Final manifest commit | `SELF`, resolved by the first-parent FINAL trailer below |
 | Branch | `actor-transport-refactor` |
 | Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), OPEN, draft, unmerged |
-| Exact-source CI | PENDING normal push of final `SELF`; URL retained in the external checkpoint |
-| Exact-source Pages | PENDING final `SELF`; strict-build URL retained in the external checkpoint |
+| Exact-source CI | Resolved after normal push of final `SELF`; exact run URL and conclusion are in the final delivery report |
+| Exact-source Pages | Resolved after normal push of final `SELF`; exact build URL and conclusion are in the final delivery report |
 
 The previous `SELF=9a60e769...` is overturned. `SELF` is the newest
 first-parent commit containing this manifest, with no
@@ -70,7 +72,8 @@ after they finish.
 | Exception/control/final evidence | `eacbfc0`, `e455234`, `5ff6447`, `3287b6a`, `e94f9cd`, `e924d4d` | Exact heavy evidence, blocker audit, revision 1.2 authorization, control priority, exact final-source evidence and revision 1.3 manifest candidate |
 | Overturned FINAL | `9a60e76` | Reopened: Actor external-lock blocking remained |
 | External-lock correction | `7f8e120`, `8b68542`, `f5ad8a3`, `48b32d6`, `166ae61`, `abd58c3`, `eac784b` | Nonblocking Actor handoff, deferred settlement, bounded FIFO lease pulses, two pin publication corrections, per-call identity cell and exact evidence ledger |
-| Epoch-retirement correction | `d6b9296`, `f290981`, `721cbe8` | Deterministic red publication races, permanent epoch/local termination, condition-owned Broker/Push drain, failure-cell-independent fatal fanout and independent-review corrections |
+| Superseded epoch-retirement correction | `d6b9296`, `f290981`, `721cbe8` | Earlier deterministic publication-race correction; reopened by the final fatal-reason review |
+| Current fatal-reason correction | `d4d6c97`, `a987c16`, `da8854e` | Deterministic RED races, epoch sticky resolver, Push owner lazy drain, pinned exact-fatal propagation, and focused/full verification |
 | FINAL manifest | `SELF` | Permanent result plus temporary progress-ledger deletion; exact-SHA CI/Pages resolved after push |
 
 This table covers every commit from the original A00-A09 implementation and
@@ -279,7 +282,7 @@ for the sdist and
 `0709D124B9055BC2AEBDFFB8F067DA16C522C03666F5F0866460AD19FED960A6`
 for the wheel.
 
-Current frozen local evidence on clean source `abd58c3`:
+Historical frozen local evidence on clean source `abd58c3` (superseded by the current delivery evidence below):
 
 | Command | Result |
 | --- | --- |
@@ -301,7 +304,7 @@ The exact package artifacts are retained outside the worktree under
 sdist 365,290 bytes, SHA256
 `03A67D00280E690CB7D19E3561C72DAC62FC8A5E7882EE3EA5195ED42BE19FB4`.
 
-## Current Stress, Ownership, and Resources
+## Historical Stress, Ownership, and Resources
 
 The retained raw artifact is
 `C:\Users\ax\Desktop\eltdx\artifacts\actor-lock-l03rr2-stress-abd58c3.json`,
@@ -416,7 +419,7 @@ closed. Broker waiters, pin waiters and leases were zero; PushBuffer frames and
 bytes were zero and closed. The raw file is no longer retained, so that earlier
 audit cannot be replayed from the current workspace.
 
-## Current Heartbeat Evidence
+## Historical Heartbeat Evidence
 
 The exact-`abd58c3` retained stress artifact contains the balanced heartbeat
 campaign. It ran 4 blocks/32 phases, 260 all-slot configuration barriers, four
@@ -459,7 +462,7 @@ rerun in isolation and passed in 209.30s, then the stable final local suite and
 exact CI matrix passed. Neither deleted JSON is current evidence; the retained
 exact-`abd58c3` artifact above supersedes both.
 
-## Performance Evidence
+## Historical Performance Evidence
 
 The authoritative frozen campaign is `fifo-v2-7923287-a`, comparing clean base
 `71089c0a2867a75dc79aa2c340213f4e3845b6e3` with clean Actor source
@@ -575,7 +578,7 @@ above was rerun from trial zero. The valid pre-fix diagnostic
 it led to the durable first-live lease pulse and publication-idempotency fix,
 but is not FINAL performance evidence.
 
-### Epoch-retirement correction evidence
+### Superseded epoch-retirement correction evidence
 
 Exact production source `721cbe8885876364a0e1d42f9802ccf7de51029c`
 has the following isolated local evidence on Windows 11 / CPython 3.12.6:
@@ -629,6 +632,35 @@ does not reclassify it. No thread, runtime dependency, background cleanup
 worker, unbounded queue or per-request publication object was added; the new
 assigned-waiter and fatal-handle snapshots remain bounded by the configured
 pool/request ownership for the current epoch.
+
+## Current Delivery Evidence
+
+All current local evidence below uses clean exact production source
+`a987c163015ed297066817a937d4f4ed046ec874` (checkpoint `a987c16`). The
+temporary ledger records the commands and is deleted only in the finalization
+commit; after that commit this manifest plus Git history is the recovery source.
+The finalization commit is the delivery `SELF`; normal pushes of the preceding
+verification checkpoint were attempted twice and retained locally after
+transient TLS/network failures, with no reset, amend, rebase, or force-push.
+
+| Gate | Result | Artifact / identity |
+| --- | --- | --- |
+| Deterministic retirement regressions | 40 passed; 20 independent processes each passed all 40 | RED `d4d6c97`; 20-process log `C:\Users\ax\Desktop\eltdx\artifacts\actor-retirement-20proc-a987c16.log`, SHA256 `D8AE349AE3D71A9A3EA5481FECB0D8C72F2B71C0C831560AE9490A010AEB3282` |
+| PushBuffer and full transport matrix | 428 passed in 16.17s | exact local source `a987c16` |
+| Complete pytest | 638 passed in 256.03s (0:04:16) | no failures, xfail, rerun policy, or unaccounted skip in the run |
+| 10k generations / 100k requests stress | PASS; unique 10,000/100,000, duplicate/missing/unexpected/cross-request/cross-generation all 0; max business active 4 | `C:\Users\ax\Desktop\eltdx\artifacts\actor-retirement-stress-a987c16.json`, SHA256 `7606358AD392CFF892B769F96E6E4B02C401684EBC84987AC54512A328AE2EBD` |
+| Stress close/resource hard gates | PASS; leases/waiters/pins/frames/bytes 0, Actor resources closed, Actor threads 0, measured resources `188,188,188,188,188,188,188,188` | implementation SHA exact; `worktree_dirty=false`; workload SHA `f7e187e3960002fbf0194c686182c3676152eba7c6fd68ab4bc46ede8262e5b1` |
+| Prospective seven-pair performance | PASS; 14 trials, 1,750,000 raw rows, integrity errors `[]`, no retries or overlap | `C:\Users\ax\Desktop\eltdx\artifacts\retirement-perf-45d8bc8-a987c16`, 19 files / 176,148,734 bytes; manifest SHA256 `AD8D3D2DB54012A90C88B880A42F273E45CCEED23491A704114AEC38F7C40DF9` |
+| Performance gates | PASS; sequential ratio `1.0037229712`, saturated ratio `0.9980546765`, saturated p50/p99 `1.0013140825/1.0080313771`, no-backlog p99 delta `73,400ns` <= `1,000,000ns` | baseline `45d8bc80f65eb57ee4ff5fab9a420d80aa705c6a`; current `a987c163015ed297066817a937d4f4ed046ec874`; declaration SHA `0e012f0e6a41f9b0aefcea3c79eb8b619a0f7ef7fdf55cfb5b7cb98bb291c76e` |
+| Package artifacts | PASS; `twine check` passed wheel and sdist | wheel SHA256 `1F3613D228FC46F26E90FE00AD6B1EBFEF87292FBA3AE0B93FBB0B7E08C70ED1`; sdist SHA256 `E5B9103A153ABE8DFC966A45AD3B83C6E739C890ED8E1E91A027C030AFEF3CA9` |
+| MkDocs strict | PASS | site artifact `C:\Users\ax\Desktop\eltdx\artifacts\site-a987c16` (126 files, 5,687,093 bytes) |
+
+The historical Actor-vs-legacy formal campaign remains **FAIL, user-approved
+exception**. The current prospective campaign passed every frozen gate and does
+not add or conceal a performance exception. The current artifact run log SHA256
+is `50DF8D9F65F7902EFB7273884E2B06A3C26DA4B7DA73FCE99B4B95E792FF90C7`; the
+campaign bundle SHA256 is
+`79478ABD809765E3069B7CCA096D872463A8D794397C60F824CB2181297C4EBA`.
 
 ## Cross-Platform CI and Builds
 
