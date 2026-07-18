@@ -6,7 +6,7 @@
 - Starting production SHA: `3589a09095c21908dd738e266e295393b91548e8`
 - Local/remote/PR HEAD at start: `7149406abd566d5d332279e896911fedbe391910`
 - Worktree at start: clean
-- Stage: minimal Guard slow-path fix and P2 invariant audit
-- Test results: RED tests now REEN (5 passed): stale-None linearization, diagnostics state, epoch isolation, standalone sticky fatal interleave, and per-epoch single-writer handle. P2 lock-order audit confirms Guard -> resolver and Push condition -> resolver only; no new blocking lock.
-- Next: run full targeted fatal/retirement/Push/Pool suites, then 20 independent pytest processes and complete validation.
+- Stage: targeted regression and independent-process verification
+- Test results: targeted fatal/retirement/Push/Pool suites: `231 passed in 9.56s`. Three new race tests run in 20 independent pytest processes (60 test cases): `failed=0`; log `artifacts/actor-f09-20proc-45e6703.log`, SHA256 `49400E70509F823A86DE2B5186F573733676E9F4F63574223E39E85CB2B08F62`.
+- Next: rerun 10k/100k stress and paired performance on current production source SHA, then full pytest/package/docs.
 - Pending push: none
