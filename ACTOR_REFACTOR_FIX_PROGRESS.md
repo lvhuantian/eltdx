@@ -17,4 +17,5 @@
 - Package/docs: wheel SHA256 `40BB44ABCB3B30F6EB3158F9912C0CE3161796BD196A92435338C5D28CC93E54`; sdist SHA256 `EE06E7E607ED325BB08849F3C923B8BF115D24AED1E5795A410C30CB4F7634E0`; `twine check` PASS; MkDocs strict PASS (126 files / 5,685,815 bytes).
 - Historical Actor-vs-legacy result remains exactly `FAIL, user-approved exception`; no new exception is introduced.
 - Current unique `in_progress`: update the permanent result ledger, commit/push evidence, delete this file in a new FINAL commit, wait exact-head CI/Pages, then run three fresh final reviews and identity checks.
+- Pending push: first normal push of evidence checkpoint `dade8307f44b9ffe3c80c3b4d2028a2383136e16` failed with `schannel: failed to receive handshake, SSL/TLS connection failed`; no reset, amend, rebase or evidence rerun was performed.
 - Workflow: this reopened correction does not modify workflow files.
