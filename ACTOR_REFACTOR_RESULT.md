@@ -38,6 +38,7 @@ Pages gates. Source-evidence checks cannot be substituted for those gates.
 | Current epoch-retirement production | `3589a09095c21908dd738e266e295393b91548e8` (`Fix-Checkpoint: F08`) |
 | Current verification checkpoint | `dade830`, with pending-push recovery at `a8402a4` |
 | Stress/performance artifact source | `3589a09095c21908dd738e266e295393b91548e8` |
+| Exact preceding FINAL checkpoint | `ac942a87cd1f1fd78b5486bc29660361c7af380e` (CI `29648788642`, Pages `29648788648`, both SUCCESS) |
 | Final manifest commit | `SELF`, resolved by the first-parent FINAL trailer below |
 | Final delivery HEAD | `SELF`, the first-parent commit carrying `Fix-Checkpoint: FINAL` |
 | Branch | `actor-transport-refactor` |
@@ -713,6 +714,12 @@ and [Pages run 29645265073](https://github.com/electkismet/eltdx/actions/runs/29
 but independent final review then reopened it. Those green runs are historical
 evidence only and are not exact-source proof for production `3589a09` or final
 delivery `SELF`.
+
+The exact preceding FINAL checkpoint `ac942a87cd1f1fd78b5486bc29660361c7af380e`
+passed [CI run 29648788642](https://github.com/electkismet/eltdx/actions/runs/29648788642)
+and [Pages run 29648788648](https://github.com/electkismet/eltdx/actions/runs/29648788648).
+The final documentation-only manifest that follows it is a new exact HEAD and
+must pass its own CI/Pages runs before delivery is claimed.
 
 The Windows jobs run the full suite, including all correction regression files
 and the real Windows refused-first `connect_ex` test. Pages deployment remains
