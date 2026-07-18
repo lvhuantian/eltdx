@@ -8,5 +8,13 @@
 - RED evidence on unchanged production: 3 targeted tests failed (`waits_for_epoch_reason_cell`, `owner_failure_selection`, `unadorned_abandon`); retirement baseline was 40 passed.
 - Production correction: resolver owner selection is sticky; Guard runtime fatal fallback is disabled while a resolver exists; deferred Push abandon drains on owner paths without treating `publish_close(None)` as abandon.
 - Focused verification: targeted corrections 3 passed; complete retirement regressions 43 passed in 0.36s.
-- Current unique `in_progress`: commit/push F08 production correction, run transport/lifecycle/full/package/docs evidence, then rerun stress/performance only if source identity changes, update result ledger, delete this file in a new FINAL commit, push, wait exact-head CI/Pages, and perform three final reviews.
+- Production checkpoint: `3589a09095c21908dd738e266e295393b91548e8` (`Fix-Checkpoint: F08`), pushed normally.
+- Repeated regression evidence: 20 independent processes each passed all 43 retirement tests; log `C:\Users\ax\Desktop\eltdx\artifacts\actor-retirement-20proc-3589a09.log`, SHA256 `70F1ABA6EEB3C5EC8556CDCE6AF135AFCF82B57E363936B6E8E7B1E8EFA98DC1`.
+- Transport matrix: 431 passed in 15.82s. Complete pytest: 641 passed in 254.29s (0:04:14).
+- Stress: exact clean `3589a09`, 10,000 generations and 100,000 requests; unique counts exact, duplicate/missing/unexpected/cross-request/cross-generation zero, max active 4, leases/frames/bytes/Actor threads zero, resources eight times 188. Artifact SHA256 `656AB99DAA6859DF763954529D048210AC293FDBC8AF2CE9CA4BEAAC6EED47EC`.
+- Performance: `retirement-perf-f08-3589a09`, exact baseline `45d8bc8` and current `3589a09`, 14 attempt-1 trials / seven pairs / 1,750,000 raw rows / integrity errors `[]`; all prospective gates PASS. Bundle SHA256 `2A81903CC1F0CF9478F37AC7AC643204386A722D202E312F0EDC81D3AC1623B6`; manifest SHA256 `29B12B410E5790BF2E0679BB8CBE6D3079E73788A0D95D8657FC08E9346BE910`.
+- Performance metrics: sequential throughput ratio `0.9980727800`; saturated ratio `0.9988405873`; saturated p50/p99 role-median ratios `0.9999679624/1.0138644663`; no-backlog p99 delta `-61,200ns <= 1,000,000ns`.
+- Package/docs: wheel SHA256 `40BB44ABCB3B30F6EB3158F9912C0CE3161796BD196A92435338C5D28CC93E54`; sdist SHA256 `EE06E7E607ED325BB08849F3C923B8BF115D24AED1E5795A410C30CB4F7634E0`; `twine check` PASS; MkDocs strict PASS (126 files / 5,685,815 bytes).
+- Historical Actor-vs-legacy result remains exactly `FAIL, user-approved exception`; no new exception is introduced.
+- Current unique `in_progress`: update the permanent result ledger, commit/push evidence, delete this file in a new FINAL commit, wait exact-head CI/Pages, then run three fresh final reviews and identity checks.
 - Workflow: this reopened correction does not modify workflow files.
