@@ -945,6 +945,31 @@ def test_delayed_old_epoch_reason_cannot_poison_new_epoch_resolver() -> None:
     assert guard.finish_epoch(pool_epoch=1, broker=old_broker) is None
 
 
+def test_guard_waits_for_epoch_reason_cell_before_publishing_runtime_fatal() -> None:
+    retire = _REAL_EVENT()
+    broker = LeaseBroker(1, pool_size=2, max_pending_requests=2)
+    push = PushBuffer(1)
+    guard = PoolRuntimeGuard()
+    guard.configure(broker, push, retire_event=retire)
+    runtimes = (ActorRuntime(1, ()), ActorRuntime(1, ()))
+    for runtime in runtimes:
+        assert guard.add_runtime(runtime, pool_epoch=1, broker=broker)
+    handles = tuple(
+        pool_module.ActorFatalHandle(weakref.ref(guard), 1, weakref.ref(broker), retire)
+        for _ in runtimes
+    )
+
+    first_error = ConnectionClosedError("unpublished first fatal")
+    second_error = ConnectionClosedError("published second fatal")
+    runtimes[0].fatal_error = first_error
+
+    assert guard.failure() is None
+
+    runtimes[1].fatal_error = second_error
+    handles[1].publish(runtimes[1], second_error)
+    assert guard.failure() is second_error
+
+
 @pytest.mark.parametrize("owner", ("pending_count", "snapshot", "poll", "drain"))
 def test_push_owner_lazily_drains_after_abandon_condition_contention(owner: str) -> None:
     push = PushBuffer(1)
@@ -974,6 +999,31 @@ def test_push_owner_lazily_drains_after_abandon_condition_contention(owner: str)
         with pytest.raises(ConnectionClosedError) as raised:
             push.poll() if owner == "poll" else push.drain()
         assert raised.value is error
+
+    snapshot = push.snapshot()
+    assert snapshot.closed
+    assert snapshot.frame_count == snapshot.byte_count == 0
+    assert push.pending_count == 0
+
+
+def test_push_owner_lazily_drains_after_unadorned_abandon_condition_contention() -> None:
+    push = PushBuffer(1)
+    assert push.offer_nowait(_frame(1))
+    held = _REAL_EVENT()
+    release = _REAL_EVENT()
+
+    def hold_condition() -> None:
+        with push._condition:
+            held.set()
+            assert release.wait(timeout=2)
+
+    holder = threading.Thread(target=hold_condition)
+    holder.start()
+    assert held.wait(timeout=2)
+    push.abandon()
+    release.set()
+    holder.join(timeout=2)
+    assert not holder.is_alive()
 
     snapshot = push.snapshot()
     assert snapshot.closed
