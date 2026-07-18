@@ -3709,6 +3709,78 @@ def test_old_epoch_failure_cell_cannot_block_or_mask_new_epoch_fatal() -> None:
     assert new_retire.is_set() and new_broker.snapshot().closed
 
 
+def test_diagnostics_does_not_report_running_after_fatal_publication() -> None:
+    pool = PooledSocketTransport(["127.0.0.1:9"], pool_size=1, timeout=0.2, heartbeat_interval=None)
+    retire = threading.Event()
+    broker = LeaseBroker(1, pool_size=1, max_pending_requests=1)
+    push = PushBuffer(1)
+    pool._state = PoolState.RUNNING
+    pool._epoch = 1
+    pool._epoch_retire_event = retire
+    pool._broker = broker
+    pool._push_buffer = push
+    pool._runtime_guard.configure(broker, push, retire_event=retire)
+    runtime = ActorRuntime(1, ())
+    assert pool._runtime_guard.add_runtime(runtime, pool_epoch=1, broker=broker)
+    handle = pool_module.ActorFatalHandle(weakref.ref(pool._runtime_guard), 1, weakref.ref(broker), retire)
+    error = ConnectionClosedError("fatal before diagnostics inspection")
+    runtime.fatal_error = error
+
+    resolver = pool._runtime_guard._fatal_resolver
+    assert resolver is not None
+    real_resolve = resolver.resolve
+    resolver_entered = threading.Event()
+    allow_resolver_return = threading.Event()
+    resolve_calls = 0
+
+    def resolve_stale_none() -> BaseException | None:
+        nonlocal resolve_calls
+        resolve_calls += 1
+        if resolve_calls > 1:
+            return real_resolve()
+        resolver_entered.set()
+        assert allow_resolver_return.wait(timeout=2)
+        return None
+
+    resolver.resolve = resolve_stale_none  # type: ignore[method-assign]
+    diagnostics_result: list[PoolState] = []
+    diagnostics_done = threading.Event()
+
+    def inspect_diagnostics() -> None:
+        try:
+            diagnostics_result.append(pool.diagnostics.state)
+        finally:
+            diagnostics_done.set()
+
+    inspector = threading.Thread(target=inspect_diagnostics, name="pool-diagnostics-reader")
+    inspector.start()
+    assert resolver_entered.wait(timeout=2)
+
+    publish_done = threading.Event()
+
+    def publish_fatal() -> None:
+        try:
+            handle.publish(runtime, error)
+        finally:
+            publish_done.set()
+
+    publisher = threading.Thread(target=publish_fatal, name="actor-fatal-publisher")
+    publisher.start()
+    assert publish_done.wait(timeout=2)
+    assert retire.is_set()
+    with pytest.raises(ConnectionClosedError) as pushed:
+        push.poll()
+    assert pushed.value is error
+
+    allow_resolver_return.set()
+    assert diagnostics_done.wait(timeout=2)
+    inspector.join(timeout=2)
+    publisher.join(timeout=2)
+    assert not inspector.is_alive()
+    assert not publisher.is_alive()
+    assert diagnostics_result == [PoolState.FAILED]
+
+
 def test_push_publication_registration_and_fatal_cleanup_share_startup_deadline() -> None:
     broker = LeaseBroker(1, pool_size=1, max_pending_requests=1)
     push = PushBuffer(1)
