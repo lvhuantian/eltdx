@@ -31,8 +31,11 @@ Pages gates. Source-evidence checks cannot be substituted for those gates.
 | Epoch-retirement red tests | `d4d6c97` (`Fix-Checkpoint: F07-RED`) |
 | Epoch-retirement production checkpoint | `a987c16` (`Fix-Checkpoint: F07`) |
 | Epoch-retirement verification checkpoint | `da8854e` (`Fix-Checkpoint: F07E`, push retry recorded) |
+| Epoch-retirement CI correction | `bc6990a8b0e6f350ef46ac2884930720fdd5a338` (`Fix-Checkpoint: F07-CI-R1`) |
 | Current epoch-retirement production | `a987c163015ed297066817a937d4f4ed046ec874` |
+| Stress/performance artifact source | `a987c163015ed297066817a937d4f4ed046ec874` |
 | Final manifest commit | `SELF`, resolved by the first-parent FINAL trailer below |
+| Final delivery HEAD | `SELF`, the first-parent commit carrying `Fix-Checkpoint: FINAL` |
 | Branch | `actor-transport-refactor` |
 | Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), OPEN, draft, unmerged |
 | Exact-source CI | Resolved after normal push of final `SELF`; exact run URL and conclusion are in the final delivery report |
@@ -73,11 +76,11 @@ after they finish.
 | Overturned FINAL | `9a60e76` | Reopened: Actor external-lock blocking remained |
 | External-lock correction | `7f8e120`, `8b68542`, `f5ad8a3`, `48b32d6`, `166ae61`, `abd58c3`, `eac784b` | Nonblocking Actor handoff, deferred settlement, bounded FIFO lease pulses, two pin publication corrections, per-call identity cell and exact evidence ledger |
 | Superseded epoch-retirement correction | `d6b9296`, `f290981`, `721cbe8` | Earlier deterministic publication-race correction; reopened by the final fatal-reason review |
-| Current fatal-reason correction | `d4d6c97`, `a987c16`, `da8854e` | Deterministic RED races, epoch sticky resolver, Push owner lazy drain, pinned exact-fatal propagation, and focused/full verification |
+| Current fatal-reason correction | `d4d6c97`, `a987c16`, `da8854e`, `bc6990a` | Deterministic RED races, epoch sticky resolver, Push owner lazy drain, pinned exact-fatal propagation, focused/full verification, and deterministic Actor exit observation |
 | FINAL manifest | `SELF` | Permanent result plus temporary progress-ledger deletion; exact-SHA CI/Pages resolved after push |
 
 This table covers every commit from the original A00-A09 implementation and
-every correction-cycle commit from `994c49b` through `eac784b`. All were
+every correction-cycle commit from `994c49b` through `bc6990a`. All were
 appended and pushed normally; no published commit was amended, rebased or
 force-pushed.
 
@@ -662,6 +665,15 @@ is `50DF8D9F65F7902EFB7273884E2B06A3C26DA4B7DA73FCE99B4B95E792FF90C7`; the
 campaign bundle SHA256 is
 `79478ABD809765E3069B7CCA096D872463A8D794397C60F824CB2181297C4EBA`.
 
+The exact pre-final CI correction for `bc6990a8b0e6f350ef46ac2884930720fdd5a338`
+passed all six required jobs in [CI run 29645035813](https://github.com/electkismet/eltdx/actions/runs/29645035813):
+Ubuntu Python 3.10, 3.11, 3.12 and 3.13, plus Windows Python 3.11 and 3.13.
+The same exact head passed the strict Pages build in [Pages run 29645035809](https://github.com/electkismet/eltdx/actions/runs/29645035809).
+The preceding CI run `29644585790` failed only Windows Python 3.13 because
+`runtime.stopped` was set before the Actor thread target returned; `bc6990a`
+keeps one absolute 0.2-second budget across the stop Event wait and remaining
+budget `join()`. The gate was not widened and no test was weakened.
+
 ## Cross-Platform CI and Builds
 
 The preceding external-lock source `abd58c39aef6f905075788d4482eac43e673ba63`
@@ -676,6 +688,12 @@ historically passed [CI run 29577023570](https://github.com/electkismet/eltdx/ac
 | Windows | 3.11 | Full suite, 598 passed in 251.36s, SUCCESS |
 | Windows | 3.13 | Full suite, 598 passed in 244.21s, SUCCESS |
 | Pages | [run 29577023585](https://github.com/electkismet/eltdx/actions/runs/29577023585) | strict build and artifact upload SUCCESS |
+
+The exact `bc6990a8b0e6f350ef46ac2884930720fdd5a338` correction head also passed
+[CI run 29645035813](https://github.com/electkismet/eltdx/actions/runs/29645035813)
+and [Pages run 29645035809](https://github.com/electkismet/eltdx/actions/runs/29645035809).
+This six-job matrix reported the full local source-equivalent suite green; the
+current full local verification after the correction is `638 passed in 255.01s`.
 
 The Windows jobs run the full suite, including all correction regression files
 and the real Windows refused-first `connect_ex` test. Pages deployment remains
