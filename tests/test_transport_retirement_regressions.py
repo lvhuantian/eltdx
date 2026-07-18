@@ -970,6 +970,31 @@ def test_guard_waits_for_epoch_reason_cell_before_publishing_runtime_fatal() -> 
     assert guard.failure() is second_error
 
 
+def test_owner_failure_selection_stays_sticky_against_late_actor_reason() -> None:
+    retire = _REAL_EVENT()
+    broker = LeaseBroker(1, pool_size=2, max_pending_requests=2)
+    push = PushBuffer(1)
+    guard = PoolRuntimeGuard()
+    guard.configure(broker, push, retire_event=retire)
+    runtimes = (ActorRuntime(1, ()), ActorRuntime(1, ()))
+    for runtime in runtimes:
+        assert guard.add_runtime(runtime, pool_epoch=1, broker=broker)
+    handles = tuple(
+        pool_module.ActorFatalHandle(weakref.ref(guard), 1, weakref.ref(broker), retire)
+        for _ in runtimes
+    )
+
+    owner_error = ConnectionClosedError("owner-selected fatal")
+    actor_error = ConnectionClosedError("late actor fatal")
+    guard.fail(runtimes[0], owner_error, pool_epoch=1, broker=broker)
+    assert guard.failure() is owner_error
+
+    runtimes[1].fatal_error = actor_error
+    handles[1].publish(runtimes[1], actor_error)
+    assert guard.failure() is owner_error
+    assert guard.finish_epoch(pool_epoch=1, broker=broker) is owner_error
+
+
 @pytest.mark.parametrize("owner", ("pending_count", "snapshot", "poll", "drain"))
 def test_push_owner_lazily_drains_after_abandon_condition_contention(owner: str) -> None:
     push = PushBuffer(1)
