@@ -22,7 +22,7 @@ from eltdx.exceptions import (
 )
 from eltdx.hosts import DEFAULT_HOSTS, DEFAULT_PROBE_TIMEOUT, DEFAULT_PROBE_WORKERS, resolve_hosts, sort_hosts_by_latency, unique_hosts
 
-from .push import PushBuffer
+from .push import EpochFatalReasonResolver, PushBuffer
 from .actor import ActorRuntime, ActorSnapshot, abandon_actor, actor_snapshot, request_actor_stop
 from .socket import (
     DEFAULT_HEARTBEAT_INTERVAL,
@@ -810,6 +810,7 @@ class PoolRuntimeGuard:
         self._epoch: int | None = None
         self._state = GuardState.INACTIVE
         self._failure_cell = _GuardFailurePublication(None, None)
+        self._fatal_resolver: EpochFatalReasonResolver | None = None
         self._publication_snapshot: tuple[
             GuardState,
             int | None,
@@ -818,6 +819,7 @@ class PoolRuntimeGuard:
             PushBuffer | None,
             tuple[ActorRuntime, ...],
             _GuardFailurePublication,
+            EpochFatalReasonResolver | None,
         ] = (
             self._state,
             self._epoch,
@@ -826,6 +828,7 @@ class PoolRuntimeGuard:
             self._push_buffer,
             (),
             self._failure_cell,
+            self._fatal_resolver,
         )
 
     def configure(
@@ -847,6 +850,8 @@ class PoolRuntimeGuard:
             self._retire_requested = retire_event or threading.Event()
             broker.bind_retire_event(self._retire_requested)
             push_buffer.bind_retire_event(self._retire_requested)
+            self._fatal_resolver = EpochFatalReasonResolver(broker.pool_epoch)
+            push_buffer.bind_fatal_resolver(self._fatal_resolver)
             self._broker = broker
             self._push_buffer = push_buffer
             self._runtimes = []
@@ -947,6 +952,7 @@ class PoolRuntimeGuard:
         if not acquired:
             request_actor_stop(runtime, deadline=deadline)
             raise ResponseTimeoutError("7709 response timed out publishing pool runtime failure")
+        canonical_error = error
         try:
             accepted = (
                 self._state in (GuardState.ACTIVE, GuardState.SEALED)
@@ -957,8 +963,11 @@ class PoolRuntimeGuard:
             )
             if accepted:
                 cleanup_cell = self._failure_cell
+                resolver = self._fatal_resolver
+                resolved = resolver.resolve() if resolver is not None else None
+                canonical_error = resolved or self._fatal_error or error
                 if self._fatal_error is None:
-                    self._fatal_error = error
+                    self._fatal_error = canonical_error
                 if all(item is not runtime for item in self._runtimes):
                     self._runtimes.append(runtime)
                 current_broker = self._broker
@@ -980,9 +989,9 @@ class PoolRuntimeGuard:
         if push_buffer is not None:
             try:
                 if deadline is None:
-                    push_buffer.close(error)
+                    push_buffer.close(canonical_error)
                 else:
-                    push_buffer.close_before_deadline(deadline, error)
+                    push_buffer.close_before_deadline(deadline, canonical_error)
             except BaseException as exc:
                 cleanup_errors.append(exc)
         for item in runtimes:
@@ -1035,9 +1044,8 @@ class PoolRuntimeGuard:
         pool_epoch: int,
         broker: LeaseBroker | None,
     ) -> None:
-        state, epoch, current_broker, retire_event, push_buffer, runtimes, failure_cell = (
-            self._publication_snapshot
-        )
+        publication_snapshot = self._publication_snapshot
+        state, epoch, current_broker, retire_event, push_buffer, runtimes, failure_cell, current_resolver = publication_snapshot
         accepted = (
             state in (GuardState.ACTIVE, GuardState.SEALED)
             and epoch == pool_epoch
@@ -1050,19 +1058,25 @@ class PoolRuntimeGuard:
         retire_event.set()
         broker.abandon()
         if push_buffer is not None:
-            push_buffer.abandon(error)
+            push_buffer.abandon()
         if all(item is not runtime for item in runtimes):
             runtimes = runtimes + (runtime,)
         for item in runtimes:
             abandon_actor(item)
-        _, _, _, _, _, _, current_cell = self._publication_snapshot
-        if current_cell is not failure_cell or not failure_cell.lock.acquire(blocking=False):
+        current_publication_snapshot = self._publication_snapshot
+        if current_publication_snapshot is not publication_snapshot:
             return
-        try:
-            if failure_cell.failure is None:
-                failure_cell.failure = (runtime, error)
-        finally:
-            failure_cell.lock.release()
+        if current_resolver is None or not self._fatal_handle_snapshot:
+            if not failure_cell.lock.acquire(blocking=False):
+                return
+            try:
+                if failure_cell.failure is None:
+                    failure_cell.failure = (runtime, error)
+            finally:
+                failure_cell.lock.release()
+        # The Actor has already published its single-writer reason cell. The
+        # owner-side resolver selects the canonical object without taking an
+        # application lock on this fatal path.
 
     def settle_published_failure(
         self,
@@ -1071,27 +1085,22 @@ class PoolRuntimeGuard:
         broker: LeaseBroker | None,
         deadline: float | None = None,
     ) -> None:
-        state, epoch, current_broker, _, _, runtimes, failure_cell = self._publication_snapshot
-        publication = failure_cell.failure
-        if publication is None:
+        state, epoch, current_broker, _, _, runtimes, failure_cell, resolver = self._publication_snapshot
+        error = resolver.resolve() if resolver is not None else None
+        publication = next(
+            (
+                (runtime, error)
+                for runtime in runtimes
+                if error is not None and runtime.runtime_epoch == pool_epoch
+            ),
+            None,
+        )
+        if publication is None and resolver is None:
             publication = next(
                 (
                     (runtime, runtime.fatal_error)
                     for runtime in runtimes
                     if runtime.runtime_epoch == pool_epoch and runtime.fatal_error is not None
-                ),
-                None,
-            )
-        if publication is None:
-            publication = next(
-                (
-                    (handle._runtime, handle._error)
-                    for handle in self._fatal_handle_snapshot
-                    if handle.pool_epoch == pool_epoch
-                    and handle.broker_ref() is broker
-                    and handle._published.is_set()
-                    and handle._runtime is not None
-                    and handle._error is not None
                 ),
                 None,
             )
@@ -1202,16 +1211,24 @@ class PoolRuntimeGuard:
                 pass
 
     def failure(self, *, deadline: float | None = None) -> BaseException | None:
-        state, epoch, broker, _, _, runtimes, failure_cell = self._publication_snapshot
-        publication = failure_cell.failure
+        state, epoch, broker, _, _, runtimes, failure_cell, resolver = self._publication_snapshot
         published = (
-            publication[1]
-            if publication is not None
-            and failure_cell.pool_epoch == epoch
-            and failure_cell.broker is broker
+            resolver.resolve()
+            if resolver is not None
             and state in (GuardState.ACTIVE, GuardState.SEALED)
+            and resolver.owner_epoch == epoch
             else None
         )
+        if published is None:
+            publication = failure_cell.failure
+            published = (
+                publication[1]
+                if publication is not None
+                and failure_cell.pool_epoch == epoch
+                and failure_cell.broker is broker
+                and state in (GuardState.ACTIVE, GuardState.SEALED)
+                else None
+            )
         if published is not None:
             return published
         runtime_fatal = next(
@@ -1224,7 +1241,7 @@ class PoolRuntimeGuard:
         )
         if runtime_fatal is not None:
             return runtime_fatal
-        handle_fatal = next(
+        handle_fatal = None if resolver is not None else next(
             (
                 handle._error
                 for handle in self._fatal_handle_snapshot
@@ -1265,8 +1282,11 @@ class PoolRuntimeGuard:
             raise TransportCloseTimeoutError("7709 pool runtime guard finish blocked before deadline")
         try:
             if broker is not self._broker or pool_epoch != self._epoch:
-                return self._fatal_error
-            error = self._fatal_error
+                return None
+            resolver = self._fatal_resolver
+            error = resolver.resolve() if resolver is not None else self._fatal_error
+            if error is None:
+                error = self._fatal_error
             publication = self._failure_cell.failure
             if (
                 error is None
@@ -1275,7 +1295,7 @@ class PoolRuntimeGuard:
                 and self._failure_cell.broker is broker
             ):
                 error = publication[1]
-            if error is None:
+            if error is None and resolver is None:
                 error = next(
                     (
                         runtime.fatal_error
@@ -1284,7 +1304,7 @@ class PoolRuntimeGuard:
                     ),
                     None,
                 )
-            if error is None:
+            if error is None and resolver is None:
                 error = next(
                     (
                         handle._error
@@ -1307,6 +1327,7 @@ class PoolRuntimeGuard:
             self._runtime_snapshot = ()
             self._fatal_handle_snapshot = ()
             self._fatal_error = None
+            self._fatal_resolver = None
             self._epoch = None
             self._state = GuardState.INACTIVE
             self._failure_cell = _GuardFailurePublication(None, None)
@@ -1324,10 +1345,14 @@ class PoolRuntimeGuard:
             )
             if accepted and all(item is not handle for item in self._fatal_handle_snapshot):
                 self._fatal_handle_snapshot = self._fatal_handle_snapshot + (handle,)
+                resolver = self._fatal_resolver
+                if resolver is not None:
+                    resolver.register(handle)
+                    object.__setattr__(handle, "_resolver", resolver)
             return accepted
 
     def cleanup_failure(self, *, deadline: float | None = None) -> BaseException | None:
-        state, epoch, broker, _, _, _, failure_cell = self._publication_snapshot
+        state, epoch, broker, _, _, _, failure_cell, _ = self._publication_snapshot
         if (
             state not in (GuardState.ACTIVE, GuardState.SEALED)
             or failure_cell.pool_epoch != epoch
@@ -1353,7 +1378,7 @@ class PoolRuntimeGuard:
         broker: LeaseBroker,
         deadline: float | None = None,
     ) -> bool:
-        state, epoch, current_broker, _, _, _, failure_cell = self._publication_snapshot
+        state, epoch, current_broker, _, _, _, failure_cell, _ = self._publication_snapshot
         if (
             state not in (GuardState.ACTIVE, GuardState.SEALED)
             or epoch != pool_epoch
@@ -1384,6 +1409,7 @@ class PoolRuntimeGuard:
             self._push_buffer,
             self._runtime_snapshot,
             self._failure_cell,
+            self._fatal_resolver,
         )
 
 
@@ -1396,6 +1422,7 @@ class ActorFatalHandle:
     _published: threading.Event = field(default_factory=threading.Event, compare=False)
     _runtime: ActorRuntime | None = field(default=None, compare=False)
     _error: BaseException | None = field(default=None, compare=False)
+    _resolver: EpochFatalReasonResolver | None = field(default=None, compare=False)
 
     def __post_init__(self) -> None:
         guard = self.guard_ref()
@@ -1403,10 +1430,11 @@ class ActorFatalHandle:
             guard.register_fatal_handle(self)
 
     def publish(self, runtime: ActorRuntime, error: BaseException) -> None:
-        object.__setattr__(self, "_runtime", runtime)
-        if self._error is None:
-            object.__setattr__(self, "_error", error)
-        self._published.set()
+        if not self._published.is_set():
+            object.__setattr__(self, "_runtime", runtime)
+            if self._error is None:
+                object.__setattr__(self, "_error", error)
+            self._published.set()
         self.retire_event.set()
         guard = self.guard_ref()
         if guard is None:
@@ -1424,7 +1452,8 @@ class ActorFatalHandle:
         if not self._published.is_set():
             return
         runtime = runtime or self._runtime
-        error = self._error
+        resolver = self._resolver
+        error = resolver.resolve() if resolver is not None else self._error
         guard = self.guard_ref()
         if runtime is None or error is None or guard is None:
             return
@@ -1669,6 +1698,7 @@ class PinnedTransportProxy:
 
     @property
     def pending_push_count(self) -> int:
+        self._raise_fatal_push()
         self._validate()
         return self._push_buffer.pending_count
 
@@ -1719,6 +1749,7 @@ class PinnedTransportProxy:
         raise ValueError(f"unsupported command: {command}")
 
     def poll_push(self, timeout: float | None = 0.0, *, parse: bool = False) -> Any:
+        self._raise_fatal_push()
         self._validate()
         item = self._push_buffer.poll(timeout)
         if item is None or not parse:
@@ -1726,6 +1757,7 @@ class PinnedTransportProxy:
         return _parse_push(item)
 
     def drain_pushes(self, *, parse: bool = False) -> list[Any]:
+        self._raise_fatal_push()
         self._validate()
         items = self._push_buffer.drain()
         return [_parse_push(item) for item in items] if parse else [item.response for item in items]
@@ -1895,6 +1927,11 @@ class PinnedTransportProxy:
             open_state = self._state is PinState.OPEN and not self._close_requested.is_set()
         if not open_state or not self._broker.validate(self._lease):
             raise ConnectionClosedError("pinned transport lease is no longer valid")
+
+    def _raise_fatal_push(self) -> None:
+        error = self._push_buffer.fatal_error()
+        if error is not None:
+            raise error
 
     def _admit(self, deadline: float) -> int:
         self._settle_published_terminal(deadline)

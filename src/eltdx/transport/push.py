@@ -6,6 +6,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass
+from typing import Any, Callable
 
 from eltdx.exceptions import PushOverflowError, TransportCloseTimeoutError
 from eltdx.protocol.frame import ResponseFrame
@@ -43,6 +44,35 @@ class PushDropPublication:
     observed: int = 0
 
 
+class EpochFatalReasonResolver:
+    """Owner-side sticky fatal reason for one immutable transport epoch."""
+
+    def __init__(self, owner_epoch: int | None = None) -> None:
+        self.owner_epoch = owner_epoch
+        self._lock = threading.Lock()
+        self._cells: tuple[Any, ...] = ()
+        self._selected: BaseException | None = None
+
+    def register(self, cell: Any) -> None:
+        with self._lock:
+            if all(item is not cell for item in self._cells):
+                self._cells = self._cells + (cell,)
+
+    def resolve(self) -> BaseException | None:
+        with self._lock:
+            if self._selected is not None:
+                return self._selected
+            for cell in self._cells:
+                if getattr(cell, "pool_epoch", self.owner_epoch) != self.owner_epoch:
+                    continue
+                published = getattr(cell, "_published", None)
+                error = getattr(cell, "_error", None)
+                if published is not None and published.is_set() and error is not None:
+                    self._selected = error
+                    return error
+            return None
+
+
 class PushBuffer:
     def __init__(
         self,
@@ -77,6 +107,8 @@ class PushBuffer:
         self._error: BaseException | None = None
         self._close_published = False
         self._published_error: BaseException | None = None
+        self._fatal_resolver: Callable[[], BaseException | None] | None = None
+        self._deferred_drain_requested = False
         self._waiters: set[threading.Event] = set()
         self._waiter_snapshot: tuple[threading.Event, ...] = ()
 
@@ -86,13 +118,21 @@ class PushBuffer:
         if previous is not retire_event and previous.is_set():
             retire_event.set()
 
+    def bind_fatal_resolver(
+        self,
+        resolver: EpochFatalReasonResolver | Callable[[], BaseException | None],
+    ) -> None:
+        self._fatal_resolver = resolver.resolve if isinstance(resolver, EpochFatalReasonResolver) else resolver
+
     def _termination_requested(self) -> bool:
         return self._retire_event.is_set() or self._close_requested.is_set()
 
     def _drain_closed_locked(self, error: BaseException | None = None) -> None:
         self._sync_drop_publications_locked()
         if self._error is None:
-            self._error = error or self._published_error
+            self._error = error
+            if self._error is None and self._fatal_resolver is None:
+                self._error = self._published_error
         self._frames.clear()
         self._bytes = 0
         self._closed = True
@@ -102,6 +142,7 @@ class PushBuffer:
     @property
     def pending_count(self) -> int:
         with self._condition:
+            self._drain_fatal_owner_locked()
             return len(self._frames)
 
     def register_drop_publication(
@@ -190,24 +231,18 @@ class PushBuffer:
             while True:
                 with self._condition:
                     self._sync_drop_publications_locked()
-                    if self._published_error is not None:
-                        raise self._published_error
-                    if self._error is not None:
-                        raise self._error
+                    fatal_error = self._drain_fatal_owner_locked()
+                    if fatal_error is not None:
+                        raise fatal_error
                     if self._retire_event.is_set():
                         return None
                     self._raise_gap_locked()
                     if self._frames:
                         frame = self._frames.popleft()
                         self._bytes -= frame.wire_size
-                        if self._published_error is not None:
-                            error = self._published_error
-                            self._drain_closed_locked(error)
-                            raise error
-                        if self._error is not None:
-                            error = self._error
-                            self._drain_closed_locked(error)
-                            raise error
+                        fatal_error = self._drain_fatal_owner_locked()
+                        if fatal_error is not None:
+                            raise fatal_error
                         if self._retire_event.is_set():
                             self._drain_closed_locked()
                             return None
@@ -242,21 +277,17 @@ class PushBuffer:
 
     def drain(self) -> list[PushFrame]:
         with self._condition:
-            if self._published_error is not None:
-                raise self._published_error
+            fatal_error = self._drain_fatal_owner_locked()
+            if fatal_error is not None:
+                raise fatal_error
             if self._retire_event.is_set():
                 self._drain_closed_locked()
                 return []
             self._raise_gap_locked()
             frames = list(self._frames)
-            if self._published_error is not None:
-                error = self._published_error
-                self._drain_closed_locked(error)
-                raise error
-            if self._error is not None:
-                error = self._error
-                self._drain_closed_locked(error)
-                raise error
+            fatal_error = self._drain_fatal_owner_locked()
+            if fatal_error is not None:
+                raise fatal_error
             if self._retire_event.is_set():
                 self._drain_closed_locked()
                 return []
@@ -293,6 +324,7 @@ class PushBuffer:
         self.publish_close(error)
         acquired = self._condition.acquire(blocking=False)
         if not acquired:
+            self._deferred_drain_requested = True
             return
         try:
             self._drain_closed_locked(error)
@@ -302,6 +334,7 @@ class PushBuffer:
     def snapshot(self) -> PushBufferSnapshot:
         with self._condition:
             self._sync_drop_publications_locked()
+            self._drain_fatal_owner_locked()
             return PushBufferSnapshot(
                 owner_epoch=self.owner_epoch,
                 frame_count=len(self._frames),
@@ -336,3 +369,23 @@ class PushBuffer:
                 continue
             self._dropped_total += total - publication.observed
             publication.observed = total
+
+    def fatal_error(self) -> BaseException | None:
+        """Return the epoch fatal and lazily drain it on an owner path."""
+
+        with self._condition:
+            return self._drain_fatal_owner_locked()
+
+    def _fatal_error_locked(self) -> BaseException | None:
+        if self._retire_event.is_set() and self._fatal_resolver is not None:
+            resolved = self._fatal_resolver()
+            if resolved is not None:
+                return resolved
+        return self._error or self._published_error
+
+    def _drain_fatal_owner_locked(self) -> BaseException | None:
+        error = self._fatal_error_locked()
+        fatal_requested = self._retire_event.is_set() or self._deferred_drain_requested
+        if error is not None and fatal_requested and not self._drained:
+            self._drain_closed_locked(error)
+        return error

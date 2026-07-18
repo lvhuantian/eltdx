@@ -23,18 +23,18 @@
 | Checkpoint | Status | Evidence |
 | --- | --- | --- |
 | FATAL-R00 baseline and RED | complete | Baseline 30 passed; unchanged production with final new regressions: 9 failed, 31 passed in 0.85s |
-| FATAL-R01 production correction | pending | epoch resolver plus Push lazy drain |
+| FATAL-R01 production correction | in progress | epoch resolver plus Push lazy drain implemented; focused matrix green |
 | FATAL-R02 focused and 20-process verification | pending | not run |
 | FATAL-R03 full correctness/stress/performance/build/docs | pending | not run |
 | FINAL | pending | permanent manifest, ledger deletion, exact-head CI/Pages, three CLEAN reviews |
 
 ## Current state
 
-- Current unique `in_progress`: commit and push the pure RED checkpoint, then implement the minimum epoch resolver and owner-side Push drain.
-- Last completed: behavior-only RED suite confirmed on unchanged production source with 9 expected failures and no unexpected regression.
-- Next exact action: commit and push `tests/test_transport_retirement_regressions.py` plus this ledger with `Fix-Checkpoint: F07-RED`; then edit production code.
-- Modified task paths: `tests/test_transport_retirement_regressions.py`, `ACTOR_REFACTOR_FIX_PROGRESS.md`.
-- Push status: no new commit; remote remains baseline.
+- Current unique `in_progress`: freeze the production correction checkpoint after focused matrix and diff review, then push it.
+- Last completed: RED checkpoint `d4d6c97` was pushed; resolver/lazy-drain implementation passes all new regressions, PushBuffer tests, and the full 428-case transport matrix.
+- Next exact action: review/stage `pool.py`, `push.py`, architecture/debug wording, and this ledger; commit with `Fix-Checkpoint: F07`; push and then run 20 independent RED processes.
+- Modified task paths: `src/eltdx/transport/pool.py`, `src/eltdx/transport/push.py`, `docs/ARCHITECTURE.md`, `docs/DEBUG_GUIDE.md`, `ACTOR_REFACTOR_FIX_PROGRESS.md`.
+- Push status: RED `d4d6c97` is remote; production correction is local and uncommitted.
 - PR status: OPEN, Draft, unmerged.
 
 ## Commands and results
@@ -45,6 +45,9 @@
 | 2026-07-18 18:46 +08:00 | `git diff --check` | PASS |
 | 2026-07-18 18:52 +08:00 | `python -m pytest -q tests\\test_transport_retirement_regressions.py` | EXPECTED RED, initial 8 failed / 32 passed in 0.85s |
 | 2026-07-18 18:55 +08:00 | same command after strict old/new epoch identity assertions | EXPECTED RED, final 9 failed / 31 passed in 0.85s |
+| 2026-07-18 19:03 +08:00 | `python -m pytest -q tests\\test_push_buffer.py tests\\test_transport_retirement_regressions.py` | PASS, 48 passed in 0.41s |
+| 2026-07-18 19:05 +08:00 | full transport matrix (retirement, push, socket, actor, pool, lifecycle, failover) | PASS, 428 passed in 16.17s |
+| 2026-07-18 19:05 +08:00 | `python -m compileall -q src tests` | PASS |
 
 ## Open risks and failures
 
@@ -54,5 +57,6 @@
 - RED: after failed `abandon()` try-lock, `pending_count`, `snapshot`, `poll`, and `drain` all left one frame/17 bytes and `closed=False`.
 - RED: pinned `poll_push()` / `drain_pushes()` replaced the epoch fatal object with a new `ConnectionClosedError`.
 - RED coverage also requires the old epoch Push to retain its delayed fatal object and a stale old `finish_epoch` call never to return the new epoch fatal.
+- Earlier implementation attempt caused 5 lifecycle cleanup failures by draining failed `close(error)` publications; corrected by limiting lazy drain to permanent retirement or `abandon()` try-lock failure. Re-run: 428 transport cases passed.
 - Existing `ACTOR_REFACTOR_RESULT.md` still has obsolete exact-source CI/Pages `PENDING` language and production/evidence identities from the previous correction; update only after the new evidence is frozen.
 - Unrelated running Python processes at baseline are external to this task (`uvicorn axquant` and a separate `python -` process); do not terminate or alter them.
