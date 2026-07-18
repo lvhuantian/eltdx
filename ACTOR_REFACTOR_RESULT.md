@@ -604,7 +604,7 @@ The prospective performance directory is
 `C:\Users\ax\Desktop\eltdx\artifacts\retirement-perf-721cbe8-b`: 24 files,
 176,164,179 bytes. Its retained canonical `manifest.sha256` contains 23 sorted
 `name:lowercase_sha256\n` records and has SHA256
-`C70D716D14577628695C374164C37E5B6029FD60BED3AB5500A31D3754732BB8`.
+`A5BE46272293B2228A75C0631E21DC0BB6DA57F83976A7BF532FE3246D33B902`.
 It compares clean detached `f5b63bb` and `721cbe8` roots with identical
 workload SHA256 `4ddd761f...`, using seven declared adjacent A/B pairs in a
 balanced 14-trial order. All attempt-1 trials ran once without overlap or
@@ -713,12 +713,14 @@ added. An independent scope/CI reviewer reached the same conclusion.
   and architecture exception. Its findings on schema-2 quantile aggregation,
   scope count, line-ending hashes and stale result identity were corrected;
   after actual cleanup, the final line-by-line rereview returned CLEAN.
-- Current FINAL cleanup removed the detached `9a60e769` baseline and
-  `abd58c3` evidence worktrees, repository pytest/bytecode caches and draft
-  result-site builds. Only the primary worktree remains; `git clean -nd` and
-  `git clean -ndX` are empty, and no task-owned Python, pytest, benchmark,
-  stress or MkDocs process is alive. The retained raw JSON/campaign and final
-  dist/site evidence under the external artifact directory are deliberate.
+- Current FINAL cleanup removes obsolete detached evidence worktrees,
+  repository pytest/bytecode caches and draft result-site builds. The primary
+  worktree plus clean detached `f5b63bb`/`721cbe8` performance roots remain so
+  the retained campaign verifier can replay their exact absolute identities;
+  `git clean -nd` and `git clean -ndX` are empty, and no task-owned Python,
+  pytest, benchmark, stress or MkDocs process is alive. The retained raw
+  JSON/campaign and final dist/site evidence under the external artifact
+  directory are deliberate.
 - The FINAL commit must have no progress ledger, no untracked non-ignored file,
   no task-owned process, and two or more clean independent review conclusions.
 - Local HEAD, remote branch, PR head, FINAL CI, and FINAL Pages must all resolve
