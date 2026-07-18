@@ -58,6 +58,14 @@ class EpochFatalReasonResolver:
             if all(item is not cell for item in self._cells):
                 self._cells = self._cells + (cell,)
 
+    def select(self, error: BaseException) -> BaseException:
+        """Select an owner-observed fatal when no Actor cell won first."""
+
+        with self._lock:
+            if self._selected is None:
+                self._selected = error
+            return self._selected
+
     def resolve(self) -> BaseException | None:
         with self._lock:
             if self._selected is not None:
@@ -386,6 +394,6 @@ class PushBuffer:
     def _drain_fatal_owner_locked(self) -> BaseException | None:
         error = self._fatal_error_locked()
         fatal_requested = self._retire_event.is_set() or self._deferred_drain_requested
-        if error is not None and fatal_requested and not self._drained:
+        if fatal_requested and not self._drained:
             self._drain_closed_locked(error)
         return error

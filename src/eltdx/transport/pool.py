@@ -965,9 +965,11 @@ class PoolRuntimeGuard:
                 cleanup_cell = self._failure_cell
                 resolver = self._fatal_resolver
                 resolved = resolver.resolve() if resolver is not None else None
-                canonical_error = resolved or self._fatal_error or error
-                if self._fatal_error is None:
-                    self._fatal_error = canonical_error
+                if resolver is not None:
+                    canonical_error = resolved or resolver.select(error)
+                else:
+                    canonical_error = self._fatal_error or error
+                self._fatal_error = canonical_error
                 if all(item is not runtime for item in self._runtimes):
                     self._runtimes.append(runtime)
                 current_broker = self._broker
@@ -1221,21 +1223,28 @@ class PoolRuntimeGuard:
         )
         if published is None:
             publication = failure_cell.failure
-            published = (
-                publication[1]
-                if publication is not None
+            if (
+                publication is not None
                 and failure_cell.pool_epoch == epoch
                 and failure_cell.broker is broker
                 and state in (GuardState.ACTIVE, GuardState.SEALED)
-                else None
-            )
+            ):
+                published = (
+                    resolver.select(publication[1])
+                    if resolver is not None
+                    else publication[1]
+                )
+            else:
+                published = None
         if published is not None:
             return published
         runtime_fatal = next(
             (
                 runtime.fatal_error
                 for runtime in runtimes
-                if runtime.runtime_epoch == epoch and runtime.fatal_error is not None
+                if resolver is None
+                and runtime.runtime_epoch == epoch
+                and runtime.fatal_error is not None
             ),
             None,
         )
@@ -1262,6 +1271,8 @@ class PoolRuntimeGuard:
         if not acquired:
             raise TransportCloseTimeoutError("7709 pool runtime guard inspection blocked before deadline")
         try:
+            if resolver is not None:
+                return published
             return self._fatal_error or published or runtime_fatal
         finally:
             self._lock.release()
@@ -1285,7 +1296,7 @@ class PoolRuntimeGuard:
                 return None
             resolver = self._fatal_resolver
             error = resolver.resolve() if resolver is not None else self._fatal_error
-            if error is None:
+            if error is None and resolver is None:
                 error = self._fatal_error
             publication = self._failure_cell.failure
             if (
@@ -1294,7 +1305,11 @@ class PoolRuntimeGuard:
                 and self._failure_cell.pool_epoch == pool_epoch
                 and self._failure_cell.broker is broker
             ):
-                error = publication[1]
+                error = (
+                    resolver.select(publication[1])
+                    if resolver is not None
+                    else publication[1]
+                )
             if error is None and resolver is None:
                 error = next(
                     (
