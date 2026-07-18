@@ -87,9 +87,12 @@ def test_failed_actor_exits_without_waiting_for_pool_owned_locks(blocked_owner: 
     holder.start()
     assert held.wait(timeout=2)
     try:
+        deadline = time.monotonic() + 0.2
         trigger.set()
-        assert runtime.stopped.wait(timeout=0.2)
-        assert runtime.actor_thread is not None and not runtime.actor_thread.is_alive()
+        assert runtime.stopped.wait(timeout=max(0.0, deadline - time.monotonic()))
+        assert runtime.actor_thread is not None
+        runtime.actor_thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        assert not runtime.actor_thread.is_alive()
         assert retire.is_set()
     finally:
         release.set()
