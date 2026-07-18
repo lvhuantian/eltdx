@@ -231,6 +231,30 @@ class _SetThenPauseEvent:
         return self._event.wait(timeout)
 
 
+class _PauseFirstFatalPublishBuffer(PushBuffer):
+    """Pause one fatal publisher after it observes an empty error slot."""
+
+    def __init__(self, owner_epoch: int) -> None:
+        super().__init__(owner_epoch)
+        self.read_entered = _REAL_EVENT()
+        self.allow_read = _REAL_EVENT()
+        self._pause_armed = True
+
+    def __getattribute__(self, name: str):
+        value = super().__getattribute__(name)
+        if name != "_published_error" or value is not None:
+            return value
+        try:
+            armed = super().__getattribute__("_pause_armed")
+        except AttributeError:
+            return value
+        if armed and threading.current_thread().name == "first-fatal-publisher":
+            super().__setattr__("_pause_armed", False)
+            self.read_entered.set()
+            assert self.allow_read.wait(timeout=2)
+        return value
+
+
 @pytest.mark.parametrize("count", (1, 2))
 def test_immediate_and_batch_lease_publication_roll_back_after_retirement(count: int) -> None:
     retire = _REAL_EVENT()
@@ -767,3 +791,227 @@ def test_delayed_old_epoch_fatal_does_not_retire_new_epoch() -> None:
     assert not new_retire.is_set()
     assert not new_broker.snapshot().closed
     assert not new_push.snapshot().closed
+
+
+def test_push_reads_fatal_reason_during_retirement_fanout_window() -> None:
+    retire_entered = _REAL_EVENT()
+    allow_fanout = _REAL_EVENT()
+    retire = _SetThenPauseEvent(retire_entered, allow_fanout)
+    broker = LeaseBroker(1, pool_size=1, max_pending_requests=1)
+    push = PushBuffer(1)
+    guard = PoolRuntimeGuard()
+    guard.configure(broker, push, retire_event=retire)
+    handle = pool_module.ActorFatalHandle(weakref.ref(guard), 1, weakref.ref(broker), retire)
+    runtime = ActorRuntime(1, ())
+    error = ConnectionClosedError("fatal before push fanout")
+    runtime.fatal_error = error
+    publisher = threading.Thread(target=lambda: handle.publish(runtime, error))
+    publisher.start()
+    assert retire_entered.wait(timeout=2)
+
+    try:
+        with pytest.raises(ConnectionClosedError) as polled:
+            push.poll()
+        with pytest.raises(ConnectionClosedError) as drained:
+            push.drain()
+        assert polled.value is error
+        assert drained.value is error
+    finally:
+        allow_fanout.set()
+        publisher.join(timeout=2)
+
+    assert not publisher.is_alive()
+
+
+def test_two_actor_fatal_reason_is_sticky_when_publication_cell_is_contended() -> None:
+    retire = _REAL_EVENT()
+    broker = LeaseBroker(1, pool_size=2, max_pending_requests=2)
+    push = PushBuffer(1)
+    guard = PoolRuntimeGuard()
+    guard.configure(broker, push, retire_event=retire)
+    runtimes = (ActorRuntime(1, ()), ActorRuntime(1, ()))
+    for runtime in runtimes:
+        assert guard.add_runtime(runtime, pool_epoch=1, broker=broker)
+    handles = tuple(
+        pool_module.ActorFatalHandle(weakref.ref(guard), 1, weakref.ref(broker), retire)
+        for _ in runtimes
+    )
+    errors = (
+        ConnectionClosedError("registered-first fatal"),
+        ConnectionClosedError("published-first fatal"),
+    )
+
+    with guard._failure_cell.lock:
+        runtimes[1].fatal_error = errors[1]
+        handles[1].publish(runtimes[1], errors[1])
+        chosen = guard.failure()
+        assert chosen is errors[1]
+
+        runtimes[0].fatal_error = errors[0]
+        handles[0].publish(runtimes[0], errors[0])
+        assert guard.failure() is chosen
+
+        with pytest.raises(ConnectionClosedError) as polled:
+            push.poll()
+        with pytest.raises(ConnectionClosedError) as drained:
+            push.drain()
+        assert polled.value is chosen
+        assert drained.value is chosen
+
+    assert guard.finish_epoch(pool_epoch=1, broker=broker) is chosen
+    assert guard.failure() is chosen
+
+
+def test_two_actor_fatal_cannot_overwrite_push_reason_after_guard_choice() -> None:
+    retire = _REAL_EVENT()
+    broker = LeaseBroker(1, pool_size=2, max_pending_requests=2)
+    push = _PauseFirstFatalPublishBuffer(1)
+    guard = PoolRuntimeGuard()
+    guard.configure(broker, push, retire_event=retire)
+    runtimes = (ActorRuntime(1, ()), ActorRuntime(1, ()))
+    handles = tuple(
+        pool_module.ActorFatalHandle(weakref.ref(guard), 1, weakref.ref(broker), retire)
+        for _ in runtimes
+    )
+    errors = (
+        ConnectionClosedError("paused first fatal"),
+        ConnectionClosedError("interleaved second fatal"),
+    )
+    for runtime, error in zip(runtimes, errors):
+        runtime.fatal_error = error
+        assert guard.add_runtime(runtime, pool_epoch=1, broker=broker)
+
+    publisher = threading.Thread(
+        name="first-fatal-publisher",
+        target=lambda: handles[0].publish(runtimes[0], errors[0]),
+    )
+    publisher.start()
+    assert push.read_entered.wait(timeout=2)
+    handles[1].publish(runtimes[1], errors[1])
+    chosen = guard.failure()
+
+    push.allow_read.set()
+    publisher.join(timeout=2)
+    assert not publisher.is_alive()
+
+    with pytest.raises(ConnectionClosedError) as polled:
+        push.poll()
+    with pytest.raises(ConnectionClosedError) as drained:
+        push.drain()
+    assert polled.value is chosen
+    assert drained.value is chosen
+    assert guard.finish_epoch(pool_epoch=1, broker=broker) is chosen
+    assert guard.failure() is chosen
+
+
+def test_delayed_old_epoch_reason_cannot_poison_new_epoch_resolver() -> None:
+    guard = PoolRuntimeGuard()
+    old_retire = _REAL_EVENT()
+    old_broker = LeaseBroker(1, pool_size=1, max_pending_requests=1)
+    old_push = PushBuffer(1)
+    guard.configure(old_broker, old_push, retire_event=old_retire)
+    old_handle = pool_module.ActorFatalHandle(
+        weakref.ref(guard), 1, weakref.ref(old_broker), old_retire
+    )
+    old_runtime = ActorRuntime(1, ())
+
+    new_retire = _REAL_EVENT()
+    new_broker = LeaseBroker(2, pool_size=1, max_pending_requests=1)
+    new_push = PushBuffer(2)
+    guard.configure(new_broker, new_push, retire_event=new_retire)
+    new_handle = pool_module.ActorFatalHandle(
+        weakref.ref(guard), 2, weakref.ref(new_broker), new_retire
+    )
+    new_runtime = ActorRuntime(2, ())
+
+    old_error = ConnectionClosedError("delayed old epoch fatal")
+    old_runtime.fatal_error = old_error
+    old_handle.publish(old_runtime, old_error)
+    with pytest.raises(ConnectionClosedError) as old_polled:
+        old_push.poll()
+    assert old_polled.value is old_error
+    assert guard.failure() is None
+    assert new_push.poll() is None
+    assert not new_retire.is_set()
+
+    new_error = ConnectionClosedError("new epoch fatal")
+    new_runtime.fatal_error = new_error
+    new_handle.publish(new_runtime, new_error)
+    with pytest.raises(ConnectionClosedError) as polled:
+        new_push.poll()
+    assert polled.value is new_error
+    assert guard.failure() is new_error
+    assert guard.finish_epoch(pool_epoch=2, broker=new_broker) is new_error
+    assert guard.finish_epoch(pool_epoch=1, broker=old_broker) is None
+
+
+@pytest.mark.parametrize("owner", ("pending_count", "snapshot", "poll", "drain"))
+def test_push_owner_lazily_drains_after_abandon_condition_contention(owner: str) -> None:
+    push = PushBuffer(1)
+    assert push.offer_nowait(_frame(1))
+    held = _REAL_EVENT()
+    release = _REAL_EVENT()
+
+    def hold_condition() -> None:
+        with push._condition:
+            held.set()
+            assert release.wait(timeout=2)
+
+    holder = threading.Thread(target=hold_condition)
+    holder.start()
+    assert held.wait(timeout=2)
+    error = ConnectionClosedError(f"fatal deferred drain via {owner}")
+    push.abandon(error)
+    release.set()
+    holder.join(timeout=2)
+    assert not holder.is_alive()
+
+    if owner == "pending_count":
+        assert push.pending_count == 0
+    elif owner == "snapshot":
+        assert push.snapshot().closed
+    else:
+        with pytest.raises(ConnectionClosedError) as raised:
+            push.poll() if owner == "poll" else push.drain()
+        assert raised.value is error
+
+    snapshot = push.snapshot()
+    assert snapshot.closed
+    assert snapshot.frame_count == snapshot.byte_count == 0
+    assert push.pending_count == 0
+
+
+def test_graceful_close_publication_preserves_buffered_consumption() -> None:
+    push = PushBuffer(1)
+    frames = (_frame(1, 1), _frame(1, 2))
+    assert all(push.offer_nowait(frame) for frame in frames)
+
+    push.publish_close(None)
+
+    assert push.poll() is frames[0]
+    assert push.drain() == [frames[1]]
+    assert push.poll() is None
+    assert push.drain() == []
+
+
+def test_pinned_push_pollers_preserve_epoch_fatal_identity() -> None:
+    retire = _REAL_EVENT()
+    broker = LeaseBroker(1, pool_size=1, max_pending_requests=1, retire_event=retire)
+    push = PushBuffer(1, retire_event=retire)
+    lease = broker.acquire(time.monotonic() + 1, pinned=True)
+    proxy = PinnedTransportProxy(broker, lease, object(), push, timeout=1)
+    guard = PoolRuntimeGuard()
+    guard.configure(broker, push, retire_event=retire)
+    handle = pool_module.ActorFatalHandle(weakref.ref(guard), 1, weakref.ref(broker), retire)
+    runtime = ActorRuntime(1, ())
+    error = ConnectionClosedError("pinned epoch fatal")
+    runtime.fatal_error = error
+
+    handle.publish(runtime, error)
+
+    with pytest.raises(ConnectionClosedError) as polled:
+        proxy.poll_push()
+    with pytest.raises(ConnectionClosedError) as drained:
+        proxy.drain_pushes()
+    assert polled.value is error
+    assert drained.value is error
