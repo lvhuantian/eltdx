@@ -1445,6 +1445,15 @@ class ActorFatalHandle:
             guard.register_fatal_handle(self)
 
     def publish(self, runtime: ActorRuntime, error: BaseException) -> None:
+        # Each configured transport epoch installs one handle on one Actor.
+        # The Actor event loop is the sole production writer: normal fatal
+        # handling calls this once, while _finish_runtime's cleanup fallback
+        # can publish only when no fatal reason was already set.  Startup
+        # failure invokes the same handle synchronously before any Actor
+        # thread exists.  A new epoch receives a new handle, so the
+        # is_set() check is an idempotence guard rather than a cross-Actor
+        # claim; adding a shared hot-path lock would violate the non-blocking
+        # fatal publication contract.
         if not self._published.is_set():
             object.__setattr__(self, "_runtime", runtime)
             if self._error is None:

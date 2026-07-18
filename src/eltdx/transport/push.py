@@ -311,6 +311,20 @@ class PushBuffer:
             waiter.set()
 
     def publish_close(self, error: BaseException | None = None) -> None:
+        """Publish the terminal marker without taking the push condition.
+
+        The non-None publication has one writer per epoch: standalone
+        ``SocketTransport`` owns its buffer and only the epoch Actor publishes
+        ``runtime.fatal_error`` from ``_finish_runtime`` (startup failure uses
+        the same caller-side path before an Actor thread exists).  A concurrent
+        standalone owner close publishes only ``None``.  Pooled Actors do not
+        own the shared buffer and their fatal fan-out calls ``abandon()`` with
+        ``None``; the owner later publishes the resolver-selected error.  This
+        is why this signal path intentionally remains lock-free: adding the
+        push condition or another shared application lock here would make the
+        Actor fatal hot path wait.  See the standalone interleaving regression
+        test for the owner-close/Actor-fatal call graph.
+        """
         if self._published_error is None:
             self._published_error = error
         self._close_published = True

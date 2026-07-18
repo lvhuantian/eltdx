@@ -109,6 +109,58 @@ def test_standalone_actor_fatal_is_visible_and_failed_closed() -> None:
     assert transport._runtime is runtime
 
 
+def test_standalone_close_and_actor_fatal_publish_one_non_none_push_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Owner close may race Actor cleanup, but only the Actor supplies a reason."""
+
+    publish_calls: list[BaseException | None] = []
+    actor_publish_entered = threading.Event()
+    allow_actor_publish = threading.Event()
+    owner_publish_seen = threading.Event()
+
+    class RecordingPushBuffer(PushBuffer):
+        def publish_close(self, error: BaseException | None = None) -> None:
+            publish_calls.append(error)
+            if error is not None:
+                actor_publish_entered.set()
+                assert allow_actor_publish.wait(timeout=2)
+            else:
+                owner_publish_seen.set()
+            super().publish_close(error)
+
+    monkeypatch.setattr(socket_module, "PushBuffer", RecordingPushBuffer)
+    transport = SocketTransport(hosts=["127.0.0.1:9"], timeout=1, heartbeat_interval=None)
+    runtime = transport._ensure_runtime()
+    writer = runtime.wake_writer
+    assert writer is not None
+    writer.close()
+    assert actor_publish_entered.wait(timeout=2)
+
+    close_errors: list[BaseException] = []
+
+    def close_owner() -> None:
+        try:
+            transport.close()
+        except BaseException as exc:
+            close_errors.append(exc)
+
+    closer = threading.Thread(target=close_owner, name="standalone-close-owner")
+    closer.start()
+    assert owner_publish_seen.wait(timeout=2)
+    allow_actor_publish.set()
+
+    assert runtime.stopped.wait(timeout=2)
+    closer.join(timeout=2)
+    assert not closer.is_alive()
+    assert close_errors == []
+
+    assert runtime.fatal_error is not None
+    non_none_calls = [error for error in publish_calls if error is not None]
+    assert non_none_calls == [runtime.fatal_error]
+    assert all(error is runtime.fatal_error for error in non_none_calls)
+
+
 def test_pool_actor_fatal_stops_siblings_and_fails_closed() -> None:
     pool = PooledSocketTransport(hosts=["127.0.0.1:9"], timeout=0.2, pool_size=2, heartbeat_interval=None)
     pool._ensure_started()
@@ -127,6 +179,27 @@ def test_pool_actor_fatal_stops_siblings_and_fails_closed() -> None:
 
     pool.close()
     assert pool.diagnostics.state is PoolState.FAILED_CLOSED
+
+
+def test_each_pool_runtime_has_one_epoch_local_fatal_handle() -> None:
+    pool = PooledSocketTransport(
+        hosts=["127.0.0.1:9"],
+        timeout=0.2,
+        pool_size=2,
+        heartbeat_interval=None,
+    )
+    try:
+        pool._ensure_started()
+        runtimes = tuple(transport._ensure_runtime() for transport in pool._transports)
+        handles = tuple(runtime.fatal_callback for runtime in runtimes)
+
+        assert all(isinstance(handle, pool_module.ActorFatalHandle) for handle in handles)
+        assert len({id(handle) for handle in handles}) == len(handles)
+        for runtime, handle in zip(runtimes, handles):
+            assert runtime.fatal_callback is handle
+            assert sum(candidate.fatal_callback is handle for candidate in runtimes) == 1
+    finally:
+        pool.close()
 
 
 def test_standalone_finalizer_stops_connected_runtime() -> None:
