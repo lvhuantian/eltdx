@@ -1271,9 +1271,56 @@ class PoolRuntimeGuard:
         if not acquired:
             raise TransportCloseTimeoutError("7709 pool runtime guard inspection blocked before deadline")
         try:
-            if resolver is not None:
+            # The lock is the slow-path linearization point.  The lock-free
+            # read above may have observed resolver=None immediately before a
+            # fatal publication; never return that stale result.  Re-read the
+            # complete immutable publication snapshot so an epoch transition
+            # can only expose its own resolver and failure cell.
+            (
+                state,
+                epoch,
+                broker,
+                _,
+                _,
+                runtimes,
+                failure_cell,
+                resolver,
+            ) = self._publication_snapshot
+            published = (
+                resolver.resolve()
+                if resolver is not None
+                and state in (GuardState.ACTIVE, GuardState.SEALED)
+                and resolver.owner_epoch == epoch
+                else None
+            )
+            if published is None:
+                publication = failure_cell.failure
+                if (
+                    publication is not None
+                    and failure_cell.pool_epoch == epoch
+                    and failure_cell.broker is broker
+                    and state in (GuardState.ACTIVE, GuardState.SEALED)
+                ):
+                    published = (
+                        resolver.select(publication[1])
+                        if resolver is not None
+                        else publication[1]
+                    )
+            if published is not None:
                 return published
-            return self._fatal_error or published or runtime_fatal
+            runtime_fatal = next(
+                (
+                    runtime.fatal_error
+                    for runtime in runtimes
+                    if resolver is None
+                    and runtime.runtime_epoch == epoch
+                    and runtime.fatal_error is not None
+                ),
+                None,
+            )
+            if resolver is not None:
+                return None
+            return self._fatal_error or runtime_fatal
         finally:
             self._lock.release()
 
