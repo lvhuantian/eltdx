@@ -771,6 +771,10 @@ added. An independent scope/CI reviewer reached the same conclusion.
 The PR remains intentionally unmerged and draft. No tag, release, main update,
 or package publication was performed.
 
+The temporary `ACTOR_REFACTOR_FIX_PROGRESS.md` ledger is deleted by the
+first-parent FINAL finalization commit containing this manifest. Future
+recovery must use this manifest and Git history rather than recreate the ledger.
+
 ## Recovery Rule
 
 Resolve `SELF`, verify branch/PR identity and exact-SHA checks, then use this
