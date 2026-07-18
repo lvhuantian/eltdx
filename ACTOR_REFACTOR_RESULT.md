@@ -10,7 +10,7 @@ sibling-Actor locks. The resulting external-lock correction reached
 fatal/admission and fatal/push publication windows. The first reviewed
 epoch-retirement correction at `a987c16` was itself reopened after the final
 review found unresolved Guard selection and no-error deferred-drain edges. The
-reviewed production correction is now frozen at `3589a09`; delivery becomes COMPLETE
+reviewed production correction is now frozen at `45e6703`; delivery becomes COMPLETE
 only after the final `SELF` documentation commit passes its own exact CI and
 Pages gates. Source-evidence checks cannot be substituted for those gates.
 
@@ -35,10 +35,13 @@ Pages gates. Source-evidence checks cannot be substituted for those gates.
 | Epoch-retirement verification checkpoint | `da8854e` (`Fix-Checkpoint: F07E`, push retry recorded) |
 | Epoch-retirement CI correction | `bc6990a8b0e6f350ef46ac2884930720fdd5a338` (`Fix-Checkpoint: F07-CI-R1`) |
 | Final-review RED tests | `ee077cc` (`Fix-Checkpoint: F08-RED`), `12ea212` (`Fix-Checkpoint: F08-RED2`) |
-| Current epoch-retirement production | `3589a09095c21908dd738e266e295393b91548e8` (`Fix-Checkpoint: F08`) |
-| Current verification checkpoint | `dade830`, with pending-push recovery at `a8402a4` |
-| Stress/performance artifact source | `3589a09095c21908dd738e266e295393b91548e8` |
-| Exact preceding FINAL checkpoint | `ac942a87cd1f1fd78b5486bc29660361c7af380e` (CI `29648788642`, Pages `29648788648`, both SUCCESS) |
+| Current epoch-retirement production | `3589a09095c21908dd738e266e295393b91548e8` (`Fix-Checkpoint: F08`, historical predecessor) |
+| Current F09 RED tests | `19d6d74` (`Fix-Checkpoint: F09-RED`) |
+| Current P2 invariant evidence | `f0d9ce7` |
+| Current Guard production fix | `45e6703` (`Fix-Checkpoint: F09-FIX`) |
+| Current verification checkpoint | `f117871` (`Fix-Checkpoint: F09-TEST`) and `ddce09b` (`Fix-Checkpoint: F09-EVIDENCE`) |
+| Stress/performance artifact source | `f1178712bf108d113db7a345f53d3a9e9e0d113b` |
+| Exact preceding FINAL checkpoint | `ac942a87cd1f1fd78b5486bc29660361c7af380e` (CI `29648788642`, Pages `29648788648`, both SUCCESS; historical) |
 | Final manifest commit | `SELF`, resolved by the first-parent FINAL trailer below |
 | Final delivery HEAD | `SELF`, the first-parent commit carrying `Fix-Checkpoint: FINAL` |
 | Branch | `actor-transport-refactor` |
@@ -54,10 +57,13 @@ first-parent commit containing this manifest, with no
 git log -1 --first-parent --format="%H%x09%B" --grep="Fix-Checkpoint: FINAL"
 ```
 
-A commit cannot embed its own SHA. At delivery, local HEAD, the remote branch,
-and PR head must all equal `SELF`. The FINAL CI and Pages runs are recovered
-with `gh run list --commit SELF`; their exact URLs and conclusions are reported
-after they finish.
+A commit cannot embed its own SHA or the Actions run IDs created only after its
+push. At delivery, local HEAD, the remote branch, and PR head must all equal
+`SELF`; resolve `SELF` with the first-parent command above. After the exact
+`SELF` push, recover the six CI jobs and Pages build with
+`gh run list --commit SELF`. Persist those exact URLs and conclusions in the
+existing PR #12 delivery comment and in the final report; do not create another
+repository commit merely to copy run IDs into this manifest.
 
 ## Correction Checkpoints
 
@@ -83,6 +89,7 @@ after they finish.
 | Superseded epoch-retirement correction | `d6b9296`, `f290981`, `721cbe8` | Earlier deterministic publication-race correction; reopened by the final fatal-reason review |
 | Reopened fatal-reason FINAL | `d4d6c97`, `a987c16`, `da8854e`, `24af0dc`, `5bcc768`, `bc6990a`, `96b7b98`, `d38bfc6` | Reopened: final review found an unresolved runtime-fatal fallback, owner reason override, and no-error deferred Push drain |
 | Current fatal-reason correction | `ee077cc`, `12ea212`, `3589a09`, `dade830`, `a8402a4` | Deterministic RED edges, resolver owner selection, resolver-only Guard fallback, complete deferred abandon drain, and exact-source heavy verification |
+| F09 fatal publication correction | `19d6d74`, `f0d9ce7`, `45e6703`, `f117871`, `ddce09b` | Guard stale-None RED/REEN, diagnostics and epoch isolation, standalone Push/handle single-writer evidence, stress/performance/package/docs verification |
 | FINAL manifest | `SELF` | Permanent result plus temporary progress-ledger deletion; exact-SHA CI/Pages resolved after push |
 
 This table covers every commit from the original A00-A09 implementation and
@@ -642,16 +649,34 @@ worker, unbounded queue or per-request publication object was added; the new
 assigned-waiter and fatal-handle snapshots remain bounded by the configured
 pool/request ownership for the current epoch.
 
-## Current Delivery Evidence
+## F09 Current Delivery Evidence
 
-All current local evidence below uses clean exact production source
-`3589a09095c21908dd738e266e295393b91548e8` (checkpoint `3589a09`). The
-temporary ledger records the commands and is deleted only in the finalization
-commit; after that commit this manifest plus Git history is the recovery source.
-The finalization commit is the delivery `SELF`. The first normal push of
-verification checkpoint `dade830` failed with a transient TLS handshake error;
-the pending state was recorded at `a8402a4` and the retry succeeded, with no
-reset, amend, rebase, evidence rerun, or force-push.
+The F09 production source is `45e6703` and the clean evidence source used by
+the stress/performance reruns is `f1178712bf108d113db7a345f53d3a9e9e0d113b`.
+The final documentation commit is delivery `SELF`; it changes no production
+source. The temporary ledger records recovery until that finalization commit,
+after which this manifest plus Git history is authoritative.
+
+| Gate | Result | Artifact / identity |
+| --- | --- | --- |
+| F09 RED proof | 3 new race tests fail on old code: stale-None returns `None`, diagnostics returns `RUNNING`, slow epoch path returns `None` | `19d6d74`; command: `python -m pytest -q tests/test_transport_retirement_regressions.py::test_guard_failure_linearizes_after_none_snapshot_when_fatal_publishes tests/test_transport_lifecycle_regressions.py::test_diagnostics_does_not_report_running_after_fatal_publication tests/test_transport_retirement_regressions.py::test_guard_failure_slow_path_rechecks_new_epoch_and_ignores_old_reason` |
+| F09 targeted RED/REEN | 5 focused tests plus P2 call-graph tests PASS; targeted transport suites `231 passed in 9.56s` | `45e6703`; Guard -> resolver and Push condition -> resolver lock order preserved |
+| New race tests, 20 independent processes | 60/60 test cases PASS; `failed=0` | `C:\Users\ax\Desktop\eltdx\eltdx-src\artifacts\actor-f09-20proc-45e6703.log`, SHA256 `49400E70509F823A86DE2B5186F573733676E9F4F63574223E39E85CB2B08F62` |
+| Complete pytest | `646 passed in 245.37s (0:04:05)` on Windows Python 3.12.6; no xfail or flaky retry | command: `python -m pytest -q` |
+| 10k generations / 100k requests stress | PASS; unique 10,000/100,000; duplicate/missing/unexpected/cross-request/cross-generation all 0; max active 4; leases/waiters/pins/frames/bytes/Actor threads 0; resources `190,190,190,190,190,190,190,190`, plateau=true | `C:\Users\ax\Desktop\eltdx\eltdx-src\artifacts\actor-stress-f09-f117871.json`, SHA256 `F3A574D9E1DDEEC690C24CDB967AE732863243D2FCDCDC02268B034EF78CAECD` |
+| Paired performance campaign | **FAIL, user-approved exception**; exact 8-cell ABBA+BAAB, no integrity errors/retries; sequential ratio `0.918421`, saturated ratio `0.926675`; no new exception added | `C:\Users\ax\Desktop\eltdx\eltdx-src\artifacts\perf-f09-f117871\campaign_bundle.json`; bundle SHA256 `043D6306C303481E8AB2052AFCF180CB3BD32EBC3DC5DD9D26F68C83963EEB87`; `manifest.sha256` SHA256 `9942EB0AC0BF8F2AE65A9CD1224DAAB08C8DACD5B481D2C0708B36D66422521A`; declaration SHA256 `7ec426845f5dd3c73d69c781ac11c49836955e333507128a19d973ef5fe540e5`; verifier report SHA256 `4DCFF1CF6C5A6AABA07E256492138EFEECFAC5679C8BA9BA33C5EC2B7E85951B` |
+| Package artifacts | PASS; `python -m build` and `python -m twine check dist/*` | wheel SHA256 `CA693A5C9D280341120102DBF7276031E1C908219E407894670320D99C7A16E7`; sdist SHA256 `41D39944B00BF135BC02C7A3604A5B108C7B822DCB7A3BD12829D9AAFA7ED67F` |
+| MkDocs strict | PASS; 126 files, 5,685,815 bytes | command: `python -m mkdocs build --strict`, local `site/` artifact |
+
+The historical Actor-vs-legacy performance exception remains exactly
+**FAIL, user-approved exception**. The F09 campaign does not reclassify that
+exception as PASS and does not introduce another exception. The performance
+producer workload SHA is `b09ab7130752ae0c562b63ba04d2b1bea42f1e168c060f13d6e86e9bba277b84`.
+
+## Historical Delivery Evidence
+
+The following table retains the prior exact-`3589a09` evidence for audit; it
+is not substituted for the F09 results above.
 
 | Gate | Result | Artifact / identity |
 | --- | --- | --- |
