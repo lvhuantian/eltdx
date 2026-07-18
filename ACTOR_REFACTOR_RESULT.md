@@ -7,8 +7,8 @@ completion claim was itself reopened on 2026-07-17 after deterministic tests
 proved that the Actor thread could still block on Pool, Broker, Proxy and
 sibling-Actor locks. The resulting external-lock correction reached
 `f5b63bb`, but was reopened again on 2026-07-17 after deterministic tests found
-fatal/admission and fatal/push publication windows. The epoch-retirement
-correction is frozen at production source `f290981`; delivery becomes COMPLETE
+fatal/admission and fatal/push publication windows. The reviewed epoch-retirement
+correction is frozen at production source `721cbe8`; delivery becomes COMPLETE
 only after the final `SELF` documentation commit passes its own exact CI and
 Pages gates. Source-evidence checks cannot be substituted for those gates.
 
@@ -29,12 +29,12 @@ Pages gates. Source-evidence checks cannot be substituted for those gates.
 | Evidence ledger checkpoint | `eac784b` (`Fix-Checkpoint: L04E2`) |
 | Epoch-retirement baseline | `f5b63bb01d5317b9e637ede55c3c1003b0f0138d` |
 | Epoch-retirement red tests | `d6b9296be7ffbd50b743243cc556dc52d5232565` |
-| Current epoch-retirement production | `f290981cf6b61eae84414f4d0cc2494d512b67bd` |
+| Current epoch-retirement production | `721cbe8885876364a0e1d42f9802ccf7de51029c` |
 | Final manifest commit | `SELF`, resolved by the first-parent FINAL trailer below |
 | Branch | `actor-transport-refactor` |
 | Draft PR | [#12](https://github.com/electkismet/eltdx/pull/12), OPEN, draft, unmerged |
-| Exact-source CI | [run 29577023570](https://github.com/electkismet/eltdx/actions/runs/29577023570), SUCCESS |
-| Exact-source Pages | [run 29577023585](https://github.com/electkismet/eltdx/actions/runs/29577023585), strict build SUCCESS |
+| Exact-source CI | PENDING normal push of final `SELF`; URL retained in the external checkpoint |
+| Exact-source Pages | PENDING final `SELF`; strict-build URL retained in the external checkpoint |
 
 The previous `SELF=9a60e769...` is overturned. `SELF` is the newest
 first-parent commit containing this manifest, with no
@@ -70,7 +70,7 @@ after they finish.
 | Exception/control/final evidence | `eacbfc0`, `e455234`, `5ff6447`, `3287b6a`, `e94f9cd`, `e924d4d` | Exact heavy evidence, blocker audit, revision 1.2 authorization, control priority, exact final-source evidence and revision 1.3 manifest candidate |
 | Overturned FINAL | `9a60e76` | Reopened: Actor external-lock blocking remained |
 | External-lock correction | `7f8e120`, `8b68542`, `f5ad8a3`, `48b32d6`, `166ae61`, `abd58c3`, `eac784b` | Nonblocking Actor handoff, deferred settlement, bounded FIFO lease pulses, two pin publication corrections, per-call identity cell and exact evidence ledger |
-| Epoch-retirement correction | `d6b9296`, `f290981` | Deterministic red publication races, permanent epoch/local termination, condition-owned Broker/Push drain and failure-cell-independent fatal fanout |
+| Epoch-retirement correction | `d6b9296`, `f290981`, `721cbe8` | Deterministic red publication races, permanent epoch/local termination, condition-owned Broker/Push drain, failure-cell-independent fatal fanout and independent-review corrections |
 | FINAL manifest | `SELF` | Permanent result plus temporary progress-ledger deletion; exact-SHA CI/Pages resolved after push |
 
 This table covers every commit from the original A00-A09 implementation and
@@ -577,23 +577,23 @@ but is not FINAL performance evidence.
 
 ### Epoch-retirement correction evidence
 
-Exact production source `f290981cf6b61eae84414f4d0cc2494d512b67bd`
+Exact production source `721cbe8885876364a0e1d42f9802ccf7de51029c`
 has the following isolated local evidence on Windows 11 / CPython 3.12.6:
 
 | Evidence | Result |
 | --- | --- |
-| Deterministic retirement regressions | 20 passed; 20 independent processes each passed all 20 |
-| Complete transport matrix | 408 passed in 16.43s |
-| Complete pytest | 618 passed in 270.78s |
-| Stress test file | 26 passed in 258.80s |
-| Package | wheel and sdist built; `twine check` passed |
-| Documentation | MkDocs strict passed in 3.22s |
+| Deterministic retirement regressions | 30 passed; 20 independent processes each passed all 30 |
+| Focused external-lock/fatal selection | 12 passed in 0.28s |
+| Complete transport matrix | 410 passed in 15.94s |
+| Complete pytest | 628 passed in 255.77s |
+| Heavy stress/resource campaign | PASS from exact clean detached source |
+| Package and documentation | Rebuilt from the final documentation commit before delivery |
 
 The retained stress artifact is
-`C:\Users\ax\Desktop\eltdx\artifacts\actor-retirement-r03-stress-f290981.json`,
-SHA256 `132CEA0280A15451B4787324903C69F91949B5E0B2272DB3B01F0453EACDFBEB`.
-It records 10,000 generation changes in 27.216346s and 100,000 mixed requests
-at pool 4/concurrency 100 in 118.642250s. Both workloads have exact unique
+`C:\Users\ax\Desktop\eltdx\artifacts\actor-retirement-r06-stress-721cbe8.json`,
+SHA256 `46122307BD0EC52D2026A1FFB580721546331EFF12618D1E065F9DB2F05EF652`.
+It records 10,000 generation changes in 22.089949s and 100,000 mixed requests
+at pool 4/concurrency 100 in 96.992518s. Both workloads have exact unique
 response counts and zero duplicate, missing, unexpected, cross-request or
 cross-generation completions. Mixed maximum business concurrency is exactly
 4; after close Broker leases and Push frames/bytes are zero, every retained
@@ -601,37 +601,39 @@ Actor-owned resource is closed, all 100 idle plus 100 loaded close samples are
 terminal/clean, and eight measured Windows resource counts are exactly 201.
 
 The prospective performance directory is
-`C:\Users\ax\Desktop\eltdx\artifacts\retirement-perf-f290981-a`: 16 files,
-88,075,994 bytes, aggregate manifest SHA256
-`6F9C5F67C6EAB7A1C85298832D1D987613EA633B519ABDBA598BB6ADD64013D4`.
-It compares clean detached `f5b63bb` and `f290981` roots with identical
+`C:\Users\ax\Desktop\eltdx\artifacts\retirement-perf-721cbe8-b`: 24 files,
+176,164,179 bytes. Its retained canonical `manifest.sha256` contains 23 sorted
+`name:lowercase_sha256\n` records and has SHA256
+`C70D716D14577628695C374164C37E5B6029FD60BED3AB5500A31D3754732BB8`.
+It compares clean detached `f5b63bb` and `721cbe8` roots with identical
 workload SHA256 `4ddd761f...`, using seven declared adjacent A/B pairs in a
 balanced 14-trial order. All attempt-1 trials ran once without overlap or
 replacement; the existing schema-4 case validator recomputed all 1,750,000 raw
 latency rows and completion records with `errors=[]`.
 
+The preceding `retirement-perf-721cbe8-a` directory is explicitly invalid and
+excluded: a parent execution interruption left it at 13/14 trials, so its
+frozen no-retry rule prohibited filling the missing cell. Campaign B was
+declared separately and rerun from trial zero with unchanged policy.
+
 | Frozen prospective gate | Result |
 | --- | ---: |
-| Sequential throughput median paired ratio >= 0.98 | 0.997723, PASS |
-| Saturated throughput median paired ratio >= 0.98 | 0.998816, PASS |
-| Saturated p50/p99 role-median ratio <= 1.05 | 0.997220 / 0.995354, PASS |
-| No-backlog p99 delta <= max(1ms, 10%) | -0.0999ms <= 1.0000ms, PASS |
+| Sequential throughput median paired ratio >= 0.98 | 0.992309, PASS |
+| Saturated throughput median paired ratio >= 0.98 | 0.995063, PASS |
+| Saturated p50/p99 role-median ratio <= 1.05 | 1.003311 / 1.008325, PASS |
+| No-backlog p99 delta <= max(1ms, 10%) | -0.1479ms <= 1.0000ms, PASS |
 
 The historical Actor-vs-legacy formal campaign above remains **FAIL,
 user-approved architecture exception**. This prospective correction result
 does not reclassify it. No thread, runtime dependency, background cleanup
 worker, unbounded queue or per-request publication object was added; the new
-assigned-waiter snapshot remains bounded by `max_pending_requests`.
-
-The exact package hashes are wheel
-`F7AACE52D9D73D318BE32437272D9B363C14CCEE9829B0079C15E7F4E35F6AC8`
-and sdist
-`83C74FC8A5E3FD9CF504DF05B95364EFF99EE7888587B5272E9273C80DAA11F5`.
+assigned-waiter and fatal-handle snapshots remain bounded by the configured
+pool/request ownership for the current epoch.
 
 ## Cross-Platform CI and Builds
 
-Exact correction source `abd58c39aef6f905075788d4482eac43e673ba63`
-passed [CI run 29577023570](https://github.com/electkismet/eltdx/actions/runs/29577023570):
+The preceding external-lock source `abd58c39aef6f905075788d4482eac43e673ba63`
+historically passed [CI run 29577023570](https://github.com/electkismet/eltdx/actions/runs/29577023570):
 
 | Platform | Python | Result |
 | --- | --- | --- |
@@ -654,9 +656,18 @@ both Windows jobs. Windows has zero skipped tests. There are no xfail or flaky
 markers, plugins, rerun rules, or intermittent-failure allowlists masking a
 failure.
 
+This historical matrix is not exact-source proof for `721cbe8` or final
+`SELF`. Delivery requires a normal push followed by SUCCESS for Ubuntu Python
+3.10-3.13, Windows Python 3.11/3.13, package build/twine and Pages strict on the
+exact final `SELF`; the resulting run URLs are retained in the external
+checkpoint and final report.
+
 The `71089c0..e924d4d` scope review covers the original 39 changed files. The
 later `e924d4d..abd58c3` correction is limited to two result/progress records,
-four 7709 transport modules and five transport regression files.
+four 7709 transport modules and five transport regression files. The
+`f5b63bb..721cbe8` epoch-retirement correction changes only this result record,
+two transport modules, one retirement regression file and the two transport
+operator documents.
 Project runtime
 dependencies remain exactly `dependencies = []`; no 7615 implementation or
 business-command facade was changed. The `client.py`, host and registry edits

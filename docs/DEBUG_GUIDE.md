@@ -132,7 +132,7 @@ with TdxClient(pool_size=4, timeout=3) as client:
 
 单连接 `SocketTransport` 的 `diagnostics` 包含 Actor snapshot 和 push frame/byte/drop 计数；pool snapshot 还包含 FIFO waiter、active lease 和所有 slot Actor。`stale_event_count` 应保持为 0。发生 Actor fatal 时 pool 会 fail-closed，push poller 会收到对应 `TransportError`，并且需要关闭旧 client 后创建新实例。
 
-fatal publication 一旦发生，push terminal/error 优先于已经缓冲的 frame，旧 epoch 数据不会在错误之后继续可见。Broker diagnostics 在 owner 取得 condition 后应显示 waiter、pin waiter、active lease 和 idle slot 都已 drain；Push diagnostics 应显示 frame/bytes 为 0。若第一次 `close()` 因内部 condition 被占用而抛 `TransportCloseTimeoutError`，释放占用后应重试同一个 `close()`，以完成保留 runtime、Broker 和 PushBuffer 的实际清理。
+fatal publication 一旦发生，push terminal/error 优先于已经缓冲或正在 pop/copy 的 frame，旧 epoch 数据不会在错误之后继续可见。Broker diagnostics 在任一 owner 取得 condition 并观察到 retirement 后应显示 waiter、pin waiter、active lease 和 idle slot 都已 drain；Push diagnostics 应显示 frame/bytes 为 0。若第一次 `close()` 因内部 condition 被占用而抛 `TransportCloseTimeoutError`，释放占用后应重试同一个 `close()`，以完成保留 runtime、Broker 和 PushBuffer 的实际清理。
 
 ## Close And Reopen
 
