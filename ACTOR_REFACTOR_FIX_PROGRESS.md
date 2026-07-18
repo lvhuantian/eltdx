@@ -18,4 +18,7 @@
 - Historical Actor-vs-legacy result remains exactly `FAIL, user-approved exception`; no new exception is introduced.
 - Current unique `in_progress`: update the permanent result ledger, commit/push evidence, delete this file in a new FINAL commit, wait exact-head CI/Pages, then run three fresh final reviews and identity checks.
 - Pending push: first normal push of evidence checkpoint `dade8307f44b9ffe3c80c3b4d2028a2383136e16` failed with `schannel: failed to receive handshake, SSL/TLS connection failed`; no reset, amend, rebase or evidence rerun was performed.
+- Push recovery: `a8402a476596d615f46268b4327ad4dc155003e2` recorded the pending state and the normal retry pushed `3589a09..a8402a4` successfully.
+- Permanent result ledger now identifies production/evidence source `3589a09`, replaces the superseded `a987c16` current evidence, records all new hashes and historical `d38bfc6` exact-head runs, and corrects the ignored-cache cleanup claim.
+- Next exact action: commit/push the permanent result update, then delete this ledger in a new `Fix-Checkpoint: FINAL` commit and wait that exact HEAD's CI/Pages before three fresh reviews.
 - Workflow: this reopened correction does not modify workflow files.
