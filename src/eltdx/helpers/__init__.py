@@ -3,6 +3,8 @@
 from .core import (
     AuctionData,
     HelperApi,
+    ShortlineIndicator,
+    ShortlineIndicatorTable,
     StockProfile,
     StockProfileTable,
     StockTopic,
@@ -14,6 +16,8 @@ from .core import (
 __all__ = [
     "AuctionData",
     "HelperApi",
+    "ShortlineIndicator",
+    "ShortlineIndicatorTable",
     "StockProfile",
     "StockProfileTable",
     "StockTopic",

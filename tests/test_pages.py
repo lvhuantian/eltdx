@@ -61,11 +61,11 @@ def test_pages_catalog_has_expected_public_interfaces() -> None:
     items = catalog["items"]
 
     assert catalog["schema_version"] == 6
-    assert len(items) == 56
+    assert len(items) == 57
     assert Counter(item["source"] for item in items) == {
         "7709": 21,
         "F10": 21,
-        "Helper": 14,
+        "Helper": 15,
     }
     assert len({item["id"] for item in items}) == len(items)
 
@@ -108,7 +108,7 @@ hide:
 [← 返回接口目录](../index.md){ .interface-detail-back }
 """
 
-    assert len(detail_docs) == 54
+    assert len(detail_docs) == 55
     for relative_path in detail_docs:
         detail = (REPO_ROOT / "docs" / relative_path).read_text(encoding="utf-8")
         assert detail.startswith(expected_header), relative_path
@@ -128,7 +128,7 @@ def test_pages_catalog_has_three_flat_source_menus() -> None:
     assert Counter(layer_id for layer_id, _ in assignments.values()) == {
         "7709": 21,
         "7615": 21,
-        "helpers": 14,
+        "helpers": 15,
     }
     assert all("groups" not in layer for layer in ordered_layers)
     assert {layer["source"] for layer in ordered_layers} == {"7709", "F10", "Helper"}

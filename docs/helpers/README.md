@@ -6,6 +6,7 @@
 
 - [想拿某个或某些股票的表头信息怎么办？](股票信息汇总.md)
 - [想给一批股票整理行情表怎么办？](批量行情表.md)
+- [想拿流通股本Z、竞价昨比、封流比和几天几板怎么办？](短线指标.md)
 - [想拿复权或不复权 K 线怎么办？](复权K线.md)
 
 ## 题材和概念板块
@@ -24,11 +25,13 @@ from eltdx import TdxClient
 
 with TdxClient(timeout=3) as client:
     table = client.helpers.stock_profile_table(["sz000001", "sh600000"])
+    shortline = client.helpers.shortline_indicators(["sz000001", "sh600000"])
     topics = client.helpers.stock_topics("000034")
     stocks = client.helpers.topic_stocks("000034", topic_name="存储芯片")
     auction = client.helpers.auction_data("sz000001", "2026-05-20")
 
 print(table.rows[0])
+print(shortline.rows[0])
 print(topics.topics[:3])
 print(stocks.rows[:10])
 print(auction.open_price, auction.open_change_pct, auction.open_amount)

@@ -318,8 +318,29 @@ K 线响应和单根 K 线。
 | `open_amount`           | 09:25 成交额    |
 | `open_change_pct`       | 开盘涨幅         |
 
+### ShortlineIndicatorTable / ShortlineIndicator
+
+短线指标 Helper。完整的 21 个指标定义和日期对齐规则见[短线指标](helpers/短线指标.md)。
+
+| 字段 | 含义 |
+| --- | --- |
+| `codes` / `rows` / `count` | 请求代码 / 指标行 / 返回数量 |
+| `target_trade_date` | 当前行情对应的目标交易日 |
+| `previous_trade_date` | 上一实际交易日 |
+| `stats_date` / `stats_source_path` | 统计文件日期 / 来源 |
+| `stats_refreshed` | 本次是否重新下载统计文件 |
+| `alignment_status` | 同日、上一交易日或个股行无法对齐状态 |
+| `limit_status` | 当前封板、触板、未涨停或未知状态 |
+| `beta_60d` / `pe_ttm` | 60 日 Beta / 滚动市盈率 |
+| `free_float_shares` / `free_float_market_value` | 流通股本Z / 流通市值Z |
+| `open_turnover_z` | 开盘换手Z |
+| `open_prev_amount_ratio` / `auction_prev_volume_ratio` | 开盘昨比 / 竞价昨比 |
+| `open_prev_seal_ratio` / `seal_prev_ratio` | 开盘昨封比 / 封昨比 |
+| `seal_to_float_ratio` | 封流比 |
+| `limit_board_text` / `ladder_level` | 几天几板 / 当前连板高度 |
+
 ## 缓存口径
 
-默认缓存低频数据：代码数量、全量代码表、股本变迁、财务完整结果。实时快照、分时、成交明细、K 线不缓存。
+默认缓存低频数据：代码数量、全量代码表、股本变迁、财务完整结果和已验证的短线统计资源。实时快照、分时、成交明细、K 线不缓存。
 
 强制刷新用 `refresh=True`，清空全部缓存用 `client.clear_cache()`。

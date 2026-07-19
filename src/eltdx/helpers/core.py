@@ -13,6 +13,12 @@ from typing import TYPE_CHECKING, Any
 
 from eltdx.protocol.unit import ID_TO_MARKET, normalize_code
 
+from .shortline import (
+    ShortlineIndicator,
+    ShortlineIndicatorService,
+    ShortlineIndicatorTable,
+)
+
 if TYPE_CHECKING:
     from eltdx.client import TdxClient
 
@@ -132,6 +138,32 @@ class HelperApi:
 
     def __init__(self, client: TdxClient) -> None:
         self._client = client
+        self._shortline = ShortlineIndicatorService(client)
+
+    def clear_cache(self) -> None:
+        self._shortline.clear_cache()
+
+    def shortline_indicators(
+        self,
+        codes: str | Sequence[str],
+        *,
+        stats_path: str = "zhb.zip",
+        refresh_stats: bool = False,
+    ) -> ShortlineIndicatorTable:
+        """Return 21 shortline fields with trading-date-safe stats alignment."""
+
+        return self._shortline.get(
+            codes,
+            stats_path=stats_path,
+            refresh_stats=refresh_stats,
+        )
+
+    def get_shortline_indicators(
+        self,
+        codes: str | Sequence[str],
+        **kwargs: Any,
+    ) -> ShortlineIndicatorTable:
+        return self.shortline_indicators(codes, **kwargs)
 
     def stock_profile_table(
         self,
