@@ -139,6 +139,8 @@ class StressServer:
         self.heartbeat_during_business = 0
         self.heartbeat_by_connection: dict[int, int] = {}
         self.heartbeat_responses_by_connection: dict[int, int] = {}
+        self._heartbeat_business_phases: dict[str, dict[str, Any]] = {}
+        self._active_heartbeat_business_phase_id: str | None = None
         self.active_business = 0
         self.max_business_active = 0
         self.errors: list[str] = []
@@ -184,6 +186,104 @@ class StressServer:
     def wait_for_business(self, count: int, timeout: float = 2.0) -> bool:
         with self._condition:
             return self._condition.wait_for(lambda: self.business_requests >= count, timeout=timeout)
+
+    def begin_heartbeat_business_phase(
+        self,
+        phase_id: str,
+        *,
+        start_business_requests: int,
+        target_business_requests: int,
+    ) -> None:
+        if not phase_id or target_business_requests <= 0:
+            raise ValueError("heartbeat business phase requires an ID and positive target")
+        with self._condition:
+            if phase_id in self._heartbeat_business_phases:
+                raise AssertionError(f"duplicate heartbeat business phase ID: {phase_id}")
+            if start_business_requests != self.business_requests:
+                raise AssertionError(
+                    "heartbeat business phase start count changed before publication"
+                )
+            if self._active_heartbeat_business_phase_id is not None:
+                previous = self._heartbeat_business_phases[
+                    self._active_heartbeat_business_phase_id
+                ]
+                if (
+                    previous["business_window_open"]
+                    or previous["business_responses_sent"]
+                    != previous["target_business_requests"]
+                ):
+                    raise AssertionError("previous heartbeat business phase is still open")
+            self._heartbeat_business_phases[phase_id] = {
+                "phase_id": phase_id,
+                "start_business_requests": start_business_requests,
+                "target_business_requests": target_business_requests,
+                "business_requests_started": 0,
+                "business_responses_sent": 0,
+                "business_window_open": False,
+                "heartbeat_requests": 0,
+            }
+            self._active_heartbeat_business_phase_id = phase_id
+
+    def heartbeat_business_phase_snapshot(self, phase_id: str) -> dict[str, Any]:
+        with self._condition:
+            try:
+                phase = self._heartbeat_business_phases[phase_id]
+            except KeyError as exc:
+                raise AssertionError(f"unknown heartbeat business phase ID: {phase_id}") from exc
+            return dict(phase)
+
+    def _record_heartbeat_request(self, connection_id: int) -> None:
+        with self._condition:
+            self.heartbeat_requests += 1
+            self.heartbeat_by_connection[connection_id] = (
+                self.heartbeat_by_connection.get(connection_id, 0) + 1
+            )
+            if self.active_business:
+                self.heartbeat_during_business += 1
+            if self._active_heartbeat_business_phase_id is not None:
+                phase = self._heartbeat_business_phases[
+                    self._active_heartbeat_business_phase_id
+                ]
+                if phase["business_window_open"]:
+                    phase["heartbeat_requests"] += 1
+            self._condition.notify_all()
+
+    def _record_business_request_started(self) -> int:
+        with self._condition:
+            self.business_requests += 1
+            sequence = self.business_requests
+            self.active_business += 1
+            self.max_business_active = max(self.max_business_active, self.active_business)
+            if self._active_heartbeat_business_phase_id is not None:
+                phase = self._heartbeat_business_phases[
+                    self._active_heartbeat_business_phase_id
+                ]
+                phase_start = phase["start_business_requests"]
+                phase_end = phase_start + phase["target_business_requests"]
+                if phase_start < sequence <= phase_end:
+                    phase["business_requests_started"] += 1
+                    if phase["business_requests_started"] == 1:
+                        phase["business_window_open"] = True
+            self._condition.notify_all()
+            return sequence
+
+    def _record_business_request_finished(self, sequence: int, *, response_sent: bool) -> None:
+        with self._condition:
+            self.active_business -= 1
+            if self._active_heartbeat_business_phase_id is not None and response_sent:
+                phase = self._heartbeat_business_phases[
+                    self._active_heartbeat_business_phase_id
+                ]
+                phase_start = phase["start_business_requests"]
+                phase_end = phase_start + phase["target_business_requests"]
+                if phase_start < sequence <= phase_end:
+                    phase["business_responses_sent"] += 1
+                    if (
+                        phase["business_responses_sent"]
+                        == phase["target_business_requests"]
+                    ):
+                        phase["business_window_open"] = False
+            self._condition.notify_all()
 
     def wait_for_heartbeat(self, count: int, timeout: float = 2.0) -> bool:
         with self._condition:
@@ -245,14 +345,7 @@ class StressServer:
                         conn.sendall(_response(msg_id, msg_type, _handshake_payload()))
                         continue
                     if msg_type == TYPE_HEARTBEAT:
-                        with self._condition:
-                            self.heartbeat_requests += 1
-                            self.heartbeat_by_connection[connection_id] = (
-                                self.heartbeat_by_connection.get(connection_id, 0) + 1
-                            )
-                            if self.active_business:
-                                self.heartbeat_during_business += 1
-                            self._condition.notify_all()
+                        self._record_heartbeat_request(connection_id)
                         if self.response_delay:
                             time.sleep(self.response_delay)
                         conn.sendall(_response(msg_id, msg_type, bytes.fromhex("0000000000008f173501")))
@@ -265,14 +358,10 @@ class StressServer:
                         continue
                     if msg_type not in (TYPE_FILE_CONTENT, TYPE_SECURITY_COUNT):
                         raise RuntimeError(f"unexpected stress command: {msg_type:#x}")
-                    with self._condition:
-                        self.business_requests += 1
-                        sequence = self.business_requests
-                        self.active_business += 1
-                        self.max_business_active = max(self.max_business_active, self.active_business)
-                        self._condition.notify_all()
+                    sequence = self._record_business_request_started()
                     if self.ledger is not None:
                         self.ledger.enter_business()
+                    response_sent = False
                     try:
                         if self.response_delay:
                             time.sleep(self.response_delay)
@@ -308,9 +397,12 @@ class StressServer:
                             with self._condition:
                                 self.push_frames += 1
                         conn.sendall(wire)
+                        response_sent = True
                     finally:
-                        with self._condition:
-                            self.active_business -= 1
+                        self._record_business_request_finished(
+                            sequence,
+                            response_sent=response_sent,
+                        )
                         if self.ledger is not None:
                             self.ledger.leave_business()
                     if (
@@ -1053,6 +1145,7 @@ def run_heartbeat_impact(requests: int, *, blocks: int = 4) -> dict[str, Any]:
                     order = base_order if block % 2 == 0 else tuple(reversed(base_order))
                     block_elapsed = {"without_heartbeat": [], "with_heartbeat": []}
                     for phase, interval in enumerate(order):
+                        phase_id = f"block-{block}-phase-{phase}"
                         try:
                             _set_heartbeat_pool_interval(pool, None)
                             gc.collect()
@@ -1071,6 +1164,11 @@ def run_heartbeat_impact(requests: int, *, blocks: int = 4) -> dict[str, Any]:
                                 heartbeat_baseline: list[int] = []
 
                                 def start_timed_phase() -> None:
+                                    server.begin_heartbeat_business_phase(
+                                        phase_id,
+                                        start_business_requests=server.business_requests,
+                                        target_business_requests=requests,
+                                    )
                                     heartbeat_baseline.append(
                                         _publish_heartbeat_phase(pool, server, interval)
                                     )
@@ -1084,6 +1182,17 @@ def run_heartbeat_impact(requests: int, *, blocks: int = 4) -> dict[str, Any]:
                                 if len(heartbeat_baseline) != 1:
                                     raise AssertionError("heartbeat phase did not publish one counter baseline")
                                 heartbeat_before = heartbeat_baseline[0]
+                                business_phase = server.heartbeat_business_phase_snapshot(
+                                    phase_id
+                                )
+                                if (
+                                    business_phase["business_requests_started"] != requests
+                                    or business_phase["business_responses_sent"] != requests
+                                    or business_phase["business_window_open"]
+                                ):
+                                    raise AssertionError(
+                                        "heartbeat business phase did not close at its final response"
+                                    )
                             except BaseException as exc:
                                 phase_error = exc
                             finally:
@@ -1114,16 +1223,33 @@ def run_heartbeat_impact(requests: int, *, blocks: int = 4) -> dict[str, Any]:
                             sample = {
                                 "block": block,
                                 "phase": phase,
+                                "phase_id": phase_id,
                                 "seconds": round(elapsed, 6),
                                 "throughput_rps": round(requests / elapsed, 3),
                                 "heartbeat_requests": server.heartbeat_requests - heartbeat_before,
+                                "business_window_heartbeat_requests": business_phase[
+                                    "heartbeat_requests"
+                                ],
+                                "start_business_requests": business_phase[
+                                    "start_business_requests"
+                                ],
+                                "target_business_requests": business_phase[
+                                    "target_business_requests"
+                                ],
                                 "generation_ids_before": list(generation_ids_before),
                                 "generation_ids_after": list(generation_ids_after),
                                 "accept_count_before": accept_count_before,
                                 "accept_count_after": accept_count_after,
-                                "launch_boundary": "worker barrier action: counter, interval, timer, release",
+                                "launch_boundary": "worker barrier action: phase, counter, interval, timer, release",
                             }
-                            phase_schedule.append({"block": block, "phase": phase, "condition": key})
+                            phase_schedule.append(
+                                {
+                                    "block": block,
+                                    "phase": phase,
+                                    "phase_id": phase_id,
+                                    "condition": key,
+                                }
+                            )
                             samples[key].append(sample)
                             raw_elapsed[key].append(elapsed)
                             block_elapsed[key].append(elapsed)
@@ -1157,6 +1283,12 @@ def run_heartbeat_impact(requests: int, *, blocks: int = 4) -> dict[str, Any]:
             "throughput_rps": round(statistics.median(item["throughput_rps"] for item in values), 3),
             "heartbeat_requests": max(item["heartbeat_requests"] for item in values),
             "heartbeat_requests_total": sum(item["heartbeat_requests"] for item in values),
+            "business_window_heartbeat_requests": max(
+                item["business_window_heartbeat_requests"] for item in values
+            ),
+            "business_window_heartbeat_requests_total": sum(
+                item["business_window_heartbeat_requests"] for item in values
+            ),
             "samples": values,
         }
 

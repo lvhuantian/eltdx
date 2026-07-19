@@ -224,7 +224,8 @@ def test_heartbeat_timed_publication_runs_only_after_every_worker_is_ready(monke
     assert len(publication_ready_counts) == expected_workloads
     assert publication_ready_counts == [5 * (index + 1) for index in range(expected_workloads)]
     assert all(
-        sample["launch_boundary"] == "worker barrier action: counter, interval, timer, release"
+        sample["launch_boundary"]
+        == "worker barrier action: phase, counter, interval, timer, release"
         for condition in ("without_heartbeat", "with_heartbeat")
         for sample in impact[condition]["samples"]
     )
@@ -443,7 +444,12 @@ def test_heartbeat_barrier_closes_every_warmup_and_timed_phase(monkeypatch) -> N
         "with_heartbeat",
     ]
     assert impact["phase_schedule"] == [
-        {"block": block, "phase": phase, "condition": condition}
+        {
+            "block": block,
+            "phase": phase,
+            "phase_id": f"block-{block}-phase-{phase}",
+            "condition": condition,
+        }
         for block in range(blocks)
         for phase, condition in enumerate(base_order if block % 2 == 0 else reversed(base_order))
     ]
@@ -676,6 +682,7 @@ def test_heartbeat_timed_failure_preserves_primary_when_phase_barrier_also_fails
         heartbeat_responses_by_connection = {1: 1, 2: 1, 3: 1, 4: 1}
         heartbeat_requests = 0
         heartbeat_during_business = 0
+        business_requests = 0
 
         def __init__(self, *_args, **_kwargs) -> None:
             pass
@@ -694,6 +701,9 @@ def test_heartbeat_timed_failure_preserves_primary_when_phase_barrier_also_fails
 
         def wait_for_heartbeat_response_round(self, *_args, **_kwargs) -> bool:
             return True
+
+        def begin_heartbeat_business_phase(self, *_args, **_kwargs) -> None:
+            pass
 
     class Pool:
         def __init__(self, *_args, **_kwargs) -> None:
@@ -866,8 +876,14 @@ def test_idle_actor_blocks_and_heartbeat_defers_under_continuous_work() -> None:
     assert impact["unexpected_responses"] == 0
     assert impact["cross_request_completions"] == 0
     assert impact["cross_generation_completions"] == 0
-    assert impact["without_heartbeat"]["heartbeat_requests_total"] == 0
-    assert impact["with_heartbeat"]["heartbeat_requests_total"] == 0
+    assert impact["without_heartbeat"]["business_window_heartbeat_requests_total"] == 0
+    assert impact["with_heartbeat"]["business_window_heartbeat_requests_total"] == 0
+    assert all(
+        sample["target_business_requests"] == impact["requests_per_phase"]
+        and sample["business_window_heartbeat_requests"] == 0
+        for condition in ("without_heartbeat", "with_heartbeat")
+        for sample in impact[condition]["samples"]
+    )
     expected_phase_positions = [phase for phase in range(8) for _ in range(2)]
     assert sorted(sample["phase"] for sample in impact["without_heartbeat"]["samples"]) == expected_phase_positions
     assert sorted(sample["phase"] for sample in impact["with_heartbeat"]["samples"]) == expected_phase_positions
@@ -888,6 +904,12 @@ def test_idle_actor_blocks_and_heartbeat_defers_under_continuous_work() -> None:
         "with_heartbeat_seconds": [
             sample["seconds"] for sample in impact["with_heartbeat"]["samples"]
         ],
-        "without_heartbeat_requests": impact["without_heartbeat"]["heartbeat_requests_total"],
-        "with_heartbeat_requests": impact["with_heartbeat"]["heartbeat_requests_total"],
+        "without_heartbeat_total_requests": impact["without_heartbeat"]["heartbeat_requests_total"],
+        "with_heartbeat_total_requests": impact["with_heartbeat"]["heartbeat_requests_total"],
+        "without_heartbeat_business_window": impact["without_heartbeat"][
+            "business_window_heartbeat_requests_total"
+        ],
+        "with_heartbeat_business_window": impact["with_heartbeat"][
+            "business_window_heartbeat_requests_total"
+        ],
     }
