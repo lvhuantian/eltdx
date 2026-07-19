@@ -218,6 +218,73 @@ def test_failed_final_heartbeat_response_releases_active_business_count() -> Non
     assert phase["business_window_open"] is True
 
 
+def test_out_of_order_final_heartbeat_response_is_wire_fenced(monkeypatch) -> None:
+    server = stress_module.StressServer()
+    phase_id = "deterministic-out-of-order-final-response"
+    server.begin_heartbeat_business_phase(
+        phase_id,
+        start_business_requests=0,
+        target_business_requests=2,
+    )
+
+    first_started = threading.Event()
+    release_first = threading.Event()
+    real_record_started = server._record_business_request_started
+
+    def record_started() -> int:
+        sequence = real_record_started()
+        if sequence == 1:
+            first_started.set()
+            assert release_first.wait(timeout=2)
+        return sequence
+
+    server._record_business_request_started = record_started
+
+    class Connection:
+        def __init__(self) -> None:
+            self.read = False
+            self.sent = threading.Event()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def sendall(self, _wire: bytes) -> None:
+            self.sent.set()
+
+    def read_request(connection: Connection):
+        if connection.read:
+            raise EOFError
+        connection.read = True
+        return 1, stress_module.TYPE_SECURITY_COUNT, b""
+
+    monkeypatch.setattr(stress_module, "_read_request", read_request)
+    first = Connection()
+    second = Connection()
+    first_thread = threading.Thread(target=server._serve, args=(first, 1))
+    second_thread = threading.Thread(target=server._serve, args=(second, 2))
+
+    first_thread.start()
+    assert first_started.wait(timeout=2)
+    second_thread.start()
+    assert second.sent.wait(timeout=2)
+    second_thread.join(timeout=2)
+    assert not second_thread.is_alive()
+
+    with server._heartbeat_phase_wire_lock:
+        release_first.set()
+        first_send_was_fenced = not first.sent.wait(timeout=0.05)
+
+    first_thread.join(timeout=2)
+    assert not first_thread.is_alive()
+    assert first_send_was_fenced
+    phase = server.heartbeat_business_phase_snapshot(phase_id)
+    assert phase["business_responses_sent"] == 2
+    assert phase["business_window_open"] is False
+
+
 def test_heartbeat_timed_publication_runs_only_after_every_worker_is_ready(monkeypatch) -> None:
     worker_ready = 0
     publication_ready_counts: list[int] = []
