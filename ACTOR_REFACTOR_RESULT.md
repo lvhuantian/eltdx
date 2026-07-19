@@ -100,7 +100,7 @@ repository commit merely to copy run IDs into this manifest.
 | Current fatal-reason correction | `ee077cc`, `12ea212`, `3589a09`, `dade830`, `a8402a4` | Deterministic RED edges, resolver owner selection, resolver-only Guard fallback, complete deferred abandon drain, and exact-source heavy verification |
 | F09 fatal publication correction | `19d6d74`, `f0d9ce7`, `45e6703`, `f117871`, `ddce09b`, `ee5a995` | Guard stale-None RED/REEN, diagnostics and epoch isolation, standalone Push/handle single-writer evidence, stress/performance/package/docs verification and correction evidence record |
 | Overturned F09 FINAL | `5925c02` | Reopened by F10 deterministic Push/Guard races and a clean full-suite heartbeat measurement failure |
-| F10 correction | `242e7e5`, `807d2a5`, `6c344d4`, `2aea276`, `043966e`, `bc61e26`, `c5afeb4`, `d3e1153`, `6abbaf5`, `bad414a`, `64bbea9`, `a8cc5b3`, `f12701f`, `1dd1dcd` | Revision 1.4 identity; Push/Guard and heartbeat R1-R4 correction; overturned R4 FINAL; R5 out-of-order RED, phase-wide wire fence and clean verification source |
+| F10 correction | `242e7e5`, `807d2a5`, `6c344d4`, `2aea276`, `043966e`, `bc61e26`, `c5afeb4`, `d3e1153`, `6abbaf5`, `bad414a`, `64bbea9`, `a8cc5b3`, `f12701f`, `1dd1dcd`, `fd2070c`, `ff3b1e0`, `027935a` | Revision 1.4 identity; Push/Guard and heartbeat R1-R4 correction; overturned R4 FINAL; R5 out-of-order RED, phase-wide wire fence, evidence and deterministic send/finish review coverage |
 | FINAL manifest | `SELF` | Permanent result plus temporary progress-ledger deletion; exact-SHA CI/Pages resolved after push |
 
 This table covers every commit from the original A00-A09 implementation and
@@ -730,15 +730,15 @@ delivery commit is `SELF` and does not change runtime or measurement source.
 
 | Gate | Result | Artifact / identity |
 | --- | --- | --- |
-| F10 RED/REEN | Original RED `3 failed in 0.83s`, GREEN `3 passed in 0.25s`; R5 out-of-order RED `1 failed in 0.54s`, GREEN boundary set `3 passed in 0.38s` | Original RED `807d2a5`; R5 RED `a8cc5b3`; fixes `6c344d4`, `2aea276`, `f12701f` |
-| New tests, 20 independent processes | R5 `60/60` cases PASS in 20 processes; R4 `80/80` and earlier runs retained | R5 three boundary nodes, no failed process; R4 log SHA256 `5C403A6BD8E404D9C4405F8C0986E2968F8169F8299D20C4C9F502282980A0F3` |
-| Targeted Push/Guard/heartbeat/retirement/lifecycle/stress | `262 passed in 239.23s (0:03:59)` | exact R5 source `f12701f`; no retry |
-| Complete pytest from zero | `651 passed in 246.78s (0:04:06)` | Windows 11, Python 3.12.6; no result splicing or retry |
+| F10 RED/REEN | Original RED `3 failed in 0.83s`, GREEN `3 passed in 0.25s`; R5 out-of-order RED `1 failed in 0.54s`, final GREEN boundary set `4 passed in 0.39s` | Original RED `807d2a5`; R5 RED `a8cc5b3`; fixes `6c344d4`, `2aea276`, `f12701f`; deterministic coverage `027935a` |
+| New tests, 20 independent processes | final R5 `80/80` cases PASS in 20 processes; R4 `80/80` and earlier runs retained | R5 four boundary nodes, no failed process; R4 log SHA256 `5C403A6BD8E404D9C4405F8C0986E2968F8169F8299D20C4C9F502282980A0F3` |
+| Targeted Push/Guard/heartbeat/retirement/lifecycle/stress | `263 passed in 239.78s (0:03:59)` | exact R5 test source `027935a`, runtime source `f12701f`; no retry |
+| Complete pytest from zero | `652 passed in 246.80s (0:04:06)` | Windows 11, Python 3.12.6; exact final test set, no result splicing or retry |
 | 10k generations / 100k requests stress | PASS; unique 10,000/100,000; duplicate/missing/unexpected/cross-request/cross-generation all 0; max active 4; leases/waiters/pins/frames/bytes/Actor threads 0; owned resources closed; resources `192,192,192,192,192,192,192,192`, plateau=true | clean exact source `1dd1dcd`; `C:\Users\ax\Desktop\eltdx\eltdx-src\artifacts\actor-stress-f10-r5-1dd1dcd.json`, 744,495 bytes, SHA256 `9B7CF774E8E488715EF6C0DD5397EDB5E854B1B78EA0399783D985386C59DF39` |
 | Heartbeat hard gate | PASS; both business-window totals 0; throughput ratio `0.998671`; 35,232 unique responses and all ownership counters 0 | R5 stress artifact; 32 unique timed phase IDs, exact start/target counters, phase-wide send/finish/snapshot fence |
 | Close/resource hard gates | PASS; idle/loaded p99 `2.9323/2.7259ms`; idle CPU ratio 0; every measured resource sample 192 | R5 stress artifact |
 | Paired performance campaign | **FAIL, user-approved exception**; exact 8-cell ABBA+BAAB, attempt=1, `errors=[]`; sequential ratio `0.943299`, saturated ratio `0.942391`; sequential p50/p99 PASS, no-backlog p50 PASS and p99 FAIL | canonical 11-file set in `C:\Users\ax\Desktop\eltdx\eltdx-src\artifacts\perf-f10-043966e`, 99,990,158 bytes; declaration canonical SHA256 `cbb644f1104a606bc4c4103b3fe01c8fec872ad26bb448d8fd67f1a099c5973d`; bundle SHA256 `B1E4930BE5CF4A7CB421C015DE48AD4E2521860D67865E7C53C7D85266DBE3D3`; verification report SHA256 `64FD696DE85154ECD3B0C5A0FBF614DBB38D25AC23C474B462409985C98F5D8E`; canonical manifest SHA256 `6560AA2A95B0A476AD5A97006F907672CE797298FDC8963B3C51126EE48B0F16`; later independent report is external review output and excluded from this canonical set |
-| Package artifacts | PASS; `python -m build` and `python -m twine check` | R5 wheel 313,645 bytes, SHA256 `F899A9CC317DA91E12ACBBB72DC655E89967162FDFC5A5D9B1006FF5F85BA307`; sdist 380,520 bytes, SHA256 `F1C16256634B7A14451355FC5908595BE93AD70CF232943B5B853978F2EE65AC` |
+| Package artifacts | PASS; `python -m build` and `python -m twine check` | final R5 wheel 313,645 bytes, SHA256 `F899A9CC317DA91E12ACBBB72DC655E89967162FDFC5A5D9B1006FF5F85BA307`; sdist 381,059 bytes, SHA256 `8CA040809CBD6E38336746352472E38E14FBD9702BC53F2B9B96FA76293E236A` |
 | MkDocs strict | PASS in 2.52s; 126 files, 5,685,815 bytes | R5 site artifact under `artifacts/site-f10-r5-1dd1dcd` |
 
 An additional R5 performance campaign was declared once against baseline
@@ -913,15 +913,23 @@ added. An independent scope/CI reviewer reached the same conclusion.
   Push and Guard linearization, fatal hot-path locking and resolver lock order
   had no P1/P2/P3 finding. Independent runs included 132 retirement+Pool nodes
   and 20 processes / 40 new race cases, all passing.
-- The second independent code reviewer returned CLEAN after the R4 heartbeat
-  corrections: Push/Guard remained free of P1/P2/P3 findings, and the wire
-  lock, post-send snapshot fence, failed-final cleanup and out-of-order phase
-  behavior were independently checked. The final R4 targeted/full/stress
-  reruns supersede the earlier review target.
+- The second independent R4 code reviewer returned CLEAN for the reviewed
+  ordinal-final send/finish, snapshot and failed-send edges, but exact-final
+  rereview then proved that request sequence does not determine response
+  completion order. That later P1 finding overturned `64bbea9` and is the R5
+  correction above; the earlier R4 CLEAN conclusion is not current evidence.
 - The independent evidence reviewer returned CLEAN after correcting one P3
   wording issue: the performance directory is explicitly reported as a
   canonical 11-file set, while the later `independent_report.json` remains
   external review output and is excluded from the canonical manifest/hash.
+- Two independent R5 code reviews found the phase-wide production wire fence,
+  Push and Guard CLEAN. They found one P3 and one P2 only in permanent test
+  strength: a 50ms negative scheduling assertion and missing real `_serve()`
+  proof across send-to-finish plus failed send. `ff3b1e0` and `027935a`
+  replaced the timing assumption with positive lock-attempt latches, block
+  heartbeat and snapshots inside a real out-of-order closer send, and exercise
+  real raising-send cleanup. The final four nodes passed 80/80 in 20 processes,
+  the exact targeted matrix passed 263 nodes, and the full suite passed 652.
 - Current FINAL cleanup retains the primary worktree plus clean detached
   `f5b63bb`/`721cbe8` performance roots so
   the retained campaign verifier can replay their exact absolute identities;

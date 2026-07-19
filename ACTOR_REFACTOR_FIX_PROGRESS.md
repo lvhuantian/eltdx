@@ -41,9 +41,10 @@
 | 2026-07-19 | exact `ff3b1e0` independent heartbeat review | Production protocol CLEAN; P2 test gap found because real `_serve()` did not yet prove send+finish atomicity or failed-send cleanup. Added positive lock-attempt barriers around a blocked actual closer and a real raising-send test. |
 | 2026-07-19 | final R5 test working tree | four boundary nodes, 20 processes and stress file | GREEN: `4 passed in 0.39s`, `80/80`, and `30 passed in 229.87s`; no failed process. |
 | 2026-07-19 | final R5 test working tree | targeted matrix and complete pytest from zero | GREEN: `263 passed in 239.78s`; full `652 passed in 246.80s`; no retry or result splicing. |
+| 2026-07-19 | clean exact `027935a` | final package rebuild and twine check | PASS: wheel SHA256 `F899A9CC317DA91E12ACBBB72DC655E89967162FDFC5A5D9B1006FF5F85BA307`; sdist SHA256 `8CA040809CBD6E38336746352472E38E14FBD9702BC53F2B9B96FA76293E236A`. |
 
 ## Current State
 
 - Current phase: R5-EVIDENCE.
-- Next exact action: commit the P2 coverage correction, rebuild package evidence on the clean exact SHA, then complete independent rereviews.
+- Next exact action: commit the corrected permanent evidence, run MkDocs strict, and complete exact-source independent evidence/code rereviews.
 - Pending push: R5 evidence checkpoint and final delivery.
