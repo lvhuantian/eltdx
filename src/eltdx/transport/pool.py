@@ -36,9 +36,16 @@ from .socket import (
 )
 
 DEFAULT_MAX_PENDING_REQUESTS = 256
+DEFAULT_POOL_SIZE = 1
 _INTERNAL_EVENT = threading.Event
 _CANCELLED_LEASE = _INTERNAL_EVENT()
 _CANCELLED_LEASE.set()
+
+
+def validate_pool_size(value: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError("pool_size must be a positive integer")
+    return value
 
 
 class PoolState(Enum):
@@ -2416,7 +2423,7 @@ class PooledSocketTransport:
         hosts: Sequence[str] | None = None,
         *,
         timeout: float = 8.0,
-        pool_size: int = 2,
+        pool_size: int = DEFAULT_POOL_SIZE,
         probe_hosts: bool = False,
         probe_timeout: float = DEFAULT_PROBE_TIMEOUT,
         probe_workers: int = DEFAULT_PROBE_WORKERS,
@@ -2437,7 +2444,7 @@ class PooledSocketTransport:
 
         self._hosts = resolved_hosts
         self._timeout = float(timeout)
-        self._pool_size = max(1, int(pool_size))
+        self._pool_size = validate_pool_size(pool_size)
         self._heartbeat_interval = heartbeat_interval
         self._max_pending_requests = int(max_pending_requests)
         self._push_queue_size = int(push_queue_size)

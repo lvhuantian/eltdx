@@ -32,6 +32,7 @@ from .protocol.commands.klines import normalize_period
 from .protocol.constants import DEFAULT_CODE_PAGE_SIZE, DEFAULT_FILE_CHUNK_SIZE
 from .protocol.unit import normalize_code, normalize_market
 from .transport import InMemoryTransport, PooledSocketTransport, SocketTransport, Transport
+from .transport.pool import DEFAULT_POOL_SIZE, validate_pool_size
 from .workday import WorkdayService
 
 DEFAULT_QUOTE_BATCH_SIZE = 80
@@ -53,7 +54,7 @@ class TdxClient:
     host: str | None = None
     hosts: Sequence[str] | None = None
     timeout: float = 8.0
-    pool_size: int = 1
+    pool_size: int = DEFAULT_POOL_SIZE
     batch_size: int = DEFAULT_QUOTE_BATCH_SIZE
     probe_hosts: bool = False
     probe_timeout: float = DEFAULT_PROBE_TIMEOUT
@@ -86,7 +87,7 @@ class TdxClient:
         hosts: list[str] | tuple[str, ...] | None = None,
         *,
         timeout: float = 8.0,
-        pool_size: int = 1,
+        pool_size: int = DEFAULT_POOL_SIZE,
         batch_size: int = DEFAULT_QUOTE_BATCH_SIZE,
         probe_hosts: bool = False,
         probe_timeout: float = DEFAULT_PROBE_TIMEOUT,
@@ -131,6 +132,7 @@ class TdxClient:
         return cls(transport=InMemoryTransport())
 
     def __post_init__(self) -> None:
+        self.pool_size = validate_pool_size(self.pool_size)
         if self.transport is None:
             resolved_hosts = _resolve_hosts(self.host, self.hosts)
             self.transport = PooledSocketTransport(

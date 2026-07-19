@@ -7,6 +7,7 @@ from datetime import date
 from typing import Any
 
 from eltdx.client import TdxClient
+from eltdx.transport.pool import DEFAULT_POOL_SIZE
 
 
 def main() -> int:
@@ -18,7 +19,7 @@ def main() -> int:
     parser.add_argument("--code", default="sz000001", help="primary code to test")
     parser.add_argument("--history-date", default=None, help="history trading date, for example 2026-05-20")
     parser.add_argument("--timeout", type=float, default=8.0, help="socket timeout seconds")
-    parser.add_argument("--pool-size", type=int, default=1, help="connection pool size")
+    parser.add_argument("--pool-size", type=int, default=DEFAULT_POOL_SIZE, help="connection pool size")
     parser.add_argument("--probe-hosts", action="store_true", help="probe and sort candidate hosts before connecting")
     parser.add_argument("--heartbeat-interval", type=float, default=30.0, help="background heartbeat interval seconds")
     parser.add_argument("--no-heartbeat", action="store_true", help="disable background heartbeat")

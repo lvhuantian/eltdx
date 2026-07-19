@@ -15,6 +15,12 @@ from eltdx.transport.pool import HeartbeatAdmissionGuard, LeaseBroker
 from eltdx.transport import socket as socket_module
 
 
+@pytest.mark.parametrize("value", [0, -1, 1.5, "2", True, None])
+def test_pooled_socket_transport_rejects_invalid_pool_size(value) -> None:
+    with pytest.raises(ValueError, match="pool_size must be a positive integer"):
+        PooledSocketTransport(["127.0.0.1:9"], pool_size=value, heartbeat_interval=None)
+
+
 def test_pooled_socket_transport_rotates_hosts_per_connection() -> None:
     transport = PooledSocketTransport(hosts=["127.0.0.1:1", "127.0.0.1:2"], timeout=0.1, pool_size=3, heartbeat_interval=None)
 

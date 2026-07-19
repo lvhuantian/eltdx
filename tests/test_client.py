@@ -1,12 +1,14 @@
 from datetime import date, datetime
 
+import pytest
+
 from eltdx import Client, HelperApi, TdxClient, __version__, to_json, to_jsonable
 from eltdx import WorkdayService
 from eltdx.api import ping
 from eltdx.hosts import FALLBACK_HOSTS, DEFAULT_HOSTS, load_server_config, load_server_hosts
 from eltdx.protocol.constants import TYPE_REFRESH_STREAM
 from eltdx.protocol import COMMANDS, decode, encode, required_commands
-from eltdx.transport import PooledSocketTransport, SocketTransport
+from eltdx.transport import InMemoryTransport, PooledSocketTransport, SocketTransport
 from eltdx.transport.push import PushBuffer, PushFrame
 from eltdx.protocol.frame import ResponseFrame
 from eltdx.models import QuoteLevel, QuoteRefreshPage, QuoteRefreshRecord, QuoteSnapshot
@@ -29,6 +31,21 @@ def test_client_ping_returns_pong() -> None:
     assert isinstance(TdxClient().transport, PooledSocketTransport)
     assert TdxClient.in_memory().ping() == "pong"
     assert isinstance(TdxClient.in_memory().helpers, HelperApi)
+
+
+def test_public_pool_defaults_are_consistent() -> None:
+    client = TdxClient(heartbeat_interval=None)
+    direct = PooledSocketTransport(["127.0.0.1:9"], heartbeat_interval=None)
+
+    assert client.pool_size == 1
+    assert client.transport.pool_size == 1
+    assert direct.pool_size == 1
+
+
+@pytest.mark.parametrize("value", [0, -1, 1.5, "2", True, None])
+def test_client_rejects_invalid_pool_size(value) -> None:
+    with pytest.raises(ValueError, match="pool_size must be a positive integer"):
+        TdxClient(transport=InMemoryTransport(), pool_size=value)
 
 
 def test_api_ping_uses_default_client() -> None:

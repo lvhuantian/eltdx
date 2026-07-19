@@ -52,7 +52,7 @@ TdxClient(heartbeat_interval=None)
 | `host` | `None` | 指定单个 7709 主站 |
 | `hosts` | `None` | 指定多个 7709 主站 |
 | `timeout` | `8.0` | 数字 IP 或已缓存 endpoint 的端到端请求上限，覆盖排队、连接、握手、发送、响应和一次 retry |
-| `pool_size` | `1` | 连接池连接数 |
+| `pool_size` | `1` | 连接池连接数，必须是正整数 |
 | `batch_size` | `80` | `get_quote()` 自动拆批大小 |
 | `probe_hosts` | `False` | 启动时是否先测速排序 |
 | `heartbeat_interval` | `30.0` | 后台心跳秒数；`None` 或小于等于 0 表示关闭 |
@@ -62,7 +62,7 @@ TdxClient(heartbeat_interval=None)
 
 自定义 hostname 的首次 DNS 解析在 Actor 外执行，标准库解析无法严格取消；它不占用 pool slot 或 TCP 连接，解析结束后会重新检查 transport epoch。数字 IP 和已缓存 endpoint 没有该例外。
 
-`pool_size=N` 表示最多 N 个 Actor、N 个 TCP socket 和 N 个业务 wire request 同时在途。请求在全池 FIFO admission 中等待空闲 slot，不会继续堆到慢连接后面。
+`pool_size=N` 表示最多 N 个 Actor、N 个 TCP socket 和 N 个业务 wire request 同时在途。`N` 必须是正整数，非法值会直接抛出 `ValueError`，不会被自动修改。请求在全池 FIFO admission 中等待空闲 slot，由 lease 调度给首个空闲 slot，不会继续堆到慢连接后面。
 
 多请求必须固定在同一连接时可使用 pin：
 
