@@ -1213,7 +1213,8 @@ class PoolRuntimeGuard:
                 pass
 
     def failure(self, *, deadline: float | None = None) -> BaseException | None:
-        state, epoch, broker, _, _, runtimes, failure_cell, resolver = self._publication_snapshot
+        initial_snapshot = self._publication_snapshot
+        state, epoch, broker, _, _, runtimes, failure_cell, resolver = initial_snapshot
         published = (
             resolver.resolve()
             if resolver is not None
@@ -1237,32 +1238,34 @@ class PoolRuntimeGuard:
             else:
                 published = None
         if published is not None:
-            return published
-        runtime_fatal = next(
-            (
-                runtime.fatal_error
-                for runtime in runtimes
-                if resolver is None
-                and runtime.runtime_epoch == epoch
-                and runtime.fatal_error is not None
-            ),
-            None,
-        )
-        if runtime_fatal is not None:
-            return runtime_fatal
-        handle_fatal = None if resolver is not None else next(
-            (
-                handle._error
-                for handle in self._fatal_handle_snapshot
-                if handle.pool_epoch == epoch
-                and handle.broker_ref() is broker
-                and handle._published.is_set()
-                and handle._error is not None
-            ),
-            None,
-        )
-        if handle_fatal is not None:
-            return handle_fatal
+            if self._publication_snapshot is initial_snapshot:
+                return published
+        else:
+            runtime_fatal = next(
+                (
+                    runtime.fatal_error
+                    for runtime in runtimes
+                    if resolver is None
+                    and runtime.runtime_epoch == epoch
+                    and runtime.fatal_error is not None
+                ),
+                None,
+            )
+            if runtime_fatal is not None and self._publication_snapshot is initial_snapshot:
+                return runtime_fatal
+            handle_fatal = None if resolver is not None else next(
+                (
+                    handle._error
+                    for handle in self._fatal_handle_snapshot
+                    if handle.pool_epoch == epoch
+                    and handle.broker_ref() is broker
+                    and handle._published.is_set()
+                    and handle._error is not None
+                ),
+                None,
+            )
+            if handle_fatal is not None and self._publication_snapshot is initial_snapshot:
+                return handle_fatal
         if deadline is None:
             self._lock.acquire()
             acquired = True

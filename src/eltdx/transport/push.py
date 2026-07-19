@@ -325,7 +325,7 @@ class PushBuffer:
         Actor fatal hot path wait.  See the standalone interleaving regression
         test for the owner-close/Actor-fatal call graph.
         """
-        if self._published_error is None:
+        if error is not None and self._published_error is None:
             self._published_error = error
         self._close_published = True
         self._close_requested.set()

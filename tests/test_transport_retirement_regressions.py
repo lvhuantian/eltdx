@@ -255,6 +255,22 @@ class _PauseFirstFatalPublishBuffer(PushBuffer):
             assert self.allow_read.wait(timeout=2)
         return value
 
+    def __setattr__(self, name: str, value) -> None:
+        super().__setattr__(name, value)
+        try:
+            armed = super().__getattribute__("_pause_armed")
+        except AttributeError:
+            return
+        if (
+            armed
+            and name == "_close_published"
+            and value is True
+            and threading.current_thread().name == "first-fatal-publisher"
+        ):
+            super().__setattr__("_pause_armed", False)
+            self.read_entered.set()
+            assert self.allow_read.wait(timeout=2)
+
 
 class _PauseOwnerNormalCloseAfterStaleRead(PushBuffer):
     """Pause normal close after it reads the empty fatal publication slot."""
@@ -263,6 +279,8 @@ class _PauseOwnerNormalCloseAfterStaleRead(PushBuffer):
         super().__init__(owner_epoch)
         self.read_entered = _REAL_EVENT()
         self.allow_return = _REAL_EVENT()
+        self.owner_progress = _REAL_EVENT()
+        self.owner_path: str | None = None
         self._pause_armed = True
 
     def __getattribute__(self, name: str):
@@ -275,6 +293,8 @@ class _PauseOwnerNormalCloseAfterStaleRead(PushBuffer):
             return value
         if armed and threading.current_thread().name == "standalone-owner-close":
             super().__setattr__("_pause_armed", False)
+            self.owner_path = "stale-read"
+            self.owner_progress.set()
             self.read_entered.set()
             assert self.allow_return.wait(timeout=2)
         return value
@@ -893,18 +913,25 @@ def test_standalone_owner_normal_close_cannot_overwrite_actor_fatal_after_stale_
     runtime = ActorRuntime(1, (), push_buffer=push)
     fatal = ConnectionClosedError("standalone Actor fatal after owner stale read")
     runtime.fatal_error = fatal
-    owner = threading.Thread(
-        name="standalone-owner-close",
-        target=lambda: push.publish_close(None),
-    )
+    def owner_close() -> None:
+        push.publish_close(None)
+        if push.owner_path is None:
+            push.owner_path = "no-error-slot-read"
+            push.owner_progress.set()
+
+    owner = threading.Thread(name="standalone-owner-close", target=owner_close)
 
     owner.start()
-    assert push.read_entered.wait(timeout=2)
-    actor_module._finish_runtime(runtime)
-
-    assert runtime.fatal_error is fatal
-    assert push._published_error is fatal
-    push.allow_return.set()
+    assert push.owner_progress.wait(timeout=2)
+    if push.owner_path == "stale-read":
+        assert push.read_entered.is_set()
+        actor_module._finish_runtime(runtime)
+        assert runtime.fatal_error is fatal
+        assert push._published_error is fatal
+        push.allow_return.set()
+    else:
+        assert push.owner_path == "no-error-slot-read"
+        actor_module._finish_runtime(runtime)
     owner.join(timeout=2)
 
     assert not owner.is_alive()
