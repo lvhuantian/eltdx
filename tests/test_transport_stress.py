@@ -198,6 +198,26 @@ def test_heartbeat_after_final_business_response_is_outside_business_window() ->
     }
 
 
+def test_failed_final_heartbeat_response_releases_active_business_count() -> None:
+    server = stress_module.StressServer()
+    phase_id = "deterministic-failed-final-response"
+    server.begin_heartbeat_business_phase(
+        phase_id,
+        start_business_requests=0,
+        target_business_requests=1,
+    )
+
+    sequence = server._record_business_request_started()
+    with server._heartbeat_phase_wire_lock:
+        server._record_business_request_finished(sequence, response_sent=False)
+
+    phase = server.heartbeat_business_phase_snapshot(phase_id)
+    assert server.active_business == 0
+    assert phase["business_requests_started"] == 1
+    assert phase["business_responses_sent"] == 0
+    assert phase["business_window_open"] is True
+
+
 def test_heartbeat_timed_publication_runs_only_after_every_worker_is_ready(monkeypatch) -> None:
     worker_ready = 0
     publication_ready_counts: list[int] = []

@@ -25,10 +25,10 @@
 ## Current State
 
 - Current HEAD before this checkpoint: `6c344d468dafe59a240edbb08001264e91f2aeb4`.
-- Last completed: first F10 validation and independent review; P2 sendall-to-window-close heartbeat race fixed in working tree.
+- Last completed: independent review findings fixed: sendall-to-close serialization, failed-final cleanup, and canonical performance-set wording.
 - Current phase: F10-TEST.
-- Next exact action: commit F10 heartbeat race correction, then rerun 20 processes, targeted/full pytest and stress; retain the already completed immutable performance campaign without resampling.
-- Pending push: F10-HEARTBEAT-R2 commit to be created and pushed.
+- Next exact action: commit and push F10-HEARTBEAT-R3, then rerun the complete pytest and heavy stress from zero; retain the already completed immutable performance campaign without resampling.
+- Pending push: F10-HEARTBEAT-R3 commit to be created and pushed.
 
 ## Verification Log
 
@@ -46,6 +46,9 @@
 | 2026-07-19 | `2aea276` | `python -m pytest -q` from zero | GREEN: 649 passed in 252.70s; no retry or result splicing. |
 | 2026-07-19 | `2aea276` | `python scripts/stress_actor_transport.py --generations 10000 --requests 100000 --pool-size 4 --concurrency 100 --close-samples 100 --heartbeat-requests 1000 --idle-seconds 0.5 --resource-rounds 8 --resource-warmup 3 --resource-generations 50 --output artifacts/actor-stress-f10-2aea276.json` | PASS: 10,000/100,000 unique; all ownership/error counters 0; max active 4; post-close broker/push/Actor resources 0; heartbeat business windows 0/0; throughput ratio 1.005572; resources 191 x8 exact plateau. Artifact SHA256 `17A2FBBD54BE04E9F609200A74490F0D7C5757D653CB1A7D78B31F642B18A70A`. |
 | 2026-07-19 | working tree after review | deterministic heartbeat sendall-to-close interleaving | GREEN: heartbeat blocks behind phase wire lock; total count increases after final response, business-window count remains 0. |
+| 2026-07-19 | `c5afeb4` | three new F10 nodes, 20 independent pytest processes | GREEN: 60/60; log `artifacts/actor-f10-r2-20proc-c5afeb4.log`, SHA256 `BC56EC9BFD9F34DB7C1D32084BFBA85F93F91C47546C135DF25872266037CF68`. |
+| 2026-07-19 | `c5afeb4` | targeted Push/Guard/heartbeat/retirement/lifecycle/stress matrix | GREEN: 260 passed in 245.66s. |
+| 2026-07-19 | F10-HEARTBEAT-R3 working tree | post-final concurrency, failed-final cleanup, phase counter nodes | GREEN: 3 passed in 0.41s. |
 
 ## Known Failures And Risks
 

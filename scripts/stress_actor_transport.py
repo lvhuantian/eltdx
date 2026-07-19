@@ -377,6 +377,7 @@ class StressServer:
                     if self.ledger is not None:
                         self.ledger.enter_business()
                     response_sent = False
+                    business_finished = False
                     try:
                         if self.response_delay:
                             time.sleep(self.response_delay)
@@ -413,17 +414,20 @@ class StressServer:
                                 self.push_frames += 1
                         if final_heartbeat_business_response:
                             with self._heartbeat_phase_wire_lock:
-                                conn.sendall(wire)
-                                response_sent = True
-                                self._record_business_request_finished(
-                                    sequence,
-                                    response_sent=response_sent,
-                                )
+                                try:
+                                    conn.sendall(wire)
+                                    response_sent = True
+                                finally:
+                                    self._record_business_request_finished(
+                                        sequence,
+                                        response_sent=response_sent,
+                                    )
+                                    business_finished = True
                         else:
                             conn.sendall(wire)
                             response_sent = True
                     finally:
-                        if not final_heartbeat_business_response:
+                        if not business_finished:
                             self._record_business_request_finished(
                                 sequence,
                                 response_sent=response_sent,
