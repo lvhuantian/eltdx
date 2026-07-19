@@ -162,6 +162,32 @@ def test_heartbeat_phase_counter_starts_before_target_publication(monkeypatch) -
     assert server.heartbeat_requests - heartbeat_before == 1
 
 
+def test_heartbeat_after_final_business_response_is_outside_business_window() -> None:
+    server = stress_module.StressServer()
+    phase_id = "deterministic-post-response-heartbeat"
+    server.begin_heartbeat_business_phase(
+        phase_id,
+        start_business_requests=0,
+        target_business_requests=1,
+    )
+
+    sequence = server._record_business_request_started()
+    server._record_business_request_finished(sequence, response_sent=True)
+    server._record_heartbeat_request(connection_id=1)
+
+    phase = server.heartbeat_business_phase_snapshot(phase_id)
+    assert server.heartbeat_requests == 1
+    assert phase == {
+        "phase_id": phase_id,
+        "start_business_requests": 0,
+        "target_business_requests": 1,
+        "business_requests_started": 1,
+        "business_responses_sent": 1,
+        "business_window_open": False,
+        "heartbeat_requests": 0,
+    }
+
+
 def test_heartbeat_timed_publication_runs_only_after_every_worker_is_ready(monkeypatch) -> None:
     worker_ready = 0
     publication_ready_counts: list[int] = []

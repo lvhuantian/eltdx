@@ -9,6 +9,7 @@ import pytest
 
 from eltdx.exceptions import ConnectionClosedError, TransportCloseTimeoutError
 from eltdx.protocol.frame import ResponseFrame
+from eltdx.transport import actor as actor_module
 from eltdx.transport import pool as pool_module
 from eltdx.transport import push as push_module
 from eltdx.transport.actor import ActorRuntime
@@ -252,6 +253,30 @@ class _PauseFirstFatalPublishBuffer(PushBuffer):
             super().__setattr__("_pause_armed", False)
             self.read_entered.set()
             assert self.allow_read.wait(timeout=2)
+        return value
+
+
+class _PauseOwnerNormalCloseAfterStaleRead(PushBuffer):
+    """Pause normal close after it reads the empty fatal publication slot."""
+
+    def __init__(self, owner_epoch: int) -> None:
+        super().__init__(owner_epoch)
+        self.read_entered = _REAL_EVENT()
+        self.allow_return = _REAL_EVENT()
+        self._pause_armed = True
+
+    def __getattribute__(self, name: str):
+        value = super().__getattribute__(name)
+        if name != "_published_error" or value is not None:
+            return value
+        try:
+            armed = super().__getattribute__("_pause_armed")
+        except AttributeError:
+            return value
+        if armed and threading.current_thread().name == "standalone-owner-close":
+            super().__setattr__("_pause_armed", False)
+            self.read_entered.set()
+            assert self.allow_return.wait(timeout=2)
         return value
 
 
@@ -863,6 +888,32 @@ def test_delayed_old_epoch_fatal_does_not_retire_new_epoch() -> None:
     assert not new_push.snapshot().closed
 
 
+def test_standalone_owner_normal_close_cannot_overwrite_actor_fatal_after_stale_read() -> None:
+    push = _PauseOwnerNormalCloseAfterStaleRead(1)
+    runtime = ActorRuntime(1, (), push_buffer=push)
+    fatal = ConnectionClosedError("standalone Actor fatal after owner stale read")
+    runtime.fatal_error = fatal
+    owner = threading.Thread(
+        name="standalone-owner-close",
+        target=lambda: push.publish_close(None),
+    )
+
+    owner.start()
+    assert push.read_entered.wait(timeout=2)
+    actor_module._finish_runtime(runtime)
+
+    assert runtime.fatal_error is fatal
+    assert push._published_error is fatal
+    push.allow_return.set()
+    owner.join(timeout=2)
+
+    assert not owner.is_alive()
+    assert push._published_error is fatal
+    with pytest.raises(ConnectionClosedError) as polled:
+        push.poll()
+    assert polled.value is fatal
+
+
 def test_push_reads_fatal_reason_during_retirement_fanout_window() -> None:
     retire_entered = _REAL_EVENT()
     allow_fanout = _REAL_EVENT()
@@ -1084,6 +1135,55 @@ def test_guard_failure_slow_path_rechecks_new_epoch_and_ignores_old_reason() -> 
     assert not failure_thread.is_alive()
     assert failure_result == [new_error]
     assert old_resolver.resolve is not old_resolve
+
+
+def test_guard_failure_non_none_fast_path_rechecks_publication_snapshot_identity() -> None:
+    guard = PoolRuntimeGuard()
+    old_retire = _REAL_EVENT()
+    old_broker = LeaseBroker(1, pool_size=1, max_pending_requests=1)
+    old_push = PushBuffer(1)
+    guard.configure(old_broker, old_push, retire_event=old_retire)
+    old_runtime = ActorRuntime(1, ())
+    assert guard.add_runtime(old_runtime, pool_epoch=1, broker=old_broker)
+    old_handle = pool_module.ActorFatalHandle(
+        weakref.ref(guard), 1, weakref.ref(old_broker), old_retire
+    )
+    old_resolver = guard._fatal_resolver
+    assert old_resolver is not None
+    resolve_old = old_resolver.resolve
+    resolver_entered = _REAL_EVENT()
+    allow_old_resolver_return = _REAL_EVENT()
+
+    def resolve_old_after_epoch_change() -> BaseException | None:
+        resolver_entered.set()
+        assert allow_old_resolver_return.wait(timeout=2)
+        return resolve_old()
+
+    old_resolver.resolve = resolve_old_after_epoch_change  # type: ignore[method-assign]
+    failure_result: list[BaseException | None] = []
+    failure_thread = threading.Thread(
+        target=lambda: failure_result.append(guard.failure()),
+        name="old-epoch-non-none-failure-reader",
+    )
+    failure_thread.start()
+    assert resolver_entered.wait(timeout=2)
+
+    new_retire = _REAL_EVENT()
+    new_broker = LeaseBroker(2, pool_size=1, max_pending_requests=1)
+    new_push = PushBuffer(2)
+    guard.configure(new_broker, new_push, retire_event=new_retire)
+
+    old_error = ConnectionClosedError("stale non-None old epoch fatal")
+    old_runtime.fatal_error = old_error
+    old_handle.publish(old_runtime, old_error)
+    allow_old_resolver_return.set()
+    failure_thread.join(timeout=2)
+
+    assert not failure_thread.is_alive()
+    assert failure_result == [None]
+    assert guard.failure() is None
+    assert not new_retire.is_set()
+    assert new_push.poll() is None
 
 
 def test_guard_waits_for_epoch_reason_cell_before_publishing_runtime_fatal() -> None:
