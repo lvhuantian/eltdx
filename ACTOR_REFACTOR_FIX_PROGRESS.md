@@ -17,18 +17,18 @@
 | F10-SPEC | completed | Revision 1.4 frozen at `242e7e5`; Plan blob SHA256 `63D9BF2CA2568D1CC71DEDDAA5A16B252676F8625035B9493B93149C5D51562D`. |
 | F10-RED | completed | Three behavior-only tests fail deterministically on old production code for the required reasons. |
 | F10-FIX | completed | Push normal close no longer writes `None`; Guard non-None fast returns require unchanged snapshot identity. |
-| F10-HEARTBEAT | completed | Server-owned phase window closes on the final business response; post-response heartbeat remains total-only. |
-| F10-TEST | in_progress | 20 processes, targeted/full/stress complete; performance/package/MkDocs pending. |
+| F10-HEARTBEAT | completed | Server-owned phase window closes on the final business response; post-response heartbeat remains total-only, including the sendall-to-close interleaving. |
+| F10-TEST | in_progress | First validation complete; independent review found and fixed sendall-to-window-close heartbeat race; all validation must be rerun. |
 | F10-EVIDENCE | pending | Update permanent manifest and checkpoint identity; complete independent reviews. |
 | FINAL | pending | Delete this ledger, push exact HEAD, wait for CI/Pages, post PR delivery comment. |
 
 ## Current State
 
 - Current HEAD before this checkpoint: `6c344d468dafe59a240edbb08001264e91f2aeb4`.
-- Last completed: 20 independent processes, targeted matrix, clean full pytest, and heavy stress/resource campaign.
+- Last completed: first F10 validation and independent review; P2 sendall-to-window-close heartbeat race fixed in working tree.
 - Current phase: F10-TEST.
-- Next exact action: commit and push this validation checkpoint, then declare one immutable 8-cell ABBA+BAAB performance campaign against baseline `71089c0` and the clean exact current checkpoint.
-- Pending push: F10-TEST checkpoint to be created and pushed.
+- Next exact action: commit F10 heartbeat race correction, then rerun 20 processes, targeted/full pytest and stress; retain the already completed immutable performance campaign without resampling.
+- Pending push: F10-HEARTBEAT-R2 commit to be created and pushed.
 
 ## Verification Log
 
@@ -45,6 +45,7 @@
 | 2026-07-19 | `2aea276` | `python -m pytest -q tests/test_push_buffer.py tests/test_transport_retirement_regressions.py tests/test_transport_lifecycle_regressions.py tests/test_transport_pool_regressions.py tests/test_transport_stress.py` | GREEN: 260 passed in 253.39s. |
 | 2026-07-19 | `2aea276` | `python -m pytest -q` from zero | GREEN: 649 passed in 252.70s; no retry or result splicing. |
 | 2026-07-19 | `2aea276` | `python scripts/stress_actor_transport.py --generations 10000 --requests 100000 --pool-size 4 --concurrency 100 --close-samples 100 --heartbeat-requests 1000 --idle-seconds 0.5 --resource-rounds 8 --resource-warmup 3 --resource-generations 50 --output artifacts/actor-stress-f10-2aea276.json` | PASS: 10,000/100,000 unique; all ownership/error counters 0; max active 4; post-close broker/push/Actor resources 0; heartbeat business windows 0/0; throughput ratio 1.005572; resources 191 x8 exact plateau. Artifact SHA256 `17A2FBBD54BE04E9F609200A74490F0D7C5757D653CB1A7D78B31F642B18A70A`. |
+| 2026-07-19 | working tree after review | deterministic heartbeat sendall-to-close interleaving | GREEN: heartbeat blocks behind phase wire lock; total count increases after final response, business-window count remains 0. |
 
 ## Known Failures And Risks
 

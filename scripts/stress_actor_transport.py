@@ -141,6 +141,7 @@ class StressServer:
         self.heartbeat_responses_by_connection: dict[int, int] = {}
         self._heartbeat_business_phases: dict[str, dict[str, Any]] = {}
         self._active_heartbeat_business_phase_id: str | None = None
+        self._heartbeat_phase_wire_lock = threading.Lock()
         self.active_business = 0
         self.max_business_active = 0
         self.errors: list[str] = []
@@ -233,20 +234,31 @@ class StressServer:
             return dict(phase)
 
     def _record_heartbeat_request(self, connection_id: int) -> None:
+        with self._heartbeat_phase_wire_lock:
+            with self._condition:
+                self.heartbeat_requests += 1
+                self.heartbeat_by_connection[connection_id] = (
+                    self.heartbeat_by_connection.get(connection_id, 0) + 1
+                )
+                if self.active_business:
+                    self.heartbeat_during_business += 1
+                if self._active_heartbeat_business_phase_id is not None:
+                    phase = self._heartbeat_business_phases[
+                        self._active_heartbeat_business_phase_id
+                    ]
+                    if phase["business_window_open"]:
+                        phase["heartbeat_requests"] += 1
+                self._condition.notify_all()
+
+    def _is_final_heartbeat_business_response(self, sequence: int) -> bool:
         with self._condition:
-            self.heartbeat_requests += 1
-            self.heartbeat_by_connection[connection_id] = (
-                self.heartbeat_by_connection.get(connection_id, 0) + 1
-            )
-            if self.active_business:
-                self.heartbeat_during_business += 1
-            if self._active_heartbeat_business_phase_id is not None:
-                phase = self._heartbeat_business_phases[
-                    self._active_heartbeat_business_phase_id
-                ]
-                if phase["business_window_open"]:
-                    phase["heartbeat_requests"] += 1
-            self._condition.notify_all()
+            phase_id = self._active_heartbeat_business_phase_id
+            if phase_id is None:
+                return False
+            phase = self._heartbeat_business_phases[phase_id]
+            phase_start = phase["start_business_requests"]
+            phase_end = phase_start + phase["target_business_requests"]
+            return phase_start < sequence == phase_end
 
     def _record_business_request_started(self) -> int:
         with self._condition:
@@ -359,6 +371,9 @@ class StressServer:
                     if msg_type not in (TYPE_FILE_CONTENT, TYPE_SECURITY_COUNT):
                         raise RuntimeError(f"unexpected stress command: {msg_type:#x}")
                     sequence = self._record_business_request_started()
+                    final_heartbeat_business_response = self._is_final_heartbeat_business_response(
+                        sequence
+                    )
                     if self.ledger is not None:
                         self.ledger.enter_business()
                     response_sent = False
@@ -396,13 +411,23 @@ class StressServer:
                             wire += _response(msg_id, msg_type, payload)
                             with self._condition:
                                 self.push_frames += 1
-                        conn.sendall(wire)
-                        response_sent = True
+                        if final_heartbeat_business_response:
+                            with self._heartbeat_phase_wire_lock:
+                                conn.sendall(wire)
+                                response_sent = True
+                                self._record_business_request_finished(
+                                    sequence,
+                                    response_sent=response_sent,
+                                )
+                        else:
+                            conn.sendall(wire)
+                            response_sent = True
                     finally:
-                        self._record_business_request_finished(
-                            sequence,
-                            response_sent=response_sent,
-                        )
+                        if not final_heartbeat_business_response:
+                            self._record_business_request_finished(
+                                sequence,
+                                response_sent=response_sent,
+                            )
                         if self.ledger is not None:
                             self.ledger.leave_business()
                     if (

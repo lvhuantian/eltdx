@@ -172,8 +172,18 @@ def test_heartbeat_after_final_business_response_is_outside_business_window() ->
     )
 
     sequence = server._record_business_request_started()
-    server._record_business_request_finished(sequence, response_sent=True)
-    server._record_heartbeat_request(connection_id=1)
+    heartbeat_done = threading.Event()
+
+    with server._heartbeat_phase_wire_lock:
+        heartbeat_thread = threading.Thread(
+            target=lambda: (server._record_heartbeat_request(connection_id=1), heartbeat_done.set())
+        )
+        heartbeat_thread.start()
+        assert not heartbeat_done.wait(timeout=0.05)
+        server._record_business_request_finished(sequence, response_sent=True)
+
+    heartbeat_thread.join(timeout=2)
+    assert not heartbeat_thread.is_alive()
 
     phase = server.heartbeat_business_phase_snapshot(phase_id)
     assert server.heartbeat_requests == 1
