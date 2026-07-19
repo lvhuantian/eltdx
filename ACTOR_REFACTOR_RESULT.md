@@ -877,6 +877,10 @@ added. An independent scope/CI reviewer reached the same conclusion.
   three behavior-only regressions failed deterministically before `3589a09`;
   after the correction, retirement/Pool review reran 128 nodes and
   push/client/socket review reran 45 nodes and returned CLEAN.
+- The first independent F10 code reviewer returned CLEAN for exact `043966e`:
+  Push and Guard linearization, fatal hot-path locking and resolver lock order
+  had no P1/P2/P3 finding. Independent runs included 132 retirement+Pool nodes
+  and 20 processes / 40 new race cases, all passing.
 - Current FINAL cleanup retains the primary worktree plus clean detached
   `f5b63bb`/`721cbe8` performance roots so
   the retained campaign verifier can replay their exact absolute identities;
