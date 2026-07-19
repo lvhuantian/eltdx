@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v1.1.0 - 2026-07-19
+
 - 7709 transport 改为每连接槽位一个单线程非阻塞 `ConnectionActor`。
 - 请求使用全池 FIFO admission、exact-once lease 和真正独占的 `pin()` proxy。
 - `timeout` 现在覆盖数字 IP/已缓存 endpoint 的排队、连接、握手、发送、响应和一次 retry。
