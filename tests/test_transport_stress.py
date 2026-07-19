@@ -248,6 +248,7 @@ def test_out_of_order_final_heartbeat_response_is_wire_fenced(monkeypatch) -> No
         def __init__(self) -> None:
             self._lock = threading.Lock()
             self.track_attempts = False
+            self.owner: int | None = None
 
         def __enter__(self):
             if self.track_attempts:
@@ -258,13 +259,24 @@ def test_out_of_order_final_heartbeat_response_is_wire_fenced(monkeypatch) -> No
                 if name in lock_attempts:
                     lock_attempts[name].set()
             self._lock.acquire()
+            self.owner = threading.get_ident()
             return self
 
         def __exit__(self, *_args) -> None:
+            assert self.owner == threading.get_ident()
+            self.owner = None
             self._lock.release()
 
     tracking_lock = TrackingLock()
     server._heartbeat_phase_wire_lock = tracking_lock
+    real_record_finished = server._record_business_request_finished
+
+    def record_finished(sequence: int, *, response_sent: bool) -> None:
+        if sequence == 1:
+            assert tracking_lock.owner == threading.get_ident()
+        real_record_finished(sequence, response_sent=response_sent)
+
+    server._record_business_request_finished = record_finished
 
     class Connection:
         def __init__(self, *, track_progress: bool = False) -> None:
@@ -374,6 +386,33 @@ def test_failed_phase_response_cleans_active_count_through_real_serve(monkeypatc
         target_business_requests=1,
     )
 
+    class OwnerTrackingLock:
+        def __init__(self) -> None:
+            self._lock = threading.Lock()
+            self.owner: int | None = None
+
+        def __enter__(self):
+            self._lock.acquire()
+            self.owner = threading.get_ident()
+            return self
+
+        def __exit__(self, *_args) -> None:
+            assert self.owner == threading.get_ident()
+            self.owner = None
+            self._lock.release()
+
+    tracking_lock = OwnerTrackingLock()
+    server._heartbeat_phase_wire_lock = tracking_lock
+    finish_called = threading.Event()
+    real_record_finished = server._record_business_request_finished
+
+    def record_finished(sequence: int, *, response_sent: bool) -> None:
+        assert tracking_lock.owner == threading.get_ident()
+        finish_called.set()
+        real_record_finished(sequence, response_sent=response_sent)
+
+    server._record_business_request_finished = record_finished
+
     class FailingConnection:
         def __init__(self) -> None:
             self.read = False
@@ -400,6 +439,8 @@ def test_failed_phase_response_cleans_active_count_through_real_serve(monkeypatc
     assert not worker.is_alive()
 
     phase = server.heartbeat_business_phase_snapshot(phase_id)
+    assert finish_called.is_set()
+    assert server.errors == []
     assert server.active_business == 0
     assert phase["business_requests_started"] == 1
     assert phase["business_responses_sent"] == 0
