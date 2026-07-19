@@ -229,6 +229,8 @@ def test_out_of_order_final_heartbeat_response_is_wire_fenced(monkeypatch) -> No
 
     first_started = threading.Event()
     release_first = threading.Event()
+    first_progress = threading.Event()
+    first_lock_attempted = threading.Event()
     real_record_started = server._record_business_request_started
 
     def record_started() -> int:
@@ -240,10 +242,29 @@ def test_out_of_order_final_heartbeat_response_is_wire_fenced(monkeypatch) -> No
 
     server._record_business_request_started = record_started
 
-    class Connection:
+    class TrackingLock:
         def __init__(self) -> None:
+            self._lock = threading.Lock()
+            self.track_attempts = False
+
+        def __enter__(self):
+            if self.track_attempts:
+                first_lock_attempted.set()
+                first_progress.set()
+            self._lock.acquire()
+            return self
+
+        def __exit__(self, *_args) -> None:
+            self._lock.release()
+
+    tracking_lock = TrackingLock()
+    server._heartbeat_phase_wire_lock = tracking_lock
+
+    class Connection:
+        def __init__(self, *, track_progress: bool = False) -> None:
             self.read = False
             self.sent = threading.Event()
+            self.track_progress = track_progress
 
         def __enter__(self):
             return self
@@ -253,6 +274,8 @@ def test_out_of_order_final_heartbeat_response_is_wire_fenced(monkeypatch) -> No
 
         def sendall(self, _wire: bytes) -> None:
             self.sent.set()
+            if self.track_progress:
+                first_progress.set()
 
     def read_request(connection: Connection):
         if connection.read:
@@ -261,7 +284,7 @@ def test_out_of_order_final_heartbeat_response_is_wire_fenced(monkeypatch) -> No
         return 1, stress_module.TYPE_SECURITY_COUNT, b""
 
     monkeypatch.setattr(stress_module, "_read_request", read_request)
-    first = Connection()
+    first = Connection(track_progress=True)
     second = Connection()
     first_thread = threading.Thread(target=server._serve, args=(first, 1))
     second_thread = threading.Thread(target=server._serve, args=(second, 2))
@@ -273,9 +296,11 @@ def test_out_of_order_final_heartbeat_response_is_wire_fenced(monkeypatch) -> No
     second_thread.join(timeout=2)
     assert not second_thread.is_alive()
 
-    with server._heartbeat_phase_wire_lock:
+    with tracking_lock:
+        tracking_lock.track_attempts = True
         release_first.set()
-        first_send_was_fenced = not first.sent.wait(timeout=0.05)
+        assert first_progress.wait(timeout=2)
+        first_send_was_fenced = first_lock_attempted.is_set() and not first.sent.is_set()
 
     first_thread.join(timeout=2)
     assert not first_thread.is_alive()

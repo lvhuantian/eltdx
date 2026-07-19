@@ -36,9 +36,11 @@
 | 2026-07-19 | clean exact `1dd1dcd` | 10k generations / 100k requests stress/resource | PASS: all ownership counters 0, max active 4, heartbeat windows `0/0`, throughput ratio `0.998671`, resources `192 x8`, SHA256 `9B7CF774E8E488715EF6C0DD5397EDB5E854B1B78EA0399783D985386C59DF39`. |
 | 2026-07-19 | clean exact `1dd1dcd` | declared 8-cell performance campaign `f10-r5-1dd1dcd` | Integrity FAIL: first three attempt-1 cells completed; index 3 baseline exited `RPC_NT_INTERNAL_ERROR (0xC0020043)`; stopped and not retried. Existing canonical campaign remains authoritative because runtime/producer/verifier are unchanged. |
 | 2026-07-19 | clean exact `1dd1dcd` | `python -m build`, `python -m twine check`, `python -m mkdocs build --strict` | PASS: wheel `F899A9...A307`, sdist `F1C162...5AC`, MkDocs 126 files / 5,685,815 bytes. |
+| 2026-07-19 | exact `fd2070c` independent code review | Production measurement fix CLEAN; one P3 found because the R5 RED used a 50ms negative scheduling assertion. Replaced it with a positive tracking-lock/send progress latch before rereview. |
+| 2026-07-19 | strengthened R5 test working tree | three boundary nodes and 20 independent processes | GREEN: `3 passed in 0.38s`, then `60/60`; no failed process. |
 
 ## Current State
 
 - Current phase: R5-EVIDENCE.
-- Next exact action: commit permanent R5 evidence and obtain two code rereviews plus one evidence rereview.
+- Next exact action: prove the strengthened test RED/GREEN, commit the review correction, then complete independent rereviews.
 - Pending push: R5 evidence checkpoint and final delivery.
