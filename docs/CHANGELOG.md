@@ -2,7 +2,14 @@
 
 ## Unreleased
 
-- 新增 `client.helpers.shortline_indicators()`，按 TDX 握手交易日和实际指数日 K 对齐 `zhb.zip`，返回 21 个统计资源及短线计算字段；过期、CFG 日期冲突、9:25 前未就绪等情况明确失败，不跨日猜算。
+## v1.2.0 - 2026-07-19
+
+- 新增 `client.helpers.shortline_indicators()` 和兼容入口 `client.helpers.get_shortline_indicators()`，返回固定 21 个统计资源及短线计算字段。
+- 新增 `ShortlineIndicatorTable`、`ShortlineIndicator`、`ShortlineIndicatorsNotReadyError` 和 `TdxStatsDateError`。
+- 目标交易日来自 TDX 握手，上一交易日来自上证指数实际日 K；`tdxstat.cfg` 与 `tdxstat2.cfg` 必须日期一致且主导日期覆盖率均不低于 95%。
+- 统计资源仅接受目标交易日或上一实际交易日；过期、CFG 日期冲突、低覆盖率及交易日 09:25 前未就绪等情况明确失败，不跨日猜算。
+- 已验证统计资源在客户端内存缓存；`refresh_stats=True` 可强制刷新，`client.clear_cache()` 同步清理统计缓存，不新增数据库或磁盘缓存。
+- README、Pages 接口目录、API 参考、方法手册、字段手册和短线指标专页同步补充调用及字段口径。
 
 ## v1.1.0 - 2026-07-19
 
