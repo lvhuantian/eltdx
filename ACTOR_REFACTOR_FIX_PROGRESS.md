@@ -18,17 +18,17 @@
 | F10-RED | completed | Three behavior-only tests fail deterministically on old production code for the required reasons. |
 | F10-FIX | completed | Push normal close no longer writes `None`; Guard non-None fast returns require unchanged snapshot identity. |
 | F10-HEARTBEAT | completed | Server-owned phase window closes on the final business response; post-response heartbeat remains total-only, including the sendall-to-close interleaving. |
-| F10-TEST | in_progress | First validation complete; independent review found and fixed sendall-to-window-close heartbeat race; all validation must be rerun. |
+| F10-TEST | completed | R4 20-process, targeted, full pytest, stress/resource, package and MkDocs verification complete. |
 | F10-EVIDENCE | pending | Update permanent manifest and checkpoint identity; complete independent reviews. |
 | FINAL | pending | Delete this ledger, push exact HEAD, wait for CI/Pages, post PR delivery comment. |
 
 ## Current State
 
 - Current HEAD before this checkpoint: `6c344d468dafe59a240edbb08001264e91f2aeb4`.
-- Last completed: independent review findings fixed: sendall-to-close serialization, failed-final cleanup, post-send snapshot fencing, and canonical performance-set wording.
+- Last completed: R4 validation complete after independent review fixes; final cleanup/evidence/CI remain.
 - Current phase: F10-TEST.
-- Next exact action: commit and push F10-HEARTBEAT-R4, then rerun complete pytest and heavy stress from zero; retain the already completed immutable performance campaign without resampling.
-- Pending push: F10-HEARTBEAT-R4 commit to be created and pushed.
+- Next exact action: update permanent Result with R4 evidence and review conclusions, run package/MkDocs, then create FINAL with this ledger deleted.
+- Pending push: R4 evidence update and FINAL commits.
 
 ## Verification Log
 
@@ -50,6 +50,8 @@
 | 2026-07-19 | `c5afeb4` | targeted Push/Guard/heartbeat/retirement/lifecycle/stress matrix | GREEN: 260 passed in 245.66s. |
 | 2026-07-19 | F10-HEARTBEAT-R3 working tree | post-final concurrency, failed-final cleanup, phase counter nodes | GREEN: 3 passed in 0.41s. |
 | 2026-07-19 | F10-HEARTBEAT-R4 working tree | final-response barrier, post-response boundary, failed-final cleanup | GREEN: 3 passed in 9.32s; phase snapshot now fences final send/finish publication. |
+| 2026-07-19 | `6abbaf5` | `python -m pytest -q` from zero | GREEN: `650 passed in 250.37s (0:04:10)`. |
+| 2026-07-19 | `6abbaf5` | heavy stress/resource rerun | PASS: 10,000/100,000 unique; all ownership/error counters 0; max active 4; heartbeat windows 0/0; ratio 1.001703; resources `192,192,192,192,192,192,192,192`; artifact SHA256 `211EB25E33D7E32FF5469E64FFBBEC03C1C8D3D9E87DD929980256A2DD006D24`. |
 
 ## Known Failures And Risks
 

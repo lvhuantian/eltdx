@@ -46,8 +46,8 @@ Pages gates. Source-evidence checks cannot be substituted for those gates.
 | Stress/performance artifact source | `f1178712bf108d113db7a345f53d3a9e9e0d113b` |
 | Overturned F09 FINAL | `5925c02f76a7a905d714900b1e16a907ada2f73f` |
 | F10 RED tests | `807d2a553c7f87567d36a4f2e8cc1e490d09121f` (`Fix-Checkpoint: F10-RED`) |
-| F10 production source | `2aea276aeb59b4cb05fd59cb1a3598ca18a5ed5d` (`Fix-Checkpoint: F10-HEARTBEAT`) |
-| F10 evidence source | `043966e041e294b996a279215277d494b34e1702` (`Fix-Checkpoint: F10-TEST`) |
+| F10 production source | `6abbaf5273aace450972f6e99fe44a8f05307812` (`Fix-Checkpoint: F10-HEARTBEAT-R4`) |
+| F10 evidence source | `6abbaf5273aace450972f6e99fe44a8f05307812` (`Fix-Checkpoint: F10-HEARTBEAT-R4`) |
 | Exact preceding FINAL checkpoint | `ac942a87cd1f1fd78b5486bc29660361c7af380e` (CI `29648788642`, Pages `29648788648`, both SUCCESS; historical) |
 | Final manifest commit | `SELF`, resolved by the first-parent FINAL trailer below |
 | Final delivery HEAD | `SELF`, the first-parent commit carrying `Fix-Checkpoint: FINAL` |
@@ -98,7 +98,7 @@ repository commit merely to copy run IDs into this manifest.
 | Current fatal-reason correction | `ee077cc`, `12ea212`, `3589a09`, `dade830`, `a8402a4` | Deterministic RED edges, resolver owner selection, resolver-only Guard fallback, complete deferred abandon drain, and exact-source heavy verification |
 | F09 fatal publication correction | `19d6d74`, `f0d9ce7`, `45e6703`, `f117871`, `ddce09b`, `ee5a995` | Guard stale-None RED/REEN, diagnostics and epoch isolation, standalone Push/handle single-writer evidence, stress/performance/package/docs verification and correction evidence record |
 | Overturned F09 FINAL | `5925c02` | Reopened by F10 deterministic Push/Guard races and a clean full-suite heartbeat measurement failure |
-| F10 correction | `242e7e5`, `807d2a5`, `6c344d4`, `2aea276`, `043966e` | Revision 1.4 spec identity, deterministic RED proof, Push/Guard repair, heartbeat business-window repair, correctness/stress evidence |
+| F10 correction | `242e7e5`, `807d2a5`, `6c344d4`, `2aea276`, `043966e`, `bc61e26`, `c5afeb4`, `d3e1153`, `6abbaf5` | Revision 1.4 spec identity, deterministic RED proof, Push/Guard repair, heartbeat window/send/finish fencing, correctness/stress evidence and independent reviews |
 | FINAL manifest | `SELF` | Permanent result plus temporary progress-ledger deletion; exact-SHA CI/Pages resolved after push |
 
 This table covers every commit from the original A00-A09 implementation and
@@ -685,7 +685,7 @@ producer workload SHA is `b09ab7130752ae0c562b63ba04d2b1bea42f1e168c060f13d6e86e
 ## F10 Current Delivery Evidence
 
 The previous F09 `SELF=5925c02` FINAL/CLEAN statement is invalid. The F10
-production source is `2aea276aeb59b4cb05fd59cb1a3598ca18a5ed5d`; the clean
+production source is `6abbaf5273aace450972f6e99fe44a8f05307812`; the clean
 checkpoint used to declare the immutable performance campaign is
 `043966e041e294b996a279215277d494b34e1702`. The final documentation-only
 delivery commit is `SELF` and does not change production source.
@@ -710,18 +710,22 @@ delivery commit is `SELF` and does not change production source.
   on the first phase request and closes it immediately after sending the final
   phase response. A legal heartbeat before the disable fence remains visible
   in total observation but is excluded from business-window counts.
+- `c5afeb4`, `d3e1153` and `6abbaf5` close the remaining measurement edges:
+  the final response send and phase finish share a wire lock, snapshots fence
+  that publication, failed final sends always decrement active business state,
+  and deterministic tests cover post-send and failed-send windows.
 
 | Gate | Result | Artifact / identity |
 | --- | --- | --- |
 | F10 RED/REEN | RED `3 failed in 0.83s`; GREEN `3 passed in 0.25s`; Push/retirement focus `55 passed in 0.56s` | RED `807d2a5`; production fixes `6c344d4`, `2aea276` |
-| New tests, 20 independent processes | 60/60 cases PASS, no failed process | `C:\Users\ax\Desktop\eltdx\eltdx-src\artifacts\actor-f10-20proc-2aea276.log`, SHA256 `DC3BCECE67A8802E67CB0417C48659F6BDCD556CFE422564B3F32C23646826AC` |
-| Targeted Push/Guard/heartbeat/retirement/lifecycle/stress | `260 passed in 253.39s` | exact source `2aea276`; no retry |
-| Complete pytest from zero | `649 passed in 252.70s (0:04:12)` | Windows 11, Python 3.12.6; no result splicing or retry |
-| 10k generations / 100k requests stress | PASS; unique 10,000/100,000; duplicate/missing/unexpected/cross-request/cross-generation all 0; max active 4; leases/waiters/pins/frames/bytes/Actor threads 0; owned resources closed; resources `191,191,191,191,191,191,191,191`, plateau=true | `C:\Users\ax\Desktop\eltdx\eltdx-src\artifacts\actor-stress-f10-2aea276.json`, 744,497 bytes, SHA256 `17A2FBBD54BE04E9F609200A74490F0D7C5757D653CB1A7D78B31F642B18A70A` |
-| Heartbeat hard gate | PASS; both business-window totals 0; throughput ratio `1.005572`; 35,232 unique responses and all ownership counters 0 | same stress artifact; 32 unique timed phase IDs, exact start/target counters |
-| Close/resource hard gates | PASS; idle/loaded p99 `2.5561/2.7937ms`; idle CPU ratio 0; every measured resource sample 191 | same stress artifact |
+| New tests, 20 independent processes | R4 `80/80` cases PASS, no failed process; earlier R1/R2 runs retained | R4 log `C:\Users\ax\Desktop\eltdx\eltdx-src\artifacts\actor-f10-r3-20proc-d3e1153.log`, SHA256 `5C403A6BD8E404D9C4405F8C0986E2968F8169F8299D20C4C9F502282980A0F3`; R2 log SHA256 `BC56EC9BFD9F34DB7C1D32084BFBA85F93F91C47546C135DF25872266037CF68` |
+| Targeted Push/Guard/heartbeat/retirement/lifecycle/stress | `260 passed in 245.66s` | exact source `c5afeb4`; R4 final boundary nodes `3 passed in 9.32s` |
+| Complete pytest from zero | `650 passed in 250.37s (0:04:10)` | Windows 11, Python 3.12.6; no result splicing or retry |
+| 10k generations / 100k requests stress | PASS; unique 10,000/100,000; duplicate/missing/unexpected/cross-request/cross-generation all 0; max active 4; leases/waiters/pins/frames/bytes/Actor threads 0; owned resources closed; resources `192,192,192,192,192,192,192,192`, plateau=true | `C:\Users\ax\Desktop\eltdx\eltdx-src\artifacts\actor-stress-f10-r4-6abbaf5.json`, 744,497 bytes, SHA256 `211EB25E33D7E32FF5469E64FFBBEC03C1C8D3D9E87DD929980256A2DD006D24` |
+| Heartbeat hard gate | PASS; both business-window totals 0; throughput ratio `1.001703`; 35,232 unique responses and all ownership counters 0 | R4 stress artifact; 32 unique timed phase IDs, exact start/target counters, send/finish/snapshot fence |
+| Close/resource hard gates | PASS; idle/loaded p99 `2.6783/2.7914ms`; idle CPU ratio 0; every measured resource sample 192 | R4 stress artifact |
 | Paired performance campaign | **FAIL, user-approved exception**; exact 8-cell ABBA+BAAB, attempt=1, `errors=[]`; sequential ratio `0.943299`, saturated ratio `0.942391`; sequential p50/p99 PASS, no-backlog p50 PASS and p99 FAIL | canonical 11-file set in `C:\Users\ax\Desktop\eltdx\eltdx-src\artifacts\perf-f10-043966e`, 99,990,158 bytes; declaration canonical SHA256 `cbb644f1104a606bc4c4103b3fe01c8fec872ad26bb448d8fd67f1a099c5973d`; bundle SHA256 `B1E4930BE5CF4A7CB421C015DE48AD4E2521860D67865E7C53C7D85266DBE3D3`; verification report SHA256 `64FD696DE85154ECD3B0C5A0FBF614DBB38D25AC23C474B462409985C98F5D8E`; canonical manifest SHA256 `6560AA2A95B0A476AD5A97006F907672CE797298FDC8963B3C51126EE48B0F16`; later independent report is external review output and excluded from this canonical set |
-| Package artifacts | PASS; `python -m build` and `python -m twine check dist/*` | wheel 313,645 bytes, SHA256 `F899A9CC317DA91E12ACBBB72DC655E89967162FDFC5A5D9B1006FF5F85BA307`; sdist 379,730 bytes, SHA256 `63CA8F2CC903BBDC3657762C3F50665DAF4FD60B39030803EC7BC942D63849A6` |
+| Package artifacts | PASS; `python -m build` and `python -m twine check dist/*` | wheel 313,645 bytes, SHA256 `F899A9CC317DA91E12ACBBB72DC655E89967162FDFC5A5D9B1006FF5F85BA307`; sdist 380,144 bytes, SHA256 `D74492A331C7482E5BF60583168432DAFA02C8D296E5F9B41A1B145BB8D10F80` |
 | MkDocs strict | PASS in 3.00s; 126 files, 5,685,815 bytes | command: `python -m mkdocs build --strict` |
 
 The F10 formal campaign retains the historical verdict exactly as **FAIL,
@@ -881,6 +885,15 @@ added. An independent scope/CI reviewer reached the same conclusion.
   Push and Guard linearization, fatal hot-path locking and resolver lock order
   had no P1/P2/P3 finding. Independent runs included 132 retirement+Pool nodes
   and 20 processes / 40 new race cases, all passing.
+- The second independent code reviewer returned CLEAN after the R4 heartbeat
+  corrections: Push/Guard remained free of P1/P2/P3 findings, and the wire
+  lock, post-send snapshot fence, failed-final cleanup and out-of-order phase
+  behavior were independently checked. The final R4 targeted/full/stress
+  reruns supersede the earlier review target.
+- The independent evidence reviewer returned CLEAN after correcting one P3
+  wording issue: the performance directory is explicitly reported as a
+  canonical 11-file set, while the later `independent_report.json` remains
+  external review output and is excluded from the canonical manifest/hash.
 - Current FINAL cleanup retains the primary worktree plus clean detached
   `f5b63bb`/`721cbe8` performance roots so
   the retained campaign verifier can replay their exact absolute identities;
