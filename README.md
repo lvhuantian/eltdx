@@ -51,7 +51,7 @@
 | 成交数据   | 当日成交明细、历史成交明细、集合竞价明细、09:25 竞价成交快照           | `client.trades`、`client.auctions`  |
 | 公司基础   | 股本变迁、除权除息、财务基础信息、特殊品种涨跌停限制                  | `client.corporate`、`client.limits` |
 | F10 资料 | 公司概况、热点题材、公告、新闻、研报、财务报表、估值、主营构成             | `client.f10` 或 `F10Client`         |
-| 常用场景   | 股票信息汇总、短线指标、个股概念板块、概念板块成分股、竞价数据、批量行情表、复权/不复权 K 线 | `client.helpers`                   |
+| 常用场景   | 股票信息汇总、短线指标（流通市值Z、开盘换手Z、竞价昨比、开盘昨封比、昨封比、封流比、几天几板等）、个股概念板块、概念板块成分股、竞价数据、批量行情表、复权/不复权 K 线 | `client.helpers`                   |
 | 工具能力   | 连接池、主站测速、自动心跳、低频数据缓存、JSON 序列化、交易日工具、MCP 工具服务 | `TdxClient`、`WorkdayService`、`eltdx-mcp` |
 
 完整接口目录见 [GitHub Pages](https://electkismet.github.io/eltdx/)。调用方法和返回字段看 [METHOD_REFERENCE.md](docs/METHOD_REFERENCE.md)，常用问题入口看 [docs/helpers/README.md](docs/helpers/README.md)，完整 API 看 [API_REFERENCE.md](docs/API_REFERENCE.md)，字段总表看 [FIELD_REFERENCE.md](docs/FIELD_REFERENCE.md)，F10 资料看 [F10_7615.md](docs/F10_7615.md)，MCP 工具看 [MCP.md](docs/MCP.md)。
@@ -173,6 +173,7 @@ print(f10.company_profile("000034").rows[0])
 | 财务基础信息       | `client.corporate.finance_batch()` / `get_finance_batch()` | [`0x0010`](docs/COMMANDS_7709.md#cmd-0x0010)                                                | 批量返回流通股本、总股本、EPS、资产、负债、收入、利润等基础财务字段                            | [文档](docs/methods/7709-财务基础信息.md)     |
 | 特殊品种涨跌停限制    | `client.limits.special()`                                  | [`0x0452`](docs/COMMANDS_7709.md#cmd-0x0452)                                                | 返回特殊品种涨跌停限制表；需要按表扫描后本地索引到具体代码                                  | [文档](docs/methods/7709-特殊品种涨跌停限制.md)  |
 | 服务器文件读取      | `client.resources.read()` / `download_file()` / `read_stats()` | [`0x06b9`](docs/COMMANDS_7709.md#cmd-0x06b9)                                              | 读取文件块或下载整文件，并可解析 `zhb.zip` 中的 `tdxstat.cfg` / `tdxstat2.cfg`              | [文档](docs/methods/7709-服务器文件读取.md)    |
+| 短线指标（Helper） | `client.helpers.shortline_indicators()`                    | `0x06b9 + 0x054c + 0x0547 + 0x044d + 0x052d`                                             | 按交易日对齐统计资源和实时行情，返回流通市值Z、开盘换手Z、竞价昨比、开盘昨封比、昨封比、封流比、几天几板等 21 个字段 | [文档](docs/helpers/短线指标.md)              |
 
 `7709` 命令和 API 对照见 [COMMANDS_7709.md](docs/COMMANDS_7709.md)，完整调用参数见 [API_REFERENCE.md](docs/API_REFERENCE.md)。
 
@@ -341,7 +342,7 @@ python scripts/smoke/export_auction_925_daily.py --code sz000001 --start 2026-04
 - [想查询某个概念板块都有哪些股票怎么办？](docs/helpers/概念板块成分股.md)
 - [想拿集合竞价数据怎么办？](docs/helpers/竞价数据.md)
 - [想给一批股票整理行情表怎么办？](docs/helpers/批量行情表.md)
-- [想拿流通股本Z、竞价昨比、封流比和几天几板怎么办？](docs/helpers/短线指标.md)
+- [想拿流通市值Z、开盘换手Z、竞价昨比、开盘昨封比、昨封比、封流比和几天几板怎么办？](docs/helpers/短线指标.md)
 - [想拿复权或不复权 K 线怎么办？](docs/helpers/复权K线.md)
 
 常用组合调用示例：

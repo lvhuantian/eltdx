@@ -37,7 +37,7 @@
 | 股本变迁、财务批量 | `client.corporate` | `0x000f`, `0x0010` |
 | 特殊品种涨跌停限制 | `client.limits` | `0x0452` |
 | F10、题材、公告、财务报表、估值 | `client.f10` | `7615/TQLEX` |
-| 常用场景组合调用 | `client.helpers` | 组合 7709 / F10 |
+| 常用场景组合调用（含 21 个短线指标） | `client.helpers` | 组合 7709 / F10 |
 | MCP 工具服务 | `eltdx-mcp` | 组合 7709 / F10 |
 
 ## 对外 API 风格
@@ -75,9 +75,12 @@ topics = client.f10.hot_topics("000034")
 ```python
 with TdxClient(timeout=3) as client:
     table = client.helpers.stock_profile_table(["sz000001", "sh600000"])
+    shortline = client.helpers.shortline_indicators(["sz000001", "sh600000"])
     topics = client.helpers.stock_topics("000034")
     auction = client.helpers.auction_data("sz000001", "2026-05-20")
 ```
+
+`shortline` 包含流通市值Z、开盘换手Z、竞价昨比、开盘昨封比、昨封比、封流比、几天几板等 21 个字段，完整口径见[短线指标](helpers/短线指标.md)。
 
 开发和测试时可以使用内存 transport：
 
