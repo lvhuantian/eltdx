@@ -100,7 +100,7 @@ repository commit merely to copy run IDs into this manifest.
 | Current fatal-reason correction | `ee077cc`, `12ea212`, `3589a09`, `dade830`, `a8402a4` | Deterministic RED edges, resolver owner selection, resolver-only Guard fallback, complete deferred abandon drain, and exact-source heavy verification |
 | F09 fatal publication correction | `19d6d74`, `f0d9ce7`, `45e6703`, `f117871`, `ddce09b`, `ee5a995` | Guard stale-None RED/REEN, diagnostics and epoch isolation, standalone Push/handle single-writer evidence, stress/performance/package/docs verification and correction evidence record |
 | Overturned F09 FINAL | `5925c02` | Reopened by F10 deterministic Push/Guard races and a clean full-suite heartbeat measurement failure |
-| F10 correction | `242e7e5`, `807d2a5`, `6c344d4`, `2aea276`, `043966e`, `bc61e26`, `c5afeb4`, `d3e1153`, `6abbaf5`, `bad414a`, `64bbea9`, `a8cc5b3`, `f12701f`, `1dd1dcd`, `fd2070c`, `ff3b1e0`, `027935a` | Revision 1.4 identity; Push/Guard and heartbeat R1-R4 correction; overturned R4 FINAL; R5 out-of-order RED, phase-wide wire fence, evidence and deterministic send/finish review coverage |
+| F10 correction | `242e7e5`, `807d2a5`, `6c344d4`, `2aea276`, `043966e`, `bc61e26`, `c5afeb4`, `d3e1153`, `6abbaf5`, `bad414a`, `64bbea9`, `a8cc5b3`, `f12701f`, `1dd1dcd`, `fd2070c`, `ff3b1e0`, `027935a`, `7da60eb` | Revision 1.4 identity; Push/Guard and heartbeat R1-R4 correction; overturned R4 FINAL; R5 out-of-order RED, phase-wide wire fence, evidence and deterministic send/finish review coverage |
 | FINAL manifest | `SELF` | Permanent result plus temporary progress-ledger deletion; exact-SHA CI/Pages resolved after push |
 
 This table covers every commit from the original A00-A09 implementation and
@@ -738,7 +738,7 @@ delivery commit is `SELF` and does not change runtime or measurement source.
 | Heartbeat hard gate | PASS; both business-window totals 0; throughput ratio `0.998671`; 35,232 unique responses and all ownership counters 0 | R5 stress artifact; 32 unique timed phase IDs, exact start/target counters, phase-wide send/finish/snapshot fence |
 | Close/resource hard gates | PASS; idle/loaded p99 `2.9323/2.7259ms`; idle CPU ratio 0; every measured resource sample 192 | R5 stress artifact |
 | Paired performance campaign | **FAIL, user-approved exception**; exact 8-cell ABBA+BAAB, attempt=1, `errors=[]`; sequential ratio `0.943299`, saturated ratio `0.942391`; sequential p50/p99 PASS, no-backlog p50 PASS and p99 FAIL | canonical 11-file set in `C:\Users\ax\Desktop\eltdx\eltdx-src\artifacts\perf-f10-043966e`, 99,990,158 bytes; declaration canonical SHA256 `cbb644f1104a606bc4c4103b3fe01c8fec872ad26bb448d8fd67f1a099c5973d`; bundle SHA256 `B1E4930BE5CF4A7CB421C015DE48AD4E2521860D67865E7C53C7D85266DBE3D3`; verification report SHA256 `64FD696DE85154ECD3B0C5A0FBF614DBB38D25AC23C474B462409985C98F5D8E`; canonical manifest SHA256 `6560AA2A95B0A476AD5A97006F907672CE797298FDC8963B3C51126EE48B0F16`; later independent report is external review output and excluded from this canonical set |
-| Package artifacts | PASS; `python -m build` and `python -m twine check` | final R5 wheel 313,645 bytes, SHA256 `F899A9CC317DA91E12ACBBB72DC655E89967162FDFC5A5D9B1006FF5F85BA307`; sdist 381,059 bytes, SHA256 `8CA040809CBD6E38336746352472E38E14FBD9702BC53F2B9B96FA76293E236A` |
+| Package artifacts | PASS; `python -m build` and `python -m twine check` | final R5 wheel 313,645 bytes, SHA256 `F899A9CC317DA91E12ACBBB72DC655E89967162FDFC5A5D9B1006FF5F85BA307`; sdist 381,212 bytes, SHA256 `18CFE96867C03D3DF2938EEAF677236A46966131C6874F587154DCFE8BEBA486` |
 | MkDocs strict | PASS in 2.52s; 126 files, 5,685,815 bytes | R5 site artifact under `artifacts/site-f10-r5-1dd1dcd` |
 
 An additional R5 performance campaign was declared once against baseline
@@ -927,8 +927,9 @@ added. An independent scope/CI reviewer reached the same conclusion.
   strength: a 50ms negative scheduling assertion and missing real `_serve()`
   proof across send-to-finish plus failed send. `ff3b1e0` and `027935a`
   replaced the timing assumption with positive lock-attempt latches, block
-  heartbeat and snapshots inside a real out-of-order closer send, and exercise
-  real raising-send cleanup. The final four nodes passed 80/80 in 20 processes,
+  heartbeat and snapshots inside a real out-of-order closer send, assert finish
+  callback ownership of the wire lock, and exercise real raising-send cleanup.
+  The final four nodes passed 80/80 in 20 processes,
   the exact targeted matrix passed 263 nodes, and the full suite passed 652.
 - Current FINAL cleanup retains the primary worktree plus clean detached
   `f5b63bb`/`721cbe8` performance roots so

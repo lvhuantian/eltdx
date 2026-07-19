@@ -43,6 +43,7 @@
 | 2026-07-19 | final R5 test working tree | targeted matrix and complete pytest from zero | GREEN: `263 passed in 239.78s`; full `652 passed in 246.80s`; no retry or result splicing. |
 | 2026-07-19 | clean exact `027935a` | final package rebuild and twine check | PASS: wheel SHA256 `F899A9CC317DA91E12ACBBB72DC655E89967162FDFC5A5D9B1006FF5F85BA307`; sdist SHA256 `8CA040809CBD6E38336746352472E38E14FBD9702BC53F2B9B96FA76293E236A`. |
 | 2026-07-19 | final owner-tracking test working tree | successful closer and raising-send `_serve()` paths | GREEN: finish callbacks asserted exact wire-lock ownership; four nodes `4 passed in 0.40s`, then `80/80` in 20 processes. |
+| 2026-07-19 | clean exact `7da60eb` | final package rebuild and twine check | PASS: wheel SHA256 `F899A9CC317DA91E12ACBBB72DC655E89967162FDFC5A5D9B1006FF5F85BA307`; sdist SHA256 `18CFE96867C03D3DF2938EEAF677236A46966131C6874F587154DCFE8BEBA486`. |
 
 ## Current State
 
