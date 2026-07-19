@@ -100,7 +100,7 @@ repository commit merely to copy run IDs into this manifest.
 | Current fatal-reason correction | `ee077cc`, `12ea212`, `3589a09`, `dade830`, `a8402a4` | Deterministic RED edges, resolver owner selection, resolver-only Guard fallback, complete deferred abandon drain, and exact-source heavy verification |
 | F09 fatal publication correction | `19d6d74`, `f0d9ce7`, `45e6703`, `f117871`, `ddce09b`, `ee5a995` | Guard stale-None RED/REEN, diagnostics and epoch isolation, standalone Push/handle single-writer evidence, stress/performance/package/docs verification and correction evidence record |
 | Overturned F09 FINAL | `5925c02` | Reopened by F10 deterministic Push/Guard races and a clean full-suite heartbeat measurement failure |
-| F10 correction | `242e7e5`, `807d2a5`, `6c344d4`, `2aea276`, `043966e`, `bc61e26`, `c5afeb4`, `d3e1153`, `6abbaf5`, `bad414a`, `64bbea9`, `a8cc5b3`, `f12701f`, `1dd1dcd`, `fd2070c`, `ff3b1e0`, `027935a`, `7da60eb` | Revision 1.4 identity; Push/Guard and heartbeat R1-R4 correction; overturned R4 FINAL; R5 out-of-order RED, phase-wide wire fence, evidence and deterministic send/finish review coverage |
+| F10 correction | `242e7e5`, `807d2a5`, `6c344d4`, `2aea276`, `043966e`, `bc61e26`, `c5afeb4`, `d3e1153`, `6abbaf5`, `bad414a`, `64bbea9`, `a8cc5b3`, `f12701f`, `1dd1dcd`, `fd2070c`, `ff3b1e0`, `027935a`, `7da60eb`, `4c02ce0` | Revision 1.4 identity; Push/Guard and heartbeat R1-R4 correction; overturned R4 FINAL; R5 out-of-order RED, phase-wide wire fence, evidence and deterministic send/finish review coverage |
 | FINAL manifest | `SELF` | Permanent result plus temporary progress-ledger deletion; exact-SHA CI/Pages resolved after push |
 
 This table covers every commit from the original A00-A09 implementation and
@@ -931,6 +931,12 @@ added. An independent scope/CI reviewer reached the same conclusion.
   callback ownership of the wire lock, and exercise real raising-send cleanup.
   The final four nodes passed 80/80 in 20 processes,
   the exact targeted matrix passed 263 nodes, and the full suite passed 652.
+- Final exact-source reconciliation at `4c02ce0` found no remaining P1/P2/P3:
+  both independent reviewers' production-code CLEAN conclusions still apply;
+  their P3/P2 permanent-test findings are covered by the committed positive
+  latches and owner assertions. The R5 artifact audit rechecked the clean
+  stress JSON, aborted performance disclosure, final package bytes/hashes,
+  Plan identity and MkDocs counts against their retained raw files.
 - Current FINAL cleanup retains the primary worktree plus clean detached
   `f5b63bb`/`721cbe8` performance roots so
   the retained campaign verifier can replay their exact absolute identities;
