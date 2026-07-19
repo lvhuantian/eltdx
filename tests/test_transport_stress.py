@@ -229,8 +229,10 @@ def test_out_of_order_final_heartbeat_response_is_wire_fenced(monkeypatch) -> No
 
     first_started = threading.Event()
     release_first = threading.Event()
+    release_first_send = threading.Event()
     first_progress = threading.Event()
     first_lock_attempted = threading.Event()
+    lock_attempts: dict[str, threading.Event] = {}
     real_record_started = server._record_business_request_started
 
     def record_started() -> int:
@@ -249,8 +251,12 @@ def test_out_of_order_final_heartbeat_response_is_wire_fenced(monkeypatch) -> No
 
         def __enter__(self):
             if self.track_attempts:
-                first_lock_attempted.set()
-                first_progress.set()
+                name = threading.current_thread().name
+                if name == "out-of-order-first-response":
+                    first_lock_attempted.set()
+                    first_progress.set()
+                if name in lock_attempts:
+                    lock_attempts[name].set()
             self._lock.acquire()
             return self
 
@@ -276,6 +282,7 @@ def test_out_of_order_final_heartbeat_response_is_wire_fenced(monkeypatch) -> No
             self.sent.set()
             if self.track_progress:
                 first_progress.set()
+                assert release_first_send.wait(timeout=2)
 
     def read_request(connection: Connection):
         if connection.read:
@@ -286,7 +293,11 @@ def test_out_of_order_final_heartbeat_response_is_wire_fenced(monkeypatch) -> No
     monkeypatch.setattr(stress_module, "_read_request", read_request)
     first = Connection(track_progress=True)
     second = Connection()
-    first_thread = threading.Thread(target=server._serve, args=(first, 1))
+    first_thread = threading.Thread(
+        target=server._serve,
+        args=(first, 1),
+        name="out-of-order-first-response",
+    )
     second_thread = threading.Thread(target=server._serve, args=(second, 2))
 
     first_thread.start()
@@ -302,12 +313,97 @@ def test_out_of_order_final_heartbeat_response_is_wire_fenced(monkeypatch) -> No
         assert first_progress.wait(timeout=2)
         first_send_was_fenced = first_lock_attempted.is_set() and not first.sent.is_set()
 
+    if not first_send_was_fenced:
+        release_first_send.set()
+        first_thread.join(timeout=2)
+        assert first_send_was_fenced
+
+    assert first.sent.wait(timeout=2)
+    heartbeat_attempted = threading.Event()
+    snapshot_attempted = threading.Event()
+    heartbeat_done = threading.Event()
+    snapshot_done = threading.Event()
+    snapshot: list[dict[str, object]] = []
+    lock_attempts["out-of-order-heartbeat"] = heartbeat_attempted
+    lock_attempts["out-of-order-snapshot"] = snapshot_attempted
+    heartbeat_thread = threading.Thread(
+        target=lambda: (
+            server._record_heartbeat_request(connection_id=1),
+            heartbeat_done.set(),
+        ),
+        name="out-of-order-heartbeat",
+    )
+    snapshot_thread = threading.Thread(
+        target=lambda: (
+            snapshot.append(server.heartbeat_business_phase_snapshot(phase_id)),
+            snapshot_done.set(),
+        ),
+        name="out-of-order-snapshot",
+    )
+    heartbeat_thread.start()
+    snapshot_thread.start()
+    assert heartbeat_attempted.wait(timeout=2)
+    assert snapshot_attempted.wait(timeout=2)
+    assert not heartbeat_done.is_set()
+    assert not snapshot_done.is_set()
+
+    release_first_send.set()
     first_thread.join(timeout=2)
+    heartbeat_thread.join(timeout=2)
+    snapshot_thread.join(timeout=2)
     assert not first_thread.is_alive()
-    assert first_send_was_fenced
+    assert not heartbeat_thread.is_alive()
+    assert not snapshot_thread.is_alive()
+    assert heartbeat_done.is_set()
+    assert snapshot_done.is_set()
+    assert snapshot[0]["business_responses_sent"] == 2
+    assert snapshot[0]["business_window_open"] is False
     phase = server.heartbeat_business_phase_snapshot(phase_id)
     assert phase["business_responses_sent"] == 2
     assert phase["business_window_open"] is False
+    assert phase["heartbeat_requests"] == 0
+    assert server.heartbeat_requests == 1
+
+
+def test_failed_phase_response_cleans_active_count_through_real_serve(monkeypatch) -> None:
+    server = stress_module.StressServer()
+    phase_id = "deterministic-real-failed-response"
+    server.begin_heartbeat_business_phase(
+        phase_id,
+        start_business_requests=0,
+        target_business_requests=1,
+    )
+
+    class FailingConnection:
+        def __init__(self) -> None:
+            self.read = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def sendall(self, _wire: bytes) -> None:
+            raise OSError("injected phase response failure")
+
+    def read_request(connection: FailingConnection):
+        if connection.read:
+            raise EOFError
+        connection.read = True
+        return 1, stress_module.TYPE_SECURITY_COUNT, b""
+
+    monkeypatch.setattr(stress_module, "_read_request", read_request)
+    worker = threading.Thread(target=server._serve, args=(FailingConnection(), 1))
+    worker.start()
+    worker.join(timeout=2)
+    assert not worker.is_alive()
+
+    phase = server.heartbeat_business_phase_snapshot(phase_id)
+    assert server.active_business == 0
+    assert phase["business_requests_started"] == 1
+    assert phase["business_responses_sent"] == 0
+    assert phase["business_window_open"] is True
 
 
 def test_heartbeat_timed_publication_runs_only_after_every_worker_is_ready(monkeypatch) -> None:

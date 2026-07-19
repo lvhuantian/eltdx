@@ -38,9 +38,12 @@
 | 2026-07-19 | clean exact `1dd1dcd` | `python -m build`, `python -m twine check`, `python -m mkdocs build --strict` | PASS: wheel `F899A9...A307`, sdist `F1C162...5AC`, MkDocs 126 files / 5,685,815 bytes. |
 | 2026-07-19 | exact `fd2070c` independent code review | Production measurement fix CLEAN; one P3 found because the R5 RED used a 50ms negative scheduling assertion. Replaced it with a positive tracking-lock/send progress latch before rereview. |
 | 2026-07-19 | strengthened R5 test working tree | three boundary nodes and 20 independent processes | GREEN: `3 passed in 0.38s`, then `60/60`; no failed process. |
+| 2026-07-19 | exact `ff3b1e0` independent heartbeat review | Production protocol CLEAN; P2 test gap found because real `_serve()` did not yet prove send+finish atomicity or failed-send cleanup. Added positive lock-attempt barriers around a blocked actual closer and a real raising-send test. |
+| 2026-07-19 | final R5 test working tree | four boundary nodes, 20 processes and stress file | GREEN: `4 passed in 0.39s`, `80/80`, and `30 passed in 229.87s`; no failed process. |
+| 2026-07-19 | final R5 test working tree | targeted matrix and complete pytest from zero | GREEN: `263 passed in 239.78s`; full `652 passed in 246.80s`; no retry or result splicing. |
 
 ## Current State
 
 - Current phase: R5-EVIDENCE.
-- Next exact action: prove the strengthened test RED/GREEN, commit the review correction, then complete independent rereviews.
+- Next exact action: commit the P2 coverage correction, rebuild package evidence on the clean exact SHA, then complete independent rereviews.
 - Pending push: R5 evidence checkpoint and final delivery.
