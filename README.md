@@ -32,6 +32,8 @@
 
 通达信在线行情协议 Python 库。可以拿 A 股的行情、分时、成交明细、K 线、竞价、公司信息、题材信息等信息，支持 MCP 工具。
 
+> `v1.1.0` 已将 7709 传输层改为每个连接槽位一个长期 `ConnectionActor`。断线重连只更换 TCP socket，不再反复创建 reader 线程。升级内容和兼容性说明见 [v1.1.0 发布说明](docs/releases/v1.1.0.md)。
+
 1. 本项目仅以个人学习、协议研究和非商业研究为目的进行开发。
 2. 本项目基于互联网公开信息搜集开发。
 3. 项目本身、衍生产品及通过本项目获取的数据禁止用于任何商业行为、付费服务、生产服务、转售或其他营利用途，产生的任何数据、损失或法律责任由使用者自负。
@@ -226,7 +228,7 @@ client.bars.get("sz000001", period="day", adjust="fixed_qfq", anchor_date="2024-
 
 F10 返回统一是 `F10Response`。常用结果在 `response.rows`，多表结果在 `response.tables`。完整说明见 [F10_7615.md](docs/F10_7615.md)。
 
-## 连接和缓存
+## 连接、并发和缓存
 
 默认 `TdxClient()` 使用真实 `7709` 行情主站；不传 `host` / `hosts` 时，会读取包内 `tdx_server.json`。
 
@@ -236,9 +238,15 @@ from eltdx import TdxClient
 with TdxClient(host="116.205.183.150:7709", timeout=3) as client:
     print(client.get_quote("sz000001"))
 
-with TdxClient.from_hosts(pool_size=2, probe_hosts=True, timeout=3) as client:
+with TdxClient.from_hosts(pool_size=4, probe_hosts=True, timeout=3) as client:
     print(client.codes.count("sz"))
 ```
+
+`pool_size` 默认是 `1`。`pool_size=N` 表示创建 N 个长期 `ConnectionActor` 和 N 条 TCP 连接，最多允许 N 个行情网络请求同时在途；它不表示连接 N 个行情服务器。传入多个主站时，每个连接槽位会按不同顺序尝试这些候选主站，连接失败或断开后自动尝试后续主站。
+
+普通顺序调用保持默认 `1` 即可；需要同时发起多个行情请求时，可以根据实际并发量设置 `pool_size=4`、`pool_size=8` 等正整数。`0`、负数、float、字符串、bool 和 `None` 会直接抛出 `ValueError`，不会被自动修改。
+
+每个连接槽位的 Actor 在线程生命周期内持续复用。网络重连只替换它持有的 TCP socket，不会为每次重连再创建一条 reader 线程。建议始终使用 `with TdxClient(...) as client:`；退出 `with` 时会关闭 Actor、socket、selector 和 wakeup。手动创建客户端时，需要在 `finally` 中调用 `client.close()`。
 
 真实 socket 连接默认每 30 秒自动心跳保活。关闭后台心跳：
 
@@ -294,7 +302,9 @@ python scripts/smoke/export_auction_925_daily.py --code sz000001 --start 2026-04
 | ------------ | ---------------------------------------------------- | -------------------------- |
 | 快速总览         | 本 README                                             | 这个库能查什么、用哪个方法、底层接口是什么      |
 | 常用问题         | [docs/helpers/README.md](docs/helpers/README.md)     | 按问题进入对应调用说明             |
-| 版本更新         | [docs/UPDATE_FROM_0_5_1.md](docs/UPDATE_FROM_0_5_1.md) | 从 `v0.5.1` 到 `v1.0.0` 的更新说明 |
+| 当前版本         | [docs/releases/v1.1.0.md](docs/releases/v1.1.0.md)   | `v1.1.0` Actor 传输层更新与兼容性说明 |
+| 变更记录         | [docs/CHANGELOG.md](docs/CHANGELOG.md)               | 当前版本和未发布改动               |
+| 历史升级         | [docs/UPDATE_FROM_0_5_1.md](docs/UPDATE_FROM_0_5_1.md) | 从 `v0.5.1` 到 `v1.0.0` 的更新说明 |
 | 方法字段手册       | [docs/METHOD_REFERENCE.md](docs/METHOD_REFERENCE.md) | 每个调用方法怎么传参、返回哪些解析字段        |
 | 具体调用         | [docs/API_REFERENCE.md](docs/API_REFERENCE.md)       | 每组 API 怎么传参数、返回什么、有哪些注意点   |
 | 7709 接口对照    | [docs/COMMANDS_7709.md](docs/COMMANDS_7709.md)       | 21 个二进制命令分别对应哪个业务 API      |
@@ -305,6 +315,8 @@ python scripts/smoke/export_auction_925_daily.py --code sz000001 --start 2026-04
 | -------------------------------------------------------- | ---------------------- |
 | [docs/README.md](docs/README.md)                         | 文档入口                   |
 | [docs/PRODUCT.md](docs/PRODUCT.md)                       | 产品定位和能力总览              |
+| [docs/releases/v1.1.0.md](docs/releases/v1.1.0.md)       | `v1.1.0` 正式发布说明          |
+| [docs/CHANGELOG.md](docs/CHANGELOG.md)                   | 版本变更记录                 |
 | [docs/UPDATE_FROM_0_5_1.md](docs/UPDATE_FROM_0_5_1.md)   | 从 `v0.5.1` 到 `v1.0.0` 的更新说明 |
 | [docs/helpers/README.md](docs/helpers/README.md)         | 常用问题入口                |
 | [docs/METHOD_REFERENCE.md](docs/METHOD_REFERENCE.md)     | 调用方法、参数和解析字段           |
