@@ -226,12 +226,15 @@ class StressServer:
             self._active_heartbeat_business_phase_id = phase_id
 
     def heartbeat_business_phase_snapshot(self, phase_id: str) -> dict[str, Any]:
-        with self._condition:
-            try:
-                phase = self._heartbeat_business_phases[phase_id]
-            except KeyError as exc:
-                raise AssertionError(f"unknown heartbeat business phase ID: {phase_id}") from exc
-            return dict(phase)
+        with self._heartbeat_phase_wire_lock:
+            with self._condition:
+                try:
+                    phase = self._heartbeat_business_phases[phase_id]
+                except KeyError as exc:
+                    raise AssertionError(
+                        f"unknown heartbeat business phase ID: {phase_id}"
+                    ) from exc
+                return dict(phase)
 
     def _record_heartbeat_request(self, connection_id: int) -> None:
         with self._heartbeat_phase_wire_lock:
@@ -1220,7 +1223,8 @@ def run_heartbeat_impact(requests: int, *, blocks: int = 4) -> dict[str, Any]:
                                     or business_phase["business_window_open"]
                                 ):
                                     raise AssertionError(
-                                        "heartbeat business phase did not close at its final response"
+                                        "heartbeat business phase did not close at its final response: "
+                                        f"{business_phase!r}"
                                     )
                             except BaseException as exc:
                                 phase_error = exc

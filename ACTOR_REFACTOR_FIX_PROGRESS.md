@@ -25,10 +25,10 @@
 ## Current State
 
 - Current HEAD before this checkpoint: `6c344d468dafe59a240edbb08001264e91f2aeb4`.
-- Last completed: independent review findings fixed: sendall-to-close serialization, failed-final cleanup, and canonical performance-set wording.
+- Last completed: independent review findings fixed: sendall-to-close serialization, failed-final cleanup, post-send snapshot fencing, and canonical performance-set wording.
 - Current phase: F10-TEST.
-- Next exact action: commit and push F10-HEARTBEAT-R3, then rerun the complete pytest and heavy stress from zero; retain the already completed immutable performance campaign without resampling.
-- Pending push: F10-HEARTBEAT-R3 commit to be created and pushed.
+- Next exact action: commit and push F10-HEARTBEAT-R4, then rerun complete pytest and heavy stress from zero; retain the already completed immutable performance campaign without resampling.
+- Pending push: F10-HEARTBEAT-R4 commit to be created and pushed.
 
 ## Verification Log
 
@@ -49,6 +49,7 @@
 | 2026-07-19 | `c5afeb4` | three new F10 nodes, 20 independent pytest processes | GREEN: 60/60; log `artifacts/actor-f10-r2-20proc-c5afeb4.log`, SHA256 `BC56EC9BFD9F34DB7C1D32084BFBA85F93F91C47546C135DF25872266037CF68`. |
 | 2026-07-19 | `c5afeb4` | targeted Push/Guard/heartbeat/retirement/lifecycle/stress matrix | GREEN: 260 passed in 245.66s. |
 | 2026-07-19 | F10-HEARTBEAT-R3 working tree | post-final concurrency, failed-final cleanup, phase counter nodes | GREEN: 3 passed in 0.41s. |
+| 2026-07-19 | F10-HEARTBEAT-R4 working tree | final-response barrier, post-response boundary, failed-final cleanup | GREEN: 3 passed in 9.32s; phase snapshot now fences final send/finish publication. |
 
 ## Known Failures And Risks
 
