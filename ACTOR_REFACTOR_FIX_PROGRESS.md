@@ -18,17 +18,17 @@
 | F10-RED | completed | Three behavior-only tests fail deterministically on old production code for the required reasons. |
 | F10-FIX | completed | Push normal close no longer writes `None`; Guard non-None fast returns require unchanged snapshot identity. |
 | F10-HEARTBEAT | completed | Server-owned phase window closes on the final business response; post-response heartbeat remains total-only. |
-| F10-TEST | in_progress | 20 processes, targeted matrix, clean full pytest, stress, performance, package, MkDocs. |
+| F10-TEST | in_progress | 20 processes, targeted/full/stress complete; performance/package/MkDocs pending. |
 | F10-EVIDENCE | pending | Update permanent manifest and checkpoint identity; complete independent reviews. |
 | FINAL | pending | Delete this ledger, push exact HEAD, wait for CI/Pages, post PR delivery comment. |
 
 ## Current State
 
 - Current HEAD before this checkpoint: `6c344d468dafe59a240edbb08001264e91f2aeb4`.
-- Last completed: heartbeat phase-window measurement implementation and focused GREEN verification.
+- Last completed: 20 independent processes, targeted matrix, clean full pytest, and heavy stress/resource campaign.
 - Current phase: F10-TEST.
-- Next exact action: commit and push F10-HEARTBEAT, then run the three new nodes in 20 independent pytest processes and execute the targeted Push/Guard/heartbeat/retirement/lifecycle/stress matrix.
-- Pending push: F10-HEARTBEAT commit to be created and pushed.
+- Next exact action: commit and push this validation checkpoint, then declare one immutable 8-cell ABBA+BAAB performance campaign against baseline `71089c0` and the clean exact current checkpoint.
+- Pending push: F10-TEST checkpoint to be created and pushed.
 
 ## Verification Log
 
@@ -41,6 +41,10 @@
 | 2026-07-19 | F10-HEARTBEAT working tree | `python -m pytest -q tests/test_transport_stress.py::test_heartbeat_after_final_business_response_is_outside_business_window` | GREEN: 1 passed in 0.40s; post-response heartbeat total is 1 and business-window count is 0. |
 | 2026-07-19 | F10-HEARTBEAT working tree | `python -m pytest -q tests/test_transport_stress.py -k "heartbeat and not idle_actor_blocks"` | GREEN: 22 passed, 5 deselected in 18.41s. |
 | 2026-07-19 | F10-HEARTBEAT working tree | three new F10 nodes together | GREEN: 3 passed in 0.25s. |
+| 2026-07-19 | `2aea276` | three new F10 nodes, 20 independent pytest processes | GREEN: 60/60 cases; log `artifacts/actor-f10-20proc-2aea276.log`, SHA256 `DC3BCECE67A8802E67CB0417C48659F6BDCD556CFE422564B3F32C23646826AC`. |
+| 2026-07-19 | `2aea276` | `python -m pytest -q tests/test_push_buffer.py tests/test_transport_retirement_regressions.py tests/test_transport_lifecycle_regressions.py tests/test_transport_pool_regressions.py tests/test_transport_stress.py` | GREEN: 260 passed in 253.39s. |
+| 2026-07-19 | `2aea276` | `python -m pytest -q` from zero | GREEN: 649 passed in 252.70s; no retry or result splicing. |
+| 2026-07-19 | `2aea276` | `python scripts/stress_actor_transport.py --generations 10000 --requests 100000 --pool-size 4 --concurrency 100 --close-samples 100 --heartbeat-requests 1000 --idle-seconds 0.5 --resource-rounds 8 --resource-warmup 3 --resource-generations 50 --output artifacts/actor-stress-f10-2aea276.json` | PASS: 10,000/100,000 unique; all ownership/error counters 0; max active 4; post-close broker/push/Actor resources 0; heartbeat business windows 0/0; throughput ratio 1.005572; resources 191 x8 exact plateau. Artifact SHA256 `17A2FBBD54BE04E9F609200A74490F0D7C5757D653CB1A7D78B31F642B18A70A`. |
 
 ## Known Failures And Risks
 
