@@ -17,8 +17,8 @@
 | R5-REVIEW | completed | Exact-final review found an out-of-order phase response could bypass the wire fence. |
 | R5-RED | completed | Real `_serve()` interleaving failed because the out-of-order closer sent while the phase wire lock was held. |
 | R5-FIX | completed | Every response in the active phase now shares the phase wire lock for send and finish. |
-| R5-TEST | in progress | Focused RED/REEN is green; independent-process and full gates remain. |
-| R5-EVIDENCE | pending | Update permanent evidence and independent review conclusions. |
+| R5-TEST | completed | 20 processes, targeted/full, clean stress, package and MkDocs complete; performance diagnostic retained failed without retry. |
+| R5-EVIDENCE | in progress | Permanent R5 evidence updated; exact-source independent rereviews remain. |
 | FINAL | pending | Delete this ledger, push exact HEAD, wait for CI/Pages, update the PR delivery comment. |
 
 ## Verification Log
@@ -33,9 +33,12 @@
 | 2026-07-19 | `f12701f` | Push/Guard/heartbeat/retirement/lifecycle/stress targeted matrix | GREEN: `262 passed in 239.23s (0:03:59)`. |
 | 2026-07-19 | `f12701f` | `python -m pytest -q` from zero | GREEN: `651 passed in 246.78s (0:04:06)`; no retry or result splicing. |
 | 2026-07-19 | `f12701f` plus progress-only working tree | first R5 heavy stress diagnostic | Behavior gates passed, but artifact self-reported `worktree_dirty=true`; excluded from formal evidence and must be rerun after this checkpoint. |
+| 2026-07-19 | clean exact `1dd1dcd` | 10k generations / 100k requests stress/resource | PASS: all ownership counters 0, max active 4, heartbeat windows `0/0`, throughput ratio `0.998671`, resources `192 x8`, SHA256 `9B7CF774E8E488715EF6C0DD5397EDB5E854B1B78EA0399783D985386C59DF39`. |
+| 2026-07-19 | clean exact `1dd1dcd` | declared 8-cell performance campaign `f10-r5-1dd1dcd` | Integrity FAIL: first three attempt-1 cells completed; index 3 baseline exited `RPC_NT_INTERNAL_ERROR (0xC0020043)`; stopped and not retried. Existing canonical campaign remains authoritative because runtime/producer/verifier are unchanged. |
+| 2026-07-19 | clean exact `1dd1dcd` | `python -m build`, `python -m twine check`, `python -m mkdocs build --strict` | PASS: wheel `F899A9...A307`, sdist `F1C162...5AC`, MkDocs 126 files / 5,685,815 bytes. |
 
 ## Current State
 
-- Current phase: R5-TEST.
-- Next exact action: commit this test checkpoint, then rerun the 10k/100k stress campaign on its clean exact SHA.
-- Pending push: R5 test/evidence checkpoints and final delivery.
+- Current phase: R5-EVIDENCE.
+- Next exact action: commit permanent R5 evidence and obtain two code rereviews plus one evidence rereview.
+- Pending push: R5 evidence checkpoint and final delivery.
