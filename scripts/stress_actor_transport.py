@@ -253,7 +253,7 @@ class StressServer:
                         phase["heartbeat_requests"] += 1
                 self._condition.notify_all()
 
-    def _is_final_heartbeat_business_response(self, sequence: int) -> bool:
+    def _is_heartbeat_business_phase_response(self, sequence: int) -> bool:
         with self._condition:
             phase_id = self._active_heartbeat_business_phase_id
             if phase_id is None:
@@ -261,7 +261,7 @@ class StressServer:
             phase = self._heartbeat_business_phases[phase_id]
             phase_start = phase["start_business_requests"]
             phase_end = phase_start + phase["target_business_requests"]
-            return phase_start < sequence == phase_end
+            return phase_start < sequence <= phase_end
 
     def _record_business_request_started(self) -> int:
         with self._condition:
@@ -374,7 +374,7 @@ class StressServer:
                     if msg_type not in (TYPE_FILE_CONTENT, TYPE_SECURITY_COUNT):
                         raise RuntimeError(f"unexpected stress command: {msg_type:#x}")
                     sequence = self._record_business_request_started()
-                    final_heartbeat_business_response = self._is_final_heartbeat_business_response(
+                    heartbeat_business_phase_response = self._is_heartbeat_business_phase_response(
                         sequence
                     )
                     if self.ledger is not None:
@@ -415,7 +415,7 @@ class StressServer:
                             wire += _response(msg_id, msg_type, payload)
                             with self._condition:
                                 self.push_frames += 1
-                        if final_heartbeat_business_response:
+                        if heartbeat_business_phase_response:
                             with self._heartbeat_phase_wire_lock:
                                 try:
                                     conn.sendall(wire)
