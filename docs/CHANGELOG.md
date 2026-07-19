@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- 新增 `client.helpers.shortline_indicators()`，按 TDX 握手交易日和实际指数日 K 对齐 `zhb.zip`，返回 21 个统计资源及短线计算字段；过期、CFG 日期冲突、9:25 前未就绪等情况明确失败，不跨日猜算。
+
 ## v1.1.0 - 2026-07-19
 
 - 7709 transport 改为每连接槽位一个单线程非阻塞 `ConnectionActor`。

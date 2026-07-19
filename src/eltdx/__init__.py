@@ -5,6 +5,8 @@ from .f10 import F10Client, F10Response, F10ResultSet
 from .helpers import (
     AuctionData,
     HelperApi,
+    ShortlineIndicator,
+    ShortlineIndicatorTable,
     StockProfile,
     StockProfileTable,
     StockTopic,
@@ -22,6 +24,8 @@ __all__ = [
     "F10Response",
     "F10ResultSet",
     "HelperApi",
+    "ShortlineIndicator",
+    "ShortlineIndicatorTable",
     "StockProfile",
     "StockProfileTable",
     "StockTopic",

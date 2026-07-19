@@ -13,6 +13,14 @@ class ResourceFormatError(EltdxError):
     """Raised when a downloaded TDX resource has an invalid format."""
 
 
+class TdxStatsDateError(ResourceFormatError):
+    """Raised when a TDX statistics resource cannot match the target session."""
+
+
+class ShortlineIndicatorsNotReadyError(EltdxError):
+    """Raised when current-session shortline inputs are not ready yet."""
+
+
 class TransportError(EltdxError):
     """Raised when the transport cannot complete a request."""
 

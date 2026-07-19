@@ -195,6 +195,7 @@ class TdxClient:
         self._codes_all_cache.clear()
         self._gbbq_cache.clear()
         self._finance_cache.clear()
+        self.helpers.clear_cache()
 
     def get_quote(self, codes: str | Sequence[str]):
         """兼容旧版：按代码列表批量查询行情快照，自动按 80 个一批拆分。

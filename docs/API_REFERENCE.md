@@ -596,6 +596,7 @@ client.f10.call("CWServ.tdxf10_gg_gsgk", params=["8", "000034", ""])
 ```python
 with TdxClient(timeout=3) as client:
     profiles = client.helpers.stock_profile_table(["sz000001", "sh600000"])
+    shortline = client.helpers.shortline_indicators(["sz000001", "sh600000"])
     topics = client.helpers.stock_topics("000034")
     stocks = client.helpers.topic_stocks("000034", topic_name="存储芯片")
     auction = client.helpers.auction_data("sz000001", "2026-05-20")
@@ -606,4 +607,5 @@ with TdxClient(timeout=3) as client:
 - [想查询某个概念板块都有哪些股票怎么办？](helpers/概念板块成分股.md)
 - [想拿集合竞价数据怎么办？](helpers/竞价数据.md)
 - [想给一批股票整理行情表怎么办？](helpers/批量行情表.md)
+- [想拿流通股本Z、竞价昨比、封流比和几天几板怎么办？](helpers/短线指标.md)
 - [想拿复权或不复权 K 线怎么办？](helpers/复权K线.md)
