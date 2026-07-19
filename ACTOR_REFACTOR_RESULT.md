@@ -10,7 +10,10 @@ sibling-Actor locks. The resulting external-lock correction reached
 fatal/admission and fatal/push publication windows. The first reviewed
 epoch-retirement correction at `a987c16` was itself reopened after the final
 review found unresolved Guard selection and no-error deferred-drain edges. The
-reviewed production correction is now frozen at `45e6703`; delivery becomes COMPLETE
+F09 FINAL at `5925c02` was overturned on 2026-07-19: deterministic tests proved
+that standalone normal close could overwrite an Actor fatal, Guard could return
+an old-epoch fatal, and the full suite exposed an over-wide heartbeat counter.
+The reviewed F10 production correction is frozen at `2aea276`; delivery becomes COMPLETE
 only after the final `SELF` documentation commit passes its own exact CI and
 Pages gates. Source-evidence checks cannot be substituted for those gates.
 
@@ -19,10 +22,10 @@ Pages gates. Source-evidence checks cannot be substituted for those gates.
 | Field | Value |
 | --- | --- |
 | Status | FINAL manifest; valid only after exact `SELF` CI/Pages and identity checks succeed |
-| Authoritative spec | `ACTOR_REFACTOR_PLAN.md`, revision 1.3 |
-| Spec SHA256 | `C38A3791C4C0B44677325797110BD283AB0D0580E103952C2F2DEAD6839618B2` |
+| Authoritative spec | `ACTOR_REFACTOR_PLAN.md`, revision 1.4 |
+| Spec SHA256 | `63D9BF2CA2568D1CC71DEDDAA5A16B252676F8625035B9493B93149C5D51562D` |
 | Performance authorization spec commit | `5ff6447d2acaa04ab8c406970c2a6b81e8ccd94f` (revision 1.2) |
-| Final procedural spec commit | `e924d4d4e1d500bafa55ea314ecd23cfc042eea4` (revision 1.3) |
+| Final procedural spec commit | `242e7e5dd19eebd47d5ed7d91e0e295b8f642d64` (revision 1.4) |
 | Refactor base | `71089c0a2867a75dc79aa2c340213f4e3845b6e3` |
 | Overturned acceptance | `994c49b51f47255bdcd9cdc3308a5a554f37588b` |
 | Previous implementation checkpoint | `3287b6a775e6c9fe7a0bcecfe134fc94b6d6634d` |
@@ -41,6 +44,10 @@ Pages gates. Source-evidence checks cannot be substituted for those gates.
 | Current Guard production fix | `45e6703` (`Fix-Checkpoint: F09-FIX`) |
 | Current verification checkpoint | `f117871` (`Fix-Checkpoint: F09-TEST`) and `ddce09b` (`Fix-Checkpoint: F09-EVIDENCE`) |
 | Stress/performance artifact source | `f1178712bf108d113db7a345f53d3a9e9e0d113b` |
+| Overturned F09 FINAL | `5925c02f76a7a905d714900b1e16a907ada2f73f` |
+| F10 RED tests | `807d2a553c7f87567d36a4f2e8cc1e490d09121f` (`Fix-Checkpoint: F10-RED`) |
+| F10 production source | `2aea276aeb59b4cb05fd59cb1a3598ca18a5ed5d` (`Fix-Checkpoint: F10-HEARTBEAT`) |
+| F10 evidence source | `043966e041e294b996a279215277d494b34e1702` (`Fix-Checkpoint: F10-TEST`) |
 | Exact preceding FINAL checkpoint | `ac942a87cd1f1fd78b5486bc29660361c7af380e` (CI `29648788642`, Pages `29648788648`, both SUCCESS; historical) |
 | Final manifest commit | `SELF`, resolved by the first-parent FINAL trailer below |
 | Final delivery HEAD | `SELF`, the first-parent commit carrying `Fix-Checkpoint: FINAL` |
@@ -89,11 +96,13 @@ repository commit merely to copy run IDs into this manifest.
 | Superseded epoch-retirement correction | `d6b9296`, `f290981`, `721cbe8` | Earlier deterministic publication-race correction; reopened by the final fatal-reason review |
 | Reopened fatal-reason FINAL | `d4d6c97`, `a987c16`, `da8854e`, `24af0dc`, `5bcc768`, `bc6990a`, `96b7b98`, `d38bfc6` | Reopened: final review found an unresolved runtime-fatal fallback, owner reason override, and no-error deferred Push drain |
 | Current fatal-reason correction | `ee077cc`, `12ea212`, `3589a09`, `dade830`, `a8402a4` | Deterministic RED edges, resolver owner selection, resolver-only Guard fallback, complete deferred abandon drain, and exact-source heavy verification |
-| F09 fatal publication correction | `19d6d74`, `f0d9ce7`, `45e6703`, `f117871`, `ddce09b` | Guard stale-None RED/REEN, diagnostics and epoch isolation, standalone Push/handle single-writer evidence, stress/performance/package/docs verification |
+| F09 fatal publication correction | `19d6d74`, `f0d9ce7`, `45e6703`, `f117871`, `ddce09b`, `ee5a995` | Guard stale-None RED/REEN, diagnostics and epoch isolation, standalone Push/handle single-writer evidence, stress/performance/package/docs verification and correction evidence record |
+| Overturned F09 FINAL | `5925c02` | Reopened by F10 deterministic Push/Guard races and a clean full-suite heartbeat measurement failure |
+| F10 correction | `242e7e5`, `807d2a5`, `6c344d4`, `2aea276`, `043966e` | Revision 1.4 spec identity, deterministic RED proof, Push/Guard repair, heartbeat business-window repair, correctness/stress evidence |
 | FINAL manifest | `SELF` | Permanent result plus temporary progress-ledger deletion; exact-SHA CI/Pages resolved after push |
 
 This table covers every commit from the original A00-A09 implementation and
-every correction-cycle commit from `994c49b` through `a8402a4`. All were
+every correction-cycle commit through the F10 evidence source. All were
 appended and pushed normally; no published commit was amended, rebased or
 force-pushed.
 
@@ -672,6 +681,54 @@ The historical Actor-vs-legacy performance exception remains exactly
 **FAIL, user-approved exception**. The F09 campaign does not reclassify that
 exception as PASS and does not introduce another exception. The performance
 producer workload SHA is `b09ab7130752ae0c562b63ba04d2b1bea42f1e168c060f13d6e86e9bba277b84`.
+
+## F10 Current Delivery Evidence
+
+The previous F09 `SELF=5925c02` FINAL/CLEAN statement is invalid. The F10
+production source is `2aea276aeb59b4cb05fd59cb1a3598ca18a5ed5d`; the clean
+checkpoint used to declare the immutable performance campaign is
+`043966e041e294b996a279215277d494b34e1702`. The final documentation-only
+delivery commit is `SELF` and does not change production source.
+
+### Deterministic corrections
+
+- `807d2a5` contains behavior-only RED tests. On unchanged production source
+  `45e6703`, all three failed in 0.83s for the required reasons: owner normal
+  close overwrote a standalone Actor fatal with `None`; Guard returned an old
+  epoch fatal; and the stress server had no phase-scoped business window.
+- `6c344d4` makes normal `PushBuffer.publish_close(None)` skip the error slot.
+  A non-None fatal remains the only possible slot write, so a stale normal
+  close cannot overwrite it and the Actor fatal path still takes no Push
+  condition or new shared application lock.
+- `6c344d4` also snapshots `PoolRuntimeGuard._publication_snapshot` by object
+  identity. Every non-None lock-free result returns only if that exact object
+  is still current; otherwise the existing Guard-locked slow path rereads and
+  resolves the complete current epoch snapshot. Guard -> resolver lock order
+  is unchanged.
+- `2aea276` gives each timed heartbeat phase a unique ID, exact starting
+  business-request count and target. The server opens the measurement window
+  on the first phase request and closes it immediately after sending the final
+  phase response. A legal heartbeat before the disable fence remains visible
+  in total observation but is excluded from business-window counts.
+
+| Gate | Result | Artifact / identity |
+| --- | --- | --- |
+| F10 RED/REEN | RED `3 failed in 0.83s`; GREEN `3 passed in 0.25s`; Push/retirement focus `55 passed in 0.56s` | RED `807d2a5`; production fixes `6c344d4`, `2aea276` |
+| New tests, 20 independent processes | 60/60 cases PASS, no failed process | `C:\Users\ax\Desktop\eltdx\eltdx-src\artifacts\actor-f10-20proc-2aea276.log`, SHA256 `DC3BCECE67A8802E67CB0417C48659F6BDCD556CFE422564B3F32C23646826AC` |
+| Targeted Push/Guard/heartbeat/retirement/lifecycle/stress | `260 passed in 253.39s` | exact source `2aea276`; no retry |
+| Complete pytest from zero | `649 passed in 252.70s (0:04:12)` | Windows 11, Python 3.12.6; no result splicing or retry |
+| 10k generations / 100k requests stress | PASS; unique 10,000/100,000; duplicate/missing/unexpected/cross-request/cross-generation all 0; max active 4; leases/waiters/pins/frames/bytes/Actor threads 0; owned resources closed; resources `191,191,191,191,191,191,191,191`, plateau=true | `C:\Users\ax\Desktop\eltdx\eltdx-src\artifacts\actor-stress-f10-2aea276.json`, 744,497 bytes, SHA256 `17A2FBBD54BE04E9F609200A74490F0D7C5757D653CB1A7D78B31F642B18A70A` |
+| Heartbeat hard gate | PASS; both business-window totals 0; throughput ratio `1.005572`; 35,232 unique responses and all ownership counters 0 | same stress artifact; 32 unique timed phase IDs, exact start/target counters |
+| Close/resource hard gates | PASS; idle/loaded p99 `2.5561/2.7937ms`; idle CPU ratio 0; every measured resource sample 191 | same stress artifact |
+| Paired performance campaign | **FAIL, user-approved exception**; exact 8-cell ABBA+BAAB, attempt=1, `errors=[]`; sequential ratio `0.943299`, saturated ratio `0.942391`; sequential p50/p99 PASS, no-backlog p50 PASS and p99 FAIL | `C:\Users\ax\Desktop\eltdx\eltdx-src\artifacts\perf-f10-043966e`, 11 files / 99,990,158 bytes; declaration canonical SHA256 `cbb644f1104a606bc4c4103b3fe01c8fec872ad26bb448d8fd67f1a099c5973d`; bundle SHA256 `B1E4930BE5CF4A7CB421C015DE48AD4E2521860D67865E7C53C7D85266DBE3D3`; verification report SHA256 `64FD696DE85154ECD3B0C5A0FBF614DBB38D25AC23C474B462409985C98F5D8E`; canonical 11-file manifest SHA256 `6560AA2A95B0A476AD5A97006F907672CE797298FDC8963B3C51126EE48B0F16` |
+| Package artifacts | PASS; `python -m build` and `python -m twine check dist/*` | wheel 313,645 bytes, SHA256 `F899A9CC317DA91E12ACBBB72DC655E89967162FDFC5A5D9B1006FF5F85BA307`; sdist 379,730 bytes, SHA256 `63CA8F2CC903BBDC3657762C3F50665DAF4FD60B39030803EC7BC942D63849A6` |
+| MkDocs strict | PASS in 3.00s; 126 files, 5,685,815 bytes | command: `python -m mkdocs build --strict` |
+
+The F10 formal campaign retains the historical verdict exactly as **FAIL,
+user-approved exception**. Its failed comparison gates are not reclassified,
+no new exception was added, and no trial, threshold, sample count or raw datum
+was replaced. The F10 races and measurement-only change do not alter the
+revision 1.2 architecture authorization.
 
 ## Historical Delivery Evidence
 
