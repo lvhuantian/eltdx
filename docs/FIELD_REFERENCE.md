@@ -331,13 +331,32 @@ K 线响应和单根 K 线。
 | `stats_refreshed` | 本次是否重新下载统计文件 |
 | `alignment_status` | 同日、上一交易日或个股行无法对齐状态 |
 | `limit_status` | 当前封板、触板、未涨停或未知状态 |
-| `beta_60d` / `pe_ttm` | 60 日 Beta / 滚动市盈率 |
-| `free_float_shares` / `free_float_market_value` | 流通股本Z / 流通市值Z |
-| `open_turnover_z` | 开盘换手Z |
-| `open_prev_amount_ratio` / `auction_prev_volume_ratio` | 开盘昨比 / 竞价昨比 |
-| `open_prev_seal_ratio` / `seal_prev_ratio` | 开盘昨封比 / 封昨比 |
-| `seal_to_float_ratio` | 封流比 |
-| `limit_board_text` / `ladder_level` | 几天几板 / 当前连板高度 |
+
+下面是固定的 21 个指标字段。字段名中的 `Z` 表示 TDX 自由流通口径，不是 Z-score；完整计算公式和日期对齐规则见[短线指标](helpers/短线指标.md)。
+
+| 字段 | 中文名称 | 业务含义 | 单位 |
+| --- | --- | --- | --- |
+| `beta_60d` | 近 60 日 Beta | 近 60 日股价相对 TDX 资源所用市场基准的波动敏感度 | 无量纲 |
+| `pe_ttm` | 滚动市盈率 | 当前估值相对最近 12 个月利润的倍数 | 倍 |
+| `free_float_shares` | 流通股本Z | TDX 自由流通口径下可交易的股份数量 | 股 |
+| `prev_amount` | 昨成交额 | 上一实际交易日全天成交金额 | 元 |
+| `prev_seal_amount` | 昨封单额 | 上一实际交易日记录的涨停封单金额 | 元 |
+| `prev2_seal_amount` | 前两日封单额 | 前第二个实际交易日记录的涨停封单金额 | 元 |
+| `prev_open_volume_hand` | 昨开盘成交量 | 上一实际交易日 09:25 集合竞价成交量 | 手 |
+| `prev_open_amount` | 昨开盘金额 | 上一实际交易日 09:25 集合竞价成交金额 | 元 |
+| `limit_stat_days` | 涨停统计窗口 | “几天几板”使用的统计天数 | 天 |
+| `limit_up_count_in_stat_days` | 统计期涨停次数 | 统计窗口内记录的涨停次数 | 次 |
+| `limit_up_streak_days` | 文件连板天数 | 统计文件日期当时记录的连续涨停天数 | 天 |
+| `year_limit_up_days` | 年内涨停天数 | 截至统计文件日期记录的当年累计涨停天数 | 天 |
+| `free_float_market_value` | 流通市值Z | 自由流通股本按当前价计算的市值 | 元 |
+| `open_turnover_z` | 开盘换手Z | 09:25 竞价成交量占自由流通股本的比例 | % |
+| `open_prev_amount_ratio` | 开盘昨比 | 今日竞价成交额占昨日全天成交额的比例 | % |
+| `auction_prev_volume_ratio` | 竞价昨比 | 今日竞价成交量相对昨日竞价成交量的倍数 | 倍 |
+| `open_prev_seal_ratio` | 开盘昨封比 | 今日竞价成交额占昨日涨停封单额的比例 | % |
+| `seal_to_float_ratio` | 封流比 | 当前买一金额占自由流通市值的比例；封单解读需确认当前已封板 | % |
+| `seal_prev_ratio` | 封昨比（昨封比） | 当前买一金额相对昨日涨停封单额的倍数；封单解读需确认当前已封板 | 倍 |
+| `limit_board_text` | 几天几板 | 统计窗口和窗口内涨停次数组成的文本 | 文本 |
+| `ladder_level` | 当前连板高度 | 当前连续封住涨停的板数；未封板时为 `None` | 板 |
 
 ## 缓存口径
 

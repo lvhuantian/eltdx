@@ -198,6 +198,38 @@ def test_file_resource_catalog_documents_download_and_stats_parsing() -> None:
     assert all(name in method_doc for name in ("tdxstat.cfg", "tdxstat2.cfg", "free_float_shares_10k", "open_amount_10k"))
 
 
+def test_shortline_indicator_docs_explain_all_field_meanings() -> None:
+    doc = (REPO_ROOT / "docs" / "helpers" / "短线指标.md").read_text(encoding="utf-8")
+    fields = {
+        "beta_60d",
+        "pe_ttm",
+        "free_float_shares",
+        "prev_amount",
+        "prev_seal_amount",
+        "prev2_seal_amount",
+        "prev_open_volume_hand",
+        "prev_open_amount",
+        "limit_stat_days",
+        "limit_up_count_in_stat_days",
+        "limit_up_streak_days",
+        "year_limit_up_days",
+        "free_float_market_value",
+        "open_turnover_z",
+        "open_prev_amount_ratio",
+        "auction_prev_volume_ratio",
+        "open_prev_seal_ratio",
+        "seal_to_float_ratio",
+        "seal_prev_ratio",
+        "limit_board_text",
+        "ladder_level",
+    }
+
+    assert all(f"`{field}`" in doc for field in fields)
+    assert all(heading in doc for heading in ("中文名称", "业务含义", "单位"))
+    assert "不是统计学里的 Z-score" in doc
+    assert "必须结合 `limit_status` 使用" in doc
+
+
 def test_pages_remains_static_and_outside_runtime_dependencies() -> None:
     app = (REPO_ROOT / "docs" / "assets" / "interface-catalog.js").read_text(encoding="utf-8")
     pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
