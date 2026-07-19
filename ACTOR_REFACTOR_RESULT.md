@@ -13,9 +13,12 @@ review found unresolved Guard selection and no-error deferred-drain edges. The
 F09 FINAL at `5925c02` was overturned on 2026-07-19: deterministic tests proved
 that standalone normal close could overwrite an Actor fatal, Guard could return
 an old-epoch fatal, and the full suite exposed an over-wide heartbeat counter.
-The reviewed F10 production correction is frozen at `2aea276`; delivery becomes COMPLETE
-only after the final `SELF` documentation commit passes its own exact CI and
-Pages gates. Source-evidence checks cannot be substituted for those gates.
+The reviewed F10 runtime production source is frozen at
+`6abbaf5273aace450972f6e99fe44a8f05307812`; the R5 heartbeat measurement
+source is frozen at `f12701f1efed66f70cd267c1c63fbc2d38f96b1d`.
+Delivery becomes COMPLETE only after the final `SELF` documentation commit
+passes its own exact CI and Pages gates. Source-evidence checks cannot be
+substituted for those gates.
 
 ## Delivery Identity
 
