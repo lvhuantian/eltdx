@@ -6,7 +6,7 @@ from datetime import date
 import pytest
 
 from eltdx.exceptions import ProtocolError, UnsupportedCommandError
-from eltdx.protocol.commands import build_command_frame, parse_command_response
+from eltdx.protocol.commands import COMMANDS, CommandSpec, build_command_frame, parse_command_response
 from eltdx.protocol.commands.security import parse_security_list_payload
 from eltdx.protocol.constants import (
     TYPE_AUCTION_SERIES,
@@ -39,6 +39,17 @@ def test_request_frame_bytes_match_7709_header() -> None:
     frame = RequestFrame(msg_id=123, msg_type=TYPE_SECURITY_COUNT, data=bytes.fromhex("0000a7263501"))
 
     assert frame.to_bytes().hex() == "0c7b00000001080008004e040000a7263501"
+
+
+def test_all_current_7709_queries_explicitly_allow_one_safe_retry() -> None:
+    assert COMMANDS
+    assert all(spec.retry_safe is True for spec in COMMANDS.values())
+
+
+def test_legacy_six_argument_command_spec_defaults_to_non_retryable() -> None:
+    spec = CommandSpec(0x1234, "legacy", "legacy", "query", False, "legacy.md")
+
+    assert spec.retry_safe is False
 
 
 def test_builds_first_migrated_7709_commands() -> None:

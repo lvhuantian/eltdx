@@ -51,11 +51,28 @@ TdxClient(heartbeat_interval=None)
 | --- | --- | --- |
 | `host` | `None` | 指定单个 7709 主站 |
 | `hosts` | `None` | 指定多个 7709 主站 |
-| `timeout` | `8.0` | 单次 socket 请求等待秒数 |
-| `pool_size` | `1` | 连接池连接数 |
+| `timeout` | `8.0` | 数字 IP 或已缓存 endpoint 的端到端请求上限，覆盖排队、连接、握手、发送、响应和一次 retry |
+| `pool_size` | `1` | 连接池连接数，必须是正整数 |
 | `batch_size` | `80` | `get_quote()` 自动拆批大小 |
 | `probe_hosts` | `False` | 启动时是否先测速排序 |
 | `heartbeat_interval` | `30.0` | 后台心跳秒数；`None` 或小于等于 0 表示关闭 |
+| `max_pending_requests` | `256` | pool 中等待空闲 slot 的最大请求数；满时抛 `PoolBusyError` |
+| `push_queue_size` | `1024` | 共享 push buffer 的最大帧数 |
+| `push_queue_bytes` | `8 * 1024 * 1024` | 共享 push buffer 的最大 wire bytes |
+
+自定义 hostname 的首次 DNS 解析在 Actor 外执行，标准库解析无法严格取消；它不占用 pool slot 或 TCP 连接，解析结束后会重新检查 transport epoch。数字 IP 和已缓存 endpoint 没有该例外。
+
+`pool_size=N` 表示最多 N 个 Actor、N 个 TCP socket 和 N 个业务 wire request 同时在途。`N` 必须是正整数，非法值会直接抛出 `ValueError`，不会被自动修改。请求在全池 FIFO admission 中等待空闲 slot，由 lease 调度给首个空闲 slot，不会继续堆到慢连接后面。
+
+多请求必须固定在同一连接时可使用 pin：
+
+```python
+with client.transport.pin() as pinned:
+    first = pinned.execute(0x06B9, {"path": "zhb.zip", "offset": 0, "size": 30000})
+    second = pinned.execute(0x06B9, {"path": "zhb.zip", "offset": 30000, "size": 30000})
+```
+
+pin context 独占一个 slot；context 退出或 proxy `close()` 会取消未完成 wire request 并归还 lease。它不会关闭共享 pool，也不能在 pool close/reopen 后继续使用。
 
 ## 便捷兼容方法
 
@@ -359,6 +376,8 @@ frame = client.quotes.poll_push(timeout=0.5)
 event = client.quotes.poll_push(timeout=0.5, parse=True)
 ```
 
+push queue 同时受帧数和字节数限制。满时会丢弃最旧帧以保留最新行情，并在下一次 `poll_push()` 或 `drain_pushes()` 抛出一次 `PushOverflowError`；捕获后继续读取即可，异常消息包含累计丢弃数。
+
 ### `drain_pushes(parse=False)`
 
 取出当前队列里已经收到的全部推送帧。
@@ -366,6 +385,8 @@ event = client.quotes.poll_push(timeout=0.5, parse=True)
 ```python
 frames = client.quotes.drain_pushes()
 ```
+
+`close()` 成功返回时旧 Actor、TCP socket、selector、wakeup、ticket、waiter 和 lease 都已结束。若 1 秒内无法证明完成，会抛 `TransportCloseTimeoutError` 并进入 failed-closed 状态；请创建新的 `TdxClient`，不要复用该实例。
 
 ## `client.resources`
 

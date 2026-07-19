@@ -22,8 +22,8 @@
 | 模块 | 位置 |
 | --- | --- |
 | 二进制帧构造和解析 | `src/eltdx/protocol/frame.py` |
-| socket 连接、reader、pending 响应配对、push queue、后台心跳 | `src/eltdx/transport/socket.py` |
-| 连接池和 round-robin 分发 | `src/eltdx/transport/pool.py` |
+| socket 门面、Actor 请求入口和诊断快照 | `src/eltdx/transport/socket.py` |
+| FIFO 连接池和 lease 调度 | `src/eltdx/transport/pool.py` |
 | 主站列表和 TCP 测速 | `src/eltdx/hosts.py` |
 
 验收标准：
@@ -32,7 +32,7 @@
 - 可以握手。已完成。
 - 可以心跳。已完成。
 - 可以发送命令并校验 `msg_id` 和 `msg_type`。已完成。
-- 可以使用连接池 round-robin 分发请求。已完成。
+- `pool_size=N` 创建 N 个连接槽位，请求通过全池 FIFO admission 分配给首个空闲 slot。已完成。
 - 可以在启动前按 TCP 连接延迟排序主站。已完成。
 - 推送类接口已经有 reader / push queue 首版。
 
@@ -93,9 +93,9 @@
 
 已完成：
 
-- reader 线程：持续读取响应帧。
-- pending map：普通请求按 `msg_id + msg_type` 配对。
-- push queue：`msg_id=0` 或未配对推送帧进入独立队列。
+- `ConnectionActor`：每个连接槽位由一个长期单线程 Actor 独占非阻塞 socket，并负责收发、配对和心跳。
+- 请求配对：响应同时校验 runtime epoch、TCP generation、socket identity、lease、`msg_id` 和 `msg_type`。
+- 有界 push buffer：`msg_id=0` 或未配对推送帧进入 pool epoch 共享队列，溢出时显式报告 gap。
 
 对外读取方法：
 

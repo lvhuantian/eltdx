@@ -72,6 +72,7 @@ nav:
   - 工程参考:
       - 架构: ARCHITECTURE.md
       - 调试: DEBUG_GUIDE.md
+      - 变更记录: CHANGELOG.md
       - 字段迁移: FIELD_MIGRATION.md
       - 历史迁移: MIGRATION_FROM_OLD.md
       - 版本升级: UPDATE_FROM_0_5_1.md

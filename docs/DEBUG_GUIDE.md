@@ -64,7 +64,7 @@ client = TdxClient(heartbeat_interval=60)
 client = TdxClient(heartbeat_interval=None)
 ```
 
-程序需要创建较多客户端实例时，使用 `with TdxClient(...) as client:` 自动关闭连接和后台线程。
+程序需要创建较多客户端实例时，使用 `with TdxClient(...) as client:` 自动关闭 Actor、TCP socket、selector 和 wakeup。心跳由 Actor timer 驱动，不会额外创建 heartbeat 线程。
 
 ## 请求超时
 
@@ -73,7 +73,7 @@ client = TdxClient(heartbeat_interval=None)
 | 现象 | 处理 |
 | --- | --- |
 | 第一次请求就超时 | 换主站或打开 `probe_hosts=True` |
-| 偶发超时 | 增大 `timeout`，例如 `timeout=8` |
+| 偶发超时 | 查看异常中的 `queue`、`connect`、`handshake`、`send` 或 `response` 阶段，再决定是否增大 `timeout` |
 | 长时间运行后超时 | 确认没有忘记关闭旧客户端，必要时降低连接池数量 |
 
 ## 字段对不上
@@ -114,3 +114,26 @@ with TdxClient(timeout=3) as client:
 ```
 
 主动查询可以直接使用 `client.quotes.refresh()`，服务端主动推送帧可以通过 `poll_push()` / `drain_pushes()` 读取。
+
+如果读取时收到 `PushOverflowError`，说明有界 buffer 已丢弃旧帧并留下 gap。记录异常中的累计丢弃数，然后继续 `drain_pushes()`；不要把它当作普通空队列处理。
+
+## Actor 诊断
+
+真实 transport 提供只读诊断快照，不会触发网络 I/O：
+
+```python
+with TdxClient(pool_size=4, timeout=3) as client:
+    snapshot = client.transport.diagnostics
+    print(snapshot.state, snapshot.epoch)
+    print(snapshot.broker)
+    for actor in snapshot.actors:
+        print(actor.runtime_epoch, actor.tcp_generation, actor.pending_depth, actor.reconnect_count)
+```
+
+单连接 `SocketTransport` 的 `diagnostics` 包含 Actor snapshot 和 push frame/byte/drop 计数；pool snapshot 还包含 FIFO waiter、active lease 和所有 slot Actor。`stale_event_count` 应保持为 0。发生 Actor fatal 时 pool 会 fail-closed，push poller 会收到对应 `TransportError`，并且需要关闭旧 client 后创建新实例。
+
+fatal publication 一旦发生，epoch sticky resolver 先确定 exact exception object；push terminal/error 优先于已经缓冲或正在 pop/copy 的 frame，旧 epoch 数据不会在错误之后继续可见。Broker diagnostics 在任一 owner 取得 condition 并观察到 retirement 后应显示 waiter、pin waiter、active lease 和 idle slot 都已 drain；Push diagnostics 应显示 frame/bytes 为 0。若第一次 `close()` 因内部 condition 被占用而抛 `TransportCloseTimeoutError`，释放占用后应重试同一个 `close()`，以完成保留 runtime、Broker 和 PushBuffer 的实际清理。正常 `publish_close(None)` 不触发 fatal lazy drain，已有缓冲仍可按序消费。
+
+## Close And Reopen
+
+正常 close 后可在同一实例上再次 `connect()` 或发起业务请求，系统会创建新 runtime epoch。`TransportCloseTimeoutError` 不是普通超时：旧 runtime 仍被保留以便诊断，实例进入 `FAILED_CLOSING` / `FAILED_CLOSED`，不能 reopen。检查 thread dump、`diagnostics` 和 socket 资源后创建新 client。
